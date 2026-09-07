@@ -95,6 +95,38 @@ _perch() {
     return
   fi
 
+  if (( pos >= 3 )) && [[ "$cmdline[2]" == wt ]]; then
+    local -a wt_words
+    local word reads_options=1 positionals=0 has_no_switch=0
+    if (( pos > 3 )); then
+      wt_words=("${(@)cmdline[3,pos-1]}")
+    fi
+    for word in "${(@)wt_words}"; do
+      if (( reads_options )) && [[ "$word" == -- ]]; then
+        reads_options=0
+      elif (( reads_options )) && [[ "$word" == --no-switch ]]; then
+        has_no_switch=1
+      elif (( reads_options && positionals == 0 )) && [[ "$word" == (ls|rm|list|remove) ]]; then
+        return
+      else
+        (( positionals += 1 ))
+      fi
+    done
+
+    if (( positionals == 0 )); then
+      if (( reads_options )); then
+        _describe -t subverbs 'worktree subverb' worktree_subs
+      fi
+      _perch_offers branches 'branch' wt "${(@)wt_words}"
+    elif (( positionals == 1 )); then
+      _perch_offers branches 'branch' wt "${(@)wt_words}"
+    fi
+    if (( reads_options && ! has_no_switch && positionals <= 2 )); then
+      _describe -t options 'option' worktree_options
+    fi
+    return
+  fi
+
   # `--` ends parsing, but only where the dispatcher still has a branch left to
   # read: `perch --`, `perch br --`, `perch wt --`. Past `perch wt ls`, or a
   # branch the dispatcher has already taken, the words after `--` go nowhere.
@@ -109,16 +141,6 @@ _perch() {
   elif (( pos == 2 )); then
     _describe -t subcommands 'subcommand' subcommands
     _perch_offers branches 'branch'
-  elif (( pos == 3 )) && [[ "$cmdline[2]" == wt ]]; then
-    _describe -t subverbs 'worktree subverb' worktree_subs
-    _describe -t options 'option' worktree_options
-    _perch_offers branches 'branch' wt
-  elif (( pos == 4 )) && [[ "$cmdline[2]" == wt ]]; then
-    if [[ "$cmdline[3]" == --no-switch ]]; then
-      _perch_offers branches 'branch' wt --no-switch
-    elif [[ "$cmdline[3]" != (ls|rm|list|remove|--) ]]; then
-      _describe -t options 'option' worktree_options
-    fi
   # `br` reads `rm` before a branch name.
   elif (( pos == 3 )) && [[ "$cmdline[2]" == br ]]; then
     _describe -t subverbs 'branch subverb' branch_subs

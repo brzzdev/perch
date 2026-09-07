@@ -75,9 +75,10 @@ pub(crate) fn run_invocation(invocation: Invocation) -> AppResult<()> {
         Invocation::Navigate(Navigation::Go(target)) => run(target.as_deref()),
         Invocation::Navigate(Navigation::Here(target)) => run_br(target.as_deref()),
         Invocation::Navigate(Navigation::Worktree {
+            worktree_name,
             target,
             shell_handoff,
-        }) => wt::run(target.as_deref(), shell_handoff),
+        }) => wt::run(worktree_name.as_deref(), target.as_deref(), shell_handoff),
         Invocation::RemoveBranches(removal) => br::run_rm(&removal),
         Invocation::ListWorktrees => wt::run_ls(),
         Invocation::RemoveWorktrees(removal) => wt::run_rm(&removal),

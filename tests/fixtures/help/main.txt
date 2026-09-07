@@ -1,6 +1,8 @@
 Usage: perch [<branch>]       Go to the branch, wherever it lives
        perch br [<branch>]    Check the branch out here
        perch wt [<branch>]    Give the branch its own worktree
+       perch wt <name> <branch>
+                                  Use a custom worktree directory name
 
        perch .                Refresh the current branch from its remote
        perch -- <branch>      Go to a branch named br/wt

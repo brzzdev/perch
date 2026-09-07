@@ -113,6 +113,38 @@ _perch_completions() {
     return
   fi
 
+  if [[ "$verb" == "wt" ]] && (( pos >= 2 )); then
+    local -a wt_words=("${cmdline[@]:2:pos-2}")
+    local word reads_options=1 positionals=0 has_no_switch=0
+    for word in "${wt_words[@]}"; do
+      if (( reads_options )) && [[ "$word" == "--" ]]; then
+        reads_options=0
+      elif (( reads_options )) && [[ "$word" == "--no-switch" ]]; then
+        has_no_switch=1
+      elif (( reads_options && positionals == 0 )) &&
+        [[ "$word" == "ls" || "$word" == "rm" || "$word" == "list" || "$word" == "remove" ]]; then
+        return
+      else
+        (( positionals += 1 ))
+      fi
+    done
+
+    COMPREPLY=()
+    if (( positionals == 0 )); then
+      if (( reads_options )); then
+        _perch_reply "$cur" < <(printf '%s\n' ls rm; _perch_offers wt "${wt_words[@]}")
+      else
+        _perch_reply "$cur" < <(_perch_offers wt "${wt_words[@]}")
+      fi
+    elif (( positionals == 1 )); then
+      _perch_reply "$cur" < <(_perch_offers wt "${wt_words[@]}")
+    fi
+    if (( reads_options && ! has_no_switch && positionals <= 2 )); then
+      _perch_reply "$cur" < <(printf '%s\n' --no-switch)
+    fi
+    return
+  fi
+
   # `--` ends parsing, but only where the dispatcher still has a branch left to
   # read: `perch --`, `perch br --`, `perch wt --`. Past `perch wt ls`, or a
   # branch the dispatcher has already taken, the words after `--` go nowhere.
@@ -137,21 +169,8 @@ _perch_completions() {
     # target by here, and the dispatcher ignores whatever follows it.
     2)
       COMPREPLY=()
-      if [[ "$verb" == "wt" ]]; then
-        _perch_reply "$cur" < <(printf '%s\n' ls rm --no-switch; _perch_offers wt)
-      elif [[ "$verb" == "br" ]]; then
+      if [[ "$verb" == "br" ]]; then
         _perch_reply "$cur" < <(printf '%s\n' rm; _perch_offers br)
-      fi
-      ;;
-    3)
-      COMPREPLY=()
-      if [[ "$verb" == "wt" && "$subverb" == "--no-switch" ]]; then
-        _perch_reply "$cur" < <(_perch_offers wt --no-switch)
-      elif [[ "$verb" == "wt" ]]; then
-        case "$subverb" in
-          ls | rm | list | remove) ;;
-          *) _perch_reply "$cur" < <(printf '%s\n' --no-switch) ;;
-        esac
       fi
       ;;
   esac

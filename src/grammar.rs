@@ -298,6 +298,9 @@ fn parse_worktree(args: &[String]) -> Result<Invocation, GrammarError> {
         Some("--") => {
             parse_worktree_navigation(&remaining[1..], shell_handoff, Position::Unfiltered)
         }
+        Some(option) if option.starts_with('-') => Err(GrammarError::worktree_navigation(format!(
+            "unknown option '{option}'"
+        ))),
         Some(word) => match parse_worktree_subverb(word) {
             Some(_) if shell_handoff == ShellHandoff::Suppress => {
                 Err(GrammarError::no_switch_with_subverb(word.to_string()))
@@ -324,6 +327,12 @@ fn parse_worktree_navigation(
         [worktree_name, target] if target.as_str() == "--complete" => {
             WorktreeDirectoryName::parse(worktree_name)?;
             Ok(branch_completion(Position::Unfiltered))
+        }
+        [branch, ignored_no_switch]
+            if completion_position == Position::Unfiltered
+                && ignored_no_switch.as_str() == "--no-switch" =>
+        {
+            Ok(worktree_navigation(None, Some(branch), shell_handoff))
         }
         [worktree_name, target] => {
             let worktree_name = WorktreeDirectoryName::parse(worktree_name)?;
@@ -540,6 +549,52 @@ mod tests {
                 target: Some("topic".into()),
                 shell_handoff: ShellHandoff::Emit,
             }))
+        );
+    }
+
+    #[test]
+    fn worktree_navigation_escape_accepts_an_option_looking_directory_name() {
+        assert_eq!(
+            parse(&args(&["wt", "--", "--noswitch", "topic"])),
+            Ok(Invocation::Navigate(Navigation::Worktree {
+                worktree_name: Some(WorktreeDirectoryName("--noswitch".into())),
+                target: Some("topic".into()),
+                shell_handoff: ShellHandoff::Emit,
+            }))
+        );
+    }
+
+    #[test]
+    fn worktree_navigation_escape_ignores_a_trailing_no_switch() {
+        assert_eq!(
+            parse(&args(&["wt", "--", "topic", "--no-switch"])),
+            Ok(Invocation::Navigate(Navigation::Worktree {
+                worktree_name: None,
+                target: Some("topic".into()),
+                shell_handoff: ShellHandoff::Emit,
+            }))
+        );
+    }
+
+    #[test]
+    fn worktree_navigation_escape_keeps_other_option_looking_words_as_branches() {
+        assert_eq!(
+            parse(&args(&["wt", "--", "short", "--typo"])),
+            Ok(Invocation::Navigate(Navigation::Worktree {
+                worktree_name: Some(WorktreeDirectoryName("short".into())),
+                target: Some("--typo".into()),
+                shell_handoff: ShellHandoff::Emit,
+            }))
+        );
+    }
+
+    #[test]
+    fn worktree_navigation_rejects_an_unknown_option_before_the_name() {
+        let error = parse(&args(&["wt", "--noswitch", "topic"])).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "invalid `perch wt` invocation: unknown option '--noswitch'"
         );
     }
 

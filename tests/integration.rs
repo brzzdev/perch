@@ -1851,6 +1851,29 @@ fn wt_escape_allows_a_directory_name_that_matches_a_subverb() {
 }
 
 #[test]
+fn wt_escape_allows_an_option_looking_directory_name() {
+    let (_bare, parent, work) = setup_with_parent();
+    git(&work, &["branch", "feature"]);
+
+    let output = perch_args(&work, &["wt", "--", "--noswitch", "feature"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(parent.path().join("worktrees/repo/--noswitch").is_dir());
+}
+
+#[test]
+fn wt_rejects_an_unknown_option_before_the_directory_name() {
+    let (_bare, parent, work) = setup_with_parent();
+    git(&work, &["branch", "feature"]);
+
+    let output = perch_args(&work, &["wt", "--noswitch", "feature"]);
+
+    assert!(!output.status.success());
+    assert!(stderr_str(&output).contains("unknown option '--noswitch'"));
+    assert!(!parent.path().join("worktrees/repo/--noswitch").exists());
+}
+
+#[test]
 fn wt_rejects_invalid_directory_names_and_a_third_argument() {
     let (_bare, parent, work) = setup_with_parent();
     git(&work, &["branch", "feature"]);
@@ -1974,15 +1997,20 @@ fn wt_no_switch_is_rejected_before_rm() {
 
 #[test]
 fn wt_double_dash_stops_no_switch_option_parsing() {
-    let (_bare, _parent, work) = setup_with_parent();
+    let (_bare, parent, work) = setup_with_parent();
 
     git(&work, &["branch", "feature"]);
-    let output = perch_args(&work, &["wt", "--", "feature", "topic", "--no-switch"]);
-    assert!(
-        !output.status.success(),
-        "an option after `--` must count as an argument"
+    let output = perch_args(&work, &["wt", "--", "feature", "--no-switch"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    let expected = parent.path().join("worktrees/repo/feature");
+    assert_eq!(
+        Path::new(stdout_str(&output).trim())
+            .canonicalize()
+            .unwrap(),
+        expected.canonicalize().unwrap(),
+        "an option after `--` must not suppress the shell handoff"
     );
-    assert!(stderr_str(&output).contains("unexpected extra argument '--no-switch'"));
 }
 
 #[test]

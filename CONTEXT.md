@@ -105,7 +105,7 @@ A word a *Verb* reads before it reads a branch name. `br` reads `rm`; `wt` reads
 _Avoid_: Subcommand (reserved for the *Verb*), flag, option
 
 **Grammar**:
-The rules that decide whether each command word names a *Verb*, *Subverb*, option, or branch. At the top level and after `br` or `wt`, `--` stops command-word reading so the next word names a branch. Inside `wt rm`, it stops option reading so the next word names the target even when it begins with `-`; `br rm` does not accept it. Destructive forms reject duplicate options, unknown options, and extra targets rather than ignoring them.
+The rules that decide whether each command word names a *Verb*, *Subverb*, option, worktree directory, or branch. `--` makes the next word a branch at the top level and after `br`, either a branch or the custom worktree directory that precedes one after `wt`, and a target inside `wt rm`; destructive forms and `wt` creation reject extra targets rather than ignoring them.
 _Avoid_: Dispatch, parsing
 
 **`.`**:

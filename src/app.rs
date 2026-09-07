@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use console::{Key, Term, style};
 use indicatif::ProgressBar;
 
-use crate::grammar::{Invocation, Navigation, Verb};
+use crate::grammar::{Invocation, Navigation, Verb, WorktreeDirectoryName};
 use crate::{AppResult, Error, git};
 
 pub mod br;
@@ -78,7 +78,11 @@ pub(crate) fn run_invocation(invocation: Invocation) -> AppResult<()> {
             worktree_name,
             target,
             shell_handoff,
-        }) => wt::run(worktree_name.as_deref(), target.as_deref(), shell_handoff),
+        }) => wt::run(
+            worktree_name.as_ref().map(WorktreeDirectoryName::as_str),
+            target.as_deref(),
+            shell_handoff,
+        ),
         Invocation::RemoveBranches(removal) => br::run_rm(&removal),
         Invocation::ListWorktrees => wt::run_ls(),
         Invocation::RemoveWorktrees(removal) => wt::run_rm(&removal),

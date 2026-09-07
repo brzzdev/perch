@@ -14,10 +14,28 @@ pub(crate) enum Navigation {
     Go(Option<String>),
     Here(Option<String>),
     Worktree {
-        worktree_name: Option<String>,
+        worktree_name: Option<WorktreeDirectoryName>,
         target: Option<String>,
         shell_handoff: ShellHandoff,
     },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct WorktreeDirectoryName(String);
+
+impl WorktreeDirectoryName {
+    fn parse(name: &str) -> Result<Self, GrammarError> {
+        if name.is_empty() || matches!(name, "." | "..") || name.contains(['/', '\\']) {
+            return Err(GrammarError::worktree_navigation(format!(
+                "invalid worktree name '{name}'; expected one directory name"
+            )));
+        }
+        Ok(Self(name.to_string()))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -98,8 +116,8 @@ pub(crate) enum CompletionSource {
 enum Position {
     Bare,
     Branch,
-    Escaped,
     Removal,
+    Unfiltered,
     Worktree,
 }
 
@@ -108,7 +126,7 @@ impl Position {
         match self {
             Self::Bare => parse_verb(word).is_some(),
             Self::Branch => parse_branch_subverb(word).is_some(),
-            Self::Escaped | Self::Removal => false,
+            Self::Removal | Self::Unfiltered => false,
             Self::Worktree => parse_worktree_subverb(word).is_some(),
         }
     }
@@ -277,7 +295,9 @@ fn parse_worktree(args: &[String]) -> Result<Invocation, GrammarError> {
     match remaining.first().map(|arg| arg.as_str()) {
         Some("--help" | "-h") => Ok(Invocation::Help(HelpPage::Worktree)),
         Some("--complete") => Ok(branch_completion(Position::Worktree)),
-        Some("--") => parse_worktree_navigation(&remaining[1..], shell_handoff, Position::Escaped),
+        Some("--") => {
+            parse_worktree_navigation(&remaining[1..], shell_handoff, Position::Unfiltered)
+        }
         Some(word) => match parse_worktree_subverb(word) {
             Some(_) if shell_handoff == ShellHandoff::Suppress => {
                 Err(GrammarError::no_switch_with_subverb(word.to_string()))
@@ -302,11 +322,11 @@ fn parse_worktree_navigation(
         [target] if target.as_str() == "--complete" => Ok(branch_completion(completion_position)),
         [target] => Ok(worktree_navigation(None, Some(target), shell_handoff)),
         [worktree_name, target] if target.as_str() == "--complete" => {
-            validate_worktree_name(worktree_name)?;
-            Ok(branch_completion(Position::Escaped))
+            WorktreeDirectoryName::parse(worktree_name)?;
+            Ok(branch_completion(Position::Unfiltered))
         }
         [worktree_name, target] => {
-            validate_worktree_name(worktree_name)?;
+            let worktree_name = WorktreeDirectoryName::parse(worktree_name)?;
             Ok(worktree_navigation(
                 Some(worktree_name),
                 Some(target),
@@ -317,15 +337,6 @@ fn parse_worktree_navigation(
             "unexpected extra argument '{extra}'"
         ))),
     }
-}
-
-fn validate_worktree_name(name: &str) -> Result<(), GrammarError> {
-    if name.is_empty() || matches!(name, "." | "..") || name.contains(['/', '\\']) {
-        return Err(GrammarError::worktree_navigation(format!(
-            "invalid worktree name '{name}'; expected one directory name"
-        )));
-    }
-    Ok(())
 }
 
 fn parse_worktree_removal(args: &[&String]) -> Result<Invocation, GrammarError> {
@@ -370,7 +381,7 @@ fn parse_worktree_removal(args: &[&String]) -> Result<Invocation, GrammarError> 
 
 fn parse_escaped(target: Option<&String>, verb: Verb) -> Invocation {
     if target.is_some_and(|word| word == "--complete") {
-        branch_completion(Position::Escaped)
+        branch_completion(Position::Unfiltered)
     } else {
         navigate(verb, target.map(String::as_str))
     }
@@ -390,12 +401,12 @@ fn navigate(verb: Verb, target: Option<&str>) -> Invocation {
 }
 
 fn worktree_navigation(
-    worktree_name: Option<&str>,
+    worktree_name: Option<WorktreeDirectoryName>,
     target: Option<&str>,
     shell_handoff: ShellHandoff,
 ) -> Invocation {
     Invocation::Navigate(Navigation::Worktree {
-        worktree_name: worktree_name.map(str::to_string),
+        worktree_name,
         target: target.map(str::to_string),
         shell_handoff,
     })
@@ -513,7 +524,7 @@ mod tests {
                 "renovate/realm-swiftlint-0.x",
             ])),
             Ok(Invocation::Navigate(Navigation::Worktree {
-                worktree_name: Some("545".into()),
+                worktree_name: Some(WorktreeDirectoryName("545".into())),
                 target: Some("renovate/realm-swiftlint-0.x".into()),
                 shell_handoff: ShellHandoff::Suppress,
             }))
@@ -525,7 +536,7 @@ mod tests {
         assert_eq!(
             parse(&args(&["wt", "--", "rm", "topic"])),
             Ok(Invocation::Navigate(Navigation::Worktree {
-                worktree_name: Some("rm".into()),
+                worktree_name: Some(WorktreeDirectoryName("rm".into())),
                 target: Some("topic".into()),
                 shell_handoff: ShellHandoff::Emit,
             }))

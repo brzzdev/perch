@@ -27,7 +27,7 @@ impl WorktreeDirectoryName {
     fn parse(name: &str) -> Result<Self, GrammarError> {
         if name.is_empty() || matches!(name, "." | "..") || name.contains(['/', '\\']) {
             return Err(GrammarError::worktree_navigation(format!(
-                "invalid worktree name '{name}'; expected one directory name"
+                "invalid worktree directory name '{name}'; expected one directory name"
             )));
         }
         Ok(Self(name.to_string()))
@@ -119,6 +119,21 @@ enum Position {
     Removal,
     Unfiltered,
     Worktree,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Escape {
+    Bare,
+    Escaped,
+}
+
+impl Escape {
+    fn completion_position(self) -> Position {
+        match self {
+            Self::Bare => Position::Worktree,
+            Self::Escaped => Position::Unfiltered,
+        }
+    }
 }
 
 impl Position {
@@ -295,9 +310,7 @@ fn parse_worktree(args: &[String]) -> Result<Invocation, GrammarError> {
     match remaining.first().map(|arg| arg.as_str()) {
         Some("--help" | "-h") => Ok(Invocation::Help(HelpPage::Worktree)),
         Some("--complete") => Ok(branch_completion(Position::Worktree)),
-        Some("--") => {
-            parse_worktree_navigation(&remaining[1..], shell_handoff, Position::Unfiltered)
-        }
+        Some("--") => parse_worktree_navigation(&remaining[1..], shell_handoff, Escape::Escaped),
         Some(option) if option.starts_with('-') => Err(GrammarError::worktree_navigation(format!(
             "unknown option '{option}'"
         ))),
@@ -309,7 +322,7 @@ fn parse_worktree(args: &[String]) -> Result<Invocation, GrammarError> {
             Some(WorktreeSubverb::List) => Err(GrammarError::retired("list", "ls")),
             Some(WorktreeSubverb::Remove) => Err(GrammarError::retired("remove", "rm")),
             Some(WorktreeSubverb::Rm) => parse_worktree_removal(&remaining[1..]),
-            None => parse_worktree_navigation(&remaining, shell_handoff, Position::Worktree),
+            None => parse_worktree_navigation(&remaining, shell_handoff, Escape::Bare),
         },
         None => Ok(worktree_navigation(None, None, shell_handoff)),
     }
@@ -318,19 +331,25 @@ fn parse_worktree(args: &[String]) -> Result<Invocation, GrammarError> {
 fn parse_worktree_navigation(
     args: &[&String],
     shell_handoff: ShellHandoff,
-    completion_position: Position,
+    escape: Escape,
 ) -> Result<Invocation, GrammarError> {
     match args {
         [] => Ok(worktree_navigation(None, None, shell_handoff)),
-        [target] if target.as_str() == "--complete" => Ok(branch_completion(completion_position)),
+        [target] if target.as_str() == "--complete" => {
+            Ok(branch_completion(escape.completion_position()))
+        }
         [target] => Ok(worktree_navigation(None, Some(target), shell_handoff)),
         [worktree_name, target] if target.as_str() == "--complete" => {
             WorktreeDirectoryName::parse(worktree_name)?;
             Ok(branch_completion(Position::Unfiltered))
         }
+        [_, option] if escape == Escape::Bare && option.starts_with('-') => Err(
+            GrammarError::worktree_navigation(format!("unknown option '{option}'")),
+        ),
+        // COMPAT: Before the two-argument form, `--` consumed only the next word.
+        // Preserve the shell handoff for `wt -- <branch> --no-switch`.
         [branch, ignored_no_switch]
-            if completion_position == Position::Unfiltered
-                && ignored_no_switch.as_str() == "--no-switch" =>
+            if escape == Escape::Escaped && ignored_no_switch.as_str() == "--no-switch" =>
         {
             Ok(worktree_navigation(None, Some(branch), shell_handoff))
         }
@@ -481,14 +500,14 @@ const BRANCH_HELP: &str = concat!(
 const WORKTREE_HELP: &str = concat!(
     "Usage: perch wt [<branch>] [--no-switch]\n",
     "                                  Give the branch its own worktree\n",
-    "       perch wt <worktree-name> <branch> [--no-switch]\n",
+    "       perch wt <worktree-directory-name> <branch> [--no-switch]\n",
     "                                  Use a custom worktree directory name\n",
     "       perch wt ls            List worktrees\n",
     "       perch wt rm [<branch>] Remove a worktree (deletes branch if merged)\n",
     "       perch wt rm .          Remove the worktree you're in\n",
     "       perch wt -- <branch>   Worktree a branch named ls/rm/list/remove\n",
-    "       perch wt -- <worktree-name> <branch>\n",
-    "                                  Escape a colliding worktree name\n",
+    "       perch wt -- <worktree-directory-name> <branch>\n",
+    "                                  Escape a colliding worktree directory name\n",
     "\n",
     "Options:\n",
     "      --no-switch  Create or find the worktree without switching to it\n",
@@ -616,7 +635,7 @@ mod tests {
             assert_eq!(
                 error.to_string(),
                 format!(
-                    "invalid `perch wt` invocation: invalid worktree name '{name}'; expected one directory name"
+                    "invalid `perch wt` invocation: invalid worktree directory name '{name}'; expected one directory name"
                 )
             );
         }

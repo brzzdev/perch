@@ -148,9 +148,9 @@ perch wt rm .         # the worktree you're standing in
 perch wt rm . --force # …without being asked about uncommitted work
 ```
 
-Worktrees land at `../worktrees/<repo>/<branch>` relative to the main checkout. Branch names with slashes (`feature/foo`) preserve their structure as subdirectories. Pass a separate worktree name to use one directory below the repository's worktree root instead, such as `../worktrees/<repo>/545`. The name cannot be `.`, `..`, or contain a path separator. If the branch already has a registered worktree, Perch uses its actual path and ignores the requested name.
+Worktrees land at `../worktrees/<repo>/<branch>` relative to the main checkout. Branch names with slashes (`feature/foo`) preserve their structure as subdirectories. Pass a separate worktree directory name to use one directory below the repository's worktree root instead, such as `../worktrees/<repo>/545`. The name cannot be `.`, `..`, or contain a path separator. If the branch already has a registered worktree, Perch uses its actual path and ignores the requested name.
 
-If the worktree name collides with `ls`, `rm`, `list`, or `remove`, put `--` before it: `perch wt -- rm feature`.
+If the worktree directory name collides with `ls`, `rm`, `list`, or `remove`, put `--` before it: `perch wt -- rm feature`.
 
 `--no-switch` suppresses the directory handoff to the shell wrapper. Creation, fetching, hooks, and stale-branch cleanup still run as usual.
 

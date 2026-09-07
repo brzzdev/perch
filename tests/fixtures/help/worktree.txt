@@ -1,13 +1,13 @@
 Usage: perch wt [<branch>] [--no-switch]
                                   Give the branch its own worktree
-       perch wt <worktree-name> <branch> [--no-switch]
+       perch wt <worktree-directory-name> <branch> [--no-switch]
                                   Use a custom worktree directory name
        perch wt ls            List worktrees
        perch wt rm [<branch>] Remove a worktree (deletes branch if merged)
        perch wt rm .          Remove the worktree you're in
        perch wt -- <branch>   Worktree a branch named ls/rm/list/remove
-       perch wt -- <worktree-name> <branch>
-                                  Escape a colliding worktree name
+       perch wt -- <worktree-directory-name> <branch>
+                                  Escape a colliding worktree directory name
 
 Options:
       --no-switch  Create or find the worktree without switching to it

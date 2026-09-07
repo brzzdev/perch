@@ -1874,6 +1874,17 @@ fn wt_rejects_an_unknown_option_before_the_directory_name() {
 }
 
 #[test]
+fn wt_rejects_an_unknown_option_in_the_branch_position() {
+    let (_bare, parent, work) = setup_with_parent();
+
+    let output = perch_args(&work, &["wt", "short", "--typo"]);
+
+    assert!(!output.status.success());
+    assert!(stderr_str(&output).contains("unknown option '--typo'"));
+    assert!(!parent.path().join("worktrees/repo/short").exists());
+}
+
+#[test]
 fn wt_rejects_invalid_directory_names_and_a_third_argument() {
     let (_bare, parent, work) = setup_with_parent();
     git(&work, &["branch", "feature"]);
@@ -1881,7 +1892,7 @@ fn wt_rejects_invalid_directory_names_and_a_third_argument() {
     for name in [".", "..", "nested/name", r"nested\name"] {
         let output = perch_args(&work, &["wt", name, "feature"]);
         assert!(!output.status.success(), "{name:?} should be rejected");
-        assert!(stderr_str(&output).contains("invalid worktree name"));
+        assert!(stderr_str(&output).contains("invalid worktree directory name"));
     }
 
     let output = perch_args(&work, &["wt", "short", "feature", "extra"]);

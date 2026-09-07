@@ -1154,6 +1154,11 @@ fn complete_drops_only_the_words_that_position_eats() {
         ["br", "feat/x", "main", "wt"],
         "a `wt` option leaves the branch position unchanged"
     );
+    assert_eq!(
+        offered(&["wt", "short", "--complete"]),
+        ["br", "feat/x", "list", "ls", "main", "remove", "rm", "wt"],
+        "the second `wt` positional is a branch and eats no subverb spellings"
+    );
 
     // `--` is what you type to reach a name some position would eat, so it has
     // to answer with every branch — at whichever level it was typed. Git
@@ -1163,6 +1168,7 @@ fn complete_drops_only_the_words_that_position_eats() {
     assert_eq!(offered(&["--", "--complete"]), everything);
     assert_eq!(offered(&["br", "--", "--complete"]), everything);
     assert_eq!(offered(&["wt", "--", "--complete"]), everything);
+    assert_eq!(offered(&["wt", "--", "short", "--complete"]), everything);
     assert_eq!(
         offered(&["wt", "--no-switch", "--", "--complete"]),
         everything
@@ -1268,6 +1274,92 @@ fn fish_br_rm_completion_rejects_a_double_dash() {
     assert!(
         !completions.lines().any(|line| line.starts_with("feature")),
         "br rm rejects `--`, so fish must not offer a target after it: {completions}"
+    );
+}
+
+#[test]
+fn bash_wt_completion_offers_branches_after_a_worktree_name() {
+    let (_bare, work) = setup();
+    git(work.path(), &["branch", "feature"]);
+    let bin = Path::new(env!("CARGO_BIN_EXE_perch")).parent().unwrap();
+    let completions = concat!(env!("CARGO_MANIFEST_DIR"), "/completions/perch.bash");
+    let script = format!(
+        "PATH=\"{bin}\":$PATH\n\
+         source \"{completions}\"\n\
+         COMP_WORDS=(perch wt short ''); COMP_CWORD=3; COMPREPLY=()\n\
+         _perch_completions\n\
+         printf '%s\\n' \"${{COMPREPLY[@]}}\"\n",
+        bin = bin.display(),
+    );
+
+    let output = Command::new("bash")
+        .args(["-c", &script])
+        .current_dir(work.path())
+        .env("PERCH_NO_HOOKS", "1")
+        .output()
+        .expect("failed to run bash completion");
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(stdout_str(&output).lines().any(|line| line == "feature"));
+}
+
+#[test]
+fn zsh_wt_completion_asks_for_branches_after_a_worktree_name() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+    let completions = concat!(env!("CARGO_MANIFEST_DIR"), "/completions/_perch");
+    let script = format!(
+        "function _describe {{ : }}\n\
+         service=skip\n\
+         source \"{completions}\"\n\
+         function _perch_offers {{ print -r -- \"$*\" }}\n\
+         service=perch\n\
+         words=(perch wt short '')\n\
+         CURRENT=4\n\
+         _perch\n"
+    );
+
+    let output = Command::new("zsh")
+        .args(["-c", &script])
+        .output()
+        .expect("failed to run zsh completion");
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(
+        stdout_str(&output)
+            .lines()
+            .any(|line| line == "branches branch wt short")
+    );
+}
+
+#[test]
+fn fish_wt_completion_offers_branches_after_a_worktree_name() {
+    if Command::new("fish").arg("--version").output().is_err() {
+        return;
+    }
+    let (_bare, work) = setup();
+    git(work.path(), &["branch", "feature"]);
+    let bin = Path::new(env!("CARGO_BIN_EXE_perch")).parent().unwrap();
+    let completions = concat!(env!("CARGO_MANIFEST_DIR"), "/completions/perch.fish");
+    let script = format!("source \"{completions}\"\ncomplete -C 'perch wt short '\n");
+
+    let output = Command::new("fish")
+        .args(["-c", &script])
+        .current_dir(work.path())
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+        )
+        .env("PERCH_NO_HOOKS", "1")
+        .output()
+        .expect("failed to run fish completion");
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(
+        stdout_str(&output)
+            .lines()
+            .any(|line| line.starts_with("feature"))
     );
 }
 
@@ -1668,6 +1760,148 @@ fn wt_creates_worktree_for_existing_local_branch() {
 }
 
 #[test]
+fn wt_uses_an_explicit_directory_name_for_a_local_branch() {
+    let (_bare, parent, work) = setup_with_parent();
+    git(&work, &["branch", "renovate/realm-swiftlint-0.x"]);
+
+    let output = perch_args(&work, &["wt", "545", "renovate/realm-swiftlint-0.x"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    let expected = parent.path().join("worktrees").join("repo").join("545");
+    assert!(
+        expected.is_dir(),
+        "missing worktree: {}",
+        expected.display()
+    );
+    let branch = git(&expected, &["branch", "--show-current"]);
+    assert_eq!(stdout_str(&branch).trim(), "renovate/realm-swiftlint-0.x");
+    assert_eq!(
+        Path::new(stdout_str(&output).trim())
+            .canonicalize()
+            .unwrap(),
+        expected.canonicalize().unwrap()
+    );
+}
+
+#[test]
+fn wt_uses_an_explicit_directory_name_for_a_remote_only_branch() {
+    let (_bare, parent, work) = setup_with_parent();
+    git(&work, &["branch", "published"]);
+    git(&work, &["push", "origin", "published"]);
+    git(&work, &["branch", "-D", "published"]);
+
+    let output = perch_args(&work, &["wt", "short", "published"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    let expected = parent.path().join("worktrees").join("repo").join("short");
+    let branch = git(&expected, &["branch", "--show-current"]);
+    assert_eq!(stdout_str(&branch).trim(), "published");
+}
+
+#[test]
+fn wt_uses_an_explicit_directory_name_for_a_new_branch() {
+    let (_bare, parent, work) = setup_with_parent();
+
+    let output = perch_args(&work, &["wt", "short", "brand-new"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    let expected = parent.path().join("worktrees").join("repo").join("short");
+    let branch = git(&expected, &["branch", "--show-current"]);
+    assert_eq!(stdout_str(&branch).trim(), "brand-new");
+}
+
+#[test]
+fn wt_uses_the_registered_worktree_instead_of_an_explicit_directory_name() {
+    let (_bare, parent, work) = setup_with_parent();
+    let existing = add_worktree(&work, &parent, "feature");
+
+    let output = perch_args(&work, &["wt", "ignored", "feature"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert_eq!(
+        Path::new(stdout_str(&output).trim())
+            .canonicalize()
+            .unwrap(),
+        existing.canonicalize().unwrap()
+    );
+    assert!(!parent.path().join("worktrees/repo/ignored").exists());
+}
+
+#[test]
+fn wt_explicit_directory_name_supports_no_switch() {
+    let (_bare, parent, work) = setup_with_parent();
+    git(&work, &["branch", "feature"]);
+
+    let output = perch_args(&work, &["wt", "short", "feature", "--no-switch"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert_eq!(stdout_str(&output), "");
+    assert!(parent.path().join("worktrees/repo/short").is_dir());
+}
+
+#[test]
+fn wt_escape_allows_a_directory_name_that_matches_a_subverb() {
+    let (_bare, parent, work) = setup_with_parent();
+    git(&work, &["branch", "feature"]);
+
+    let output = perch_args(&work, &["wt", "--", "rm", "feature"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(parent.path().join("worktrees/repo/rm").is_dir());
+}
+
+#[test]
+fn wt_escape_allows_an_option_looking_directory_name() {
+    let (_bare, parent, work) = setup_with_parent();
+    git(&work, &["branch", "feature"]);
+
+    let output = perch_args(&work, &["wt", "--", "--noswitch", "feature"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(parent.path().join("worktrees/repo/--noswitch").is_dir());
+}
+
+#[test]
+fn wt_rejects_an_unknown_option_before_the_directory_name() {
+    let (_bare, parent, work) = setup_with_parent();
+    git(&work, &["branch", "feature"]);
+
+    let output = perch_args(&work, &["wt", "--noswitch", "feature"]);
+
+    assert!(!output.status.success());
+    assert!(stderr_str(&output).contains("unknown option '--noswitch'"));
+    assert!(!parent.path().join("worktrees/repo/--noswitch").exists());
+}
+
+#[test]
+fn wt_rejects_an_unknown_option_in_the_branch_position() {
+    let (_bare, parent, work) = setup_with_parent();
+
+    let output = perch_args(&work, &["wt", "short", "--typo"]);
+
+    assert!(!output.status.success());
+    assert!(stderr_str(&output).contains("unknown option '--typo'"));
+    assert!(!parent.path().join("worktrees/repo/short").exists());
+}
+
+#[test]
+fn wt_rejects_invalid_directory_names_and_a_third_argument() {
+    let (_bare, parent, work) = setup_with_parent();
+    git(&work, &["branch", "feature"]);
+
+    for name in [".", "..", "nested/name", r"nested\name"] {
+        let output = perch_args(&work, &["wt", name, "feature"]);
+        assert!(!output.status.success(), "{name:?} should be rejected");
+        assert!(stderr_str(&output).contains("invalid worktree directory name"));
+    }
+
+    let output = perch_args(&work, &["wt", "short", "feature", "extra"]);
+    assert!(!output.status.success());
+    assert!(stderr_str(&output).contains("unexpected extra argument 'extra'"));
+    assert!(!parent.path().join("worktrees/repo/short").exists());
+}
+
+#[test]
 fn wt_creation_does_not_write_cursor_controls_without_a_terminal() {
     let (_bare, _parent, work) = setup_with_parent();
     git(&work, &["branch", "feature"]);
@@ -1774,16 +2008,19 @@ fn wt_no_switch_is_rejected_before_rm() {
 
 #[test]
 fn wt_double_dash_stops_no_switch_option_parsing() {
-    let (_bare, _parent, work) = setup_with_parent();
+    let (_bare, parent, work) = setup_with_parent();
 
     git(&work, &["branch", "feature"]);
     let output = perch_args(&work, &["wt", "--", "feature", "--no-switch"]);
-    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
 
-    let printed = stdout_str(&output).trim().to_string();
-    assert!(
-        printed.ends_with("worktrees/repo/feature") && Path::new(&printed).is_dir(),
-        "an option after `--` must not suppress the handoff, got: {printed}"
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    let expected = parent.path().join("worktrees/repo/feature");
+    assert_eq!(
+        Path::new(stdout_str(&output).trim())
+            .canonicalize()
+            .unwrap(),
+        expected.canonicalize().unwrap(),
+        "an option after `--` must not suppress the shell handoff"
     );
 }
 

@@ -31,7 +31,11 @@ enum Existence {
     MustExist,
 }
 
-pub(crate) fn run(target: Option<&str>, shell_handoff: ShellHandoff) -> AppResult<()> {
+pub(crate) fn run(
+    worktree_name: Option<&str>,
+    target: Option<&str>,
+    shell_handoff: ShellHandoff,
+) -> AppResult<()> {
     // A worktree whose directory was deleted by hand can't be entered, so its
     // branch is one to (re)create. `worktree_add`/`checkout` prune the stale
     // registration when it gets in the way.
@@ -88,7 +92,13 @@ pub(crate) fn run(target: Option<&str>, shell_handoff: ShellHandoff) -> AppResul
         }
         Action::CreateForBranch(branch) => {
             let branch_remote = git::current_remote(Some(branch.as_str()));
-            let path = create_worktree(&main.path, &branch, None, &branch_remote)?;
+            let path = create_worktree(
+                &main.path,
+                worktree_name.unwrap_or(&branch),
+                &branch,
+                None,
+                &branch_remote,
+            )?;
             (path, branch)
         }
         Action::CreateNewBranch(branch) => {
@@ -97,7 +107,13 @@ pub(crate) fn run(target: Option<&str>, shell_handoff: ShellHandoff) -> AppResul
                 message: format!("no default branch on {remote}; cannot pick a base"),
             })?;
             let base = format!("{remote}/{default}");
-            let path = create_worktree(&main.path, &branch, Some(&base), &remote)?;
+            let path = create_worktree(
+                &main.path,
+                worktree_name.unwrap_or(&branch),
+                &branch,
+                Some(&base),
+                &remote,
+            )?;
             (path, branch)
         }
     };
@@ -290,11 +306,12 @@ pub(crate) fn update_in(path: &Path, branch: &str, remote: &str) -> AppResult<()
 /// than a line each creation arm has to remember.
 fn create_worktree(
     main_path: &Path,
+    worktree_name: &str,
     branch: &str,
     base: Option<&str>,
     remote: &str,
 ) -> AppResult<PathBuf> {
-    let path = worktree_path_for(main_path, branch)?;
+    let path = worktree_path_for(main_path, worktree_name)?;
     ensure_path_clear(&path)?;
     ensure_parent(&path);
 
@@ -410,7 +427,7 @@ fn main_of(worktrees: &[git::Worktree]) -> AppResult<&git::Worktree> {
         })
 }
 
-fn worktree_path_for(main_path: &Path, branch: &str) -> AppResult<PathBuf> {
+fn worktree_path_for(main_path: &Path, worktree_name: &str) -> AppResult<PathBuf> {
     let parent = main_path.parent().ok_or_else(|| Error::Git {
         command: "worktree".into(),
         message: format!("main worktree has no parent: {}", main_path.display()),
@@ -419,7 +436,7 @@ fn worktree_path_for(main_path: &Path, branch: &str) -> AppResult<PathBuf> {
         command: "worktree".into(),
         message: format!("cannot determine repo name from {}", main_path.display()),
     })?;
-    Ok(parent.join("worktrees").join(repo_name).join(branch))
+    Ok(parent.join("worktrees").join(repo_name).join(worktree_name))
 }
 
 fn ensure_path_clear(path: &Path) -> AppResult<()> {

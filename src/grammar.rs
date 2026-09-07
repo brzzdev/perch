@@ -14,9 +14,28 @@ pub(crate) enum Navigation {
     Go(Option<String>),
     Here(Option<String>),
     Worktree {
+        worktree_name: Option<WorktreeDirectoryName>,
         target: Option<String>,
         shell_handoff: ShellHandoff,
     },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct WorktreeDirectoryName(String);
+
+impl WorktreeDirectoryName {
+    fn parse(name: &str) -> Result<Self, GrammarError> {
+        if name.is_empty() || matches!(name, "." | "..") || name.contains(['/', '\\']) {
+            return Err(GrammarError::worktree_navigation(format!(
+                "invalid worktree directory name '{name}'; expected one directory name"
+            )));
+        }
+        Ok(Self(name.to_string()))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -97,9 +116,24 @@ pub(crate) enum CompletionSource {
 enum Position {
     Bare,
     Branch,
-    Escaped,
     Removal,
+    Unfiltered,
     Worktree,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Escape {
+    Bare,
+    Escaped,
+}
+
+impl Escape {
+    fn completion_position(self) -> Position {
+        match self {
+            Self::Bare => Position::Worktree,
+            Self::Escaped => Position::Unfiltered,
+        }
+    }
 }
 
 impl Position {
@@ -107,7 +141,7 @@ impl Position {
         match self {
             Self::Bare => parse_verb(word).is_some(),
             Self::Branch => parse_branch_subverb(word).is_some(),
-            Self::Escaped | Self::Removal => false,
+            Self::Removal | Self::Unfiltered => false,
             Self::Worktree => parse_worktree_subverb(word).is_some(),
         }
     }
@@ -158,6 +192,9 @@ enum GrammarErrorKind {
 
     #[error("invalid `perch wt rm` invocation: {0}")]
     WorktreeRemoval(String),
+
+    #[error("invalid `perch wt` invocation: {0}")]
+    WorktreeNavigation(String),
 }
 
 impl GrammarError {
@@ -167,6 +204,10 @@ impl GrammarError {
 
     fn worktree_removal(message: String) -> Self {
         Self(GrammarErrorKind::WorktreeRemoval(message))
+    }
+
+    fn worktree_navigation(message: String) -> Self {
+        Self(GrammarErrorKind::WorktreeNavigation(message))
     }
 
     fn retired(word: &'static str, keep: &'static str) -> Self {
@@ -269,10 +310,10 @@ fn parse_worktree(args: &[String]) -> Result<Invocation, GrammarError> {
     match remaining.first().map(|arg| arg.as_str()) {
         Some("--help" | "-h") => Ok(Invocation::Help(HelpPage::Worktree)),
         Some("--complete") => Ok(branch_completion(Position::Worktree)),
-        Some("--") => Ok(parse_escaped_with_handoff(
-            remaining.get(1).copied(),
-            shell_handoff,
-        )),
+        Some("--") => parse_worktree_navigation(&remaining[1..], shell_handoff, Escape::Escaped),
+        Some(option) if option.starts_with('-') => Err(GrammarError::worktree_navigation(format!(
+            "unknown option '{option}'"
+        ))),
         Some(word) => match parse_worktree_subverb(word) {
             Some(_) if shell_handoff == ShellHandoff::Suppress => {
                 Err(GrammarError::no_switch_with_subverb(word.to_string()))
@@ -281,9 +322,48 @@ fn parse_worktree(args: &[String]) -> Result<Invocation, GrammarError> {
             Some(WorktreeSubverb::List) => Err(GrammarError::retired("list", "ls")),
             Some(WorktreeSubverb::Remove) => Err(GrammarError::retired("remove", "rm")),
             Some(WorktreeSubverb::Rm) => parse_worktree_removal(&remaining[1..]),
-            None => Ok(worktree_navigation(Some(word), shell_handoff)),
+            None => parse_worktree_navigation(&remaining, shell_handoff, Escape::Bare),
         },
-        None => Ok(worktree_navigation(None, shell_handoff)),
+        None => Ok(worktree_navigation(None, None, shell_handoff)),
+    }
+}
+
+fn parse_worktree_navigation(
+    args: &[&String],
+    shell_handoff: ShellHandoff,
+    escape: Escape,
+) -> Result<Invocation, GrammarError> {
+    match args {
+        [] => Ok(worktree_navigation(None, None, shell_handoff)),
+        [target] if target.as_str() == "--complete" => {
+            Ok(branch_completion(escape.completion_position()))
+        }
+        [target] => Ok(worktree_navigation(None, Some(target), shell_handoff)),
+        [worktree_name, target] if target.as_str() == "--complete" => {
+            WorktreeDirectoryName::parse(worktree_name)?;
+            Ok(branch_completion(Position::Unfiltered))
+        }
+        [_, option] if escape == Escape::Bare && option.starts_with('-') => Err(
+            GrammarError::worktree_navigation(format!("unknown option '{option}'")),
+        ),
+        // COMPAT: Before the two-argument form, `--` consumed only the next word.
+        // Preserve the shell handoff for `wt -- <branch> --no-switch`.
+        [branch, ignored_no_switch]
+            if escape == Escape::Escaped && ignored_no_switch.as_str() == "--no-switch" =>
+        {
+            Ok(worktree_navigation(None, Some(branch), shell_handoff))
+        }
+        [worktree_name, target] => {
+            let worktree_name = WorktreeDirectoryName::parse(worktree_name)?;
+            Ok(worktree_navigation(
+                Some(worktree_name),
+                Some(target),
+                shell_handoff,
+            ))
+        }
+        [_, _, extra, ..] => Err(GrammarError::worktree_navigation(format!(
+            "unexpected extra argument '{extra}'"
+        ))),
     }
 }
 
@@ -329,17 +409,9 @@ fn parse_worktree_removal(args: &[&String]) -> Result<Invocation, GrammarError> 
 
 fn parse_escaped(target: Option<&String>, verb: Verb) -> Invocation {
     if target.is_some_and(|word| word == "--complete") {
-        branch_completion(Position::Escaped)
+        branch_completion(Position::Unfiltered)
     } else {
         navigate(verb, target.map(String::as_str))
-    }
-}
-
-fn parse_escaped_with_handoff(target: Option<&String>, shell_handoff: ShellHandoff) -> Invocation {
-    if target.is_some_and(|word| word == "--complete") {
-        branch_completion(Position::Escaped)
-    } else {
-        worktree_navigation(target.map(String::as_str), shell_handoff)
     }
 }
 
@@ -349,14 +421,20 @@ fn navigate(verb: Verb, target: Option<&str>) -> Invocation {
         Verb::Go => Navigation::Go(target),
         Verb::Here => Navigation::Here(target),
         Verb::Worktree => Navigation::Worktree {
+            worktree_name: None,
             target,
             shell_handoff: ShellHandoff::Emit,
         },
     })
 }
 
-fn worktree_navigation(target: Option<&str>, shell_handoff: ShellHandoff) -> Invocation {
+fn worktree_navigation(
+    worktree_name: Option<WorktreeDirectoryName>,
+    target: Option<&str>,
+    shell_handoff: ShellHandoff,
+) -> Invocation {
     Invocation::Navigate(Navigation::Worktree {
+        worktree_name,
         target: target.map(str::to_string),
         shell_handoff,
     })
@@ -395,6 +473,8 @@ const MAIN_HELP: &str = concat!(
     "Usage: perch [<branch>]       Go to the branch, wherever it lives\n",
     "       perch br [<branch>]    Check the branch out here\n",
     "       perch wt [<branch>]    Give the branch its own worktree\n",
+    "       perch wt <name> <branch>\n",
+    "                                  Use a custom worktree directory name\n",
     "\n",
     "       perch .                Refresh the current branch from its remote\n",
     "       perch -- <branch>      Go to a branch named br/wt\n",
@@ -420,10 +500,14 @@ const BRANCH_HELP: &str = concat!(
 const WORKTREE_HELP: &str = concat!(
     "Usage: perch wt [<branch>] [--no-switch]\n",
     "                                  Give the branch its own worktree\n",
+    "       perch wt <worktree-directory-name> <branch> [--no-switch]\n",
+    "                                  Use a custom worktree directory name\n",
     "       perch wt ls            List worktrees\n",
     "       perch wt rm [<branch>] Remove a worktree (deletes branch if merged)\n",
     "       perch wt rm .          Remove the worktree you're in\n",
     "       perch wt -- <branch>   Worktree a branch named ls/rm/list/remove\n",
+    "       perch wt -- <worktree-directory-name> <branch>\n",
+    "                                  Escape a colliding worktree directory name\n",
     "\n",
     "Options:\n",
     "      --no-switch  Create or find the worktree without switching to it\n",
@@ -451,10 +535,122 @@ mod tests {
         assert_eq!(
             parse(&args(&["wt", "--", "rm"])),
             Ok(Invocation::Navigate(Navigation::Worktree {
+                worktree_name: None,
                 target: Some("rm".into()),
                 shell_handoff: ShellHandoff::Emit,
             }))
         );
+    }
+
+    #[test]
+    fn worktree_navigation_accepts_a_directory_name_before_the_branch() {
+        assert_eq!(
+            parse(&args(&[
+                "wt",
+                "--no-switch",
+                "545",
+                "renovate/realm-swiftlint-0.x",
+            ])),
+            Ok(Invocation::Navigate(Navigation::Worktree {
+                worktree_name: Some(WorktreeDirectoryName("545".into())),
+                target: Some("renovate/realm-swiftlint-0.x".into()),
+                shell_handoff: ShellHandoff::Suppress,
+            }))
+        );
+    }
+
+    #[test]
+    fn worktree_navigation_escape_accepts_a_colliding_directory_name() {
+        assert_eq!(
+            parse(&args(&["wt", "--", "rm", "topic"])),
+            Ok(Invocation::Navigate(Navigation::Worktree {
+                worktree_name: Some(WorktreeDirectoryName("rm".into())),
+                target: Some("topic".into()),
+                shell_handoff: ShellHandoff::Emit,
+            }))
+        );
+    }
+
+    #[test]
+    fn worktree_navigation_escape_accepts_an_option_looking_directory_name() {
+        assert_eq!(
+            parse(&args(&["wt", "--", "--noswitch", "topic"])),
+            Ok(Invocation::Navigate(Navigation::Worktree {
+                worktree_name: Some(WorktreeDirectoryName("--noswitch".into())),
+                target: Some("topic".into()),
+                shell_handoff: ShellHandoff::Emit,
+            }))
+        );
+    }
+
+    #[test]
+    fn worktree_navigation_escape_ignores_a_trailing_no_switch() {
+        assert_eq!(
+            parse(&args(&["wt", "--", "topic", "--no-switch"])),
+            Ok(Invocation::Navigate(Navigation::Worktree {
+                worktree_name: None,
+                target: Some("topic".into()),
+                shell_handoff: ShellHandoff::Emit,
+            }))
+        );
+    }
+
+    #[test]
+    fn worktree_navigation_escape_keeps_other_option_looking_words_as_branches() {
+        assert_eq!(
+            parse(&args(&["wt", "--", "short", "--typo"])),
+            Ok(Invocation::Navigate(Navigation::Worktree {
+                worktree_name: Some(WorktreeDirectoryName("short".into())),
+                target: Some("--typo".into()),
+                shell_handoff: ShellHandoff::Emit,
+            }))
+        );
+    }
+
+    #[test]
+    fn worktree_navigation_rejects_an_unknown_option_before_the_name() {
+        let error = parse(&args(&["wt", "--noswitch", "topic"])).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "invalid `perch wt` invocation: unknown option '--noswitch'"
+        );
+    }
+
+    #[test]
+    fn worktree_navigation_rejects_an_extra_argument() {
+        let error = parse(&args(&["wt", "one", "topic", "extra"])).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "invalid `perch wt` invocation: unexpected extra argument 'extra'"
+        );
+    }
+
+    #[test]
+    fn worktree_navigation_rejects_names_that_are_not_one_directory() {
+        for name in ["", ".", "..", "nested/name", r"nested\name"] {
+            let error = parse(&args(&["wt", name, "topic"])).unwrap_err();
+
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "invalid `perch wt` invocation: invalid worktree directory name '{name}'; expected one directory name"
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn worktree_navigation_completes_reachable_branches_in_the_second_position() {
+        let Invocation::Complete(completion) =
+            parse(&args(&["wt", "short-name", "--complete"])).unwrap()
+        else {
+            panic!("expected completion");
+        };
+
+        assert_eq!(completion.source(), CompletionSource::ReachableBranches);
+        assert_eq!(completion.render(["ls", "rm", "topic"]), "ls\nrm\ntopic\n");
     }
 
     #[test]

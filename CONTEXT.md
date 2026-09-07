@@ -100,12 +100,16 @@ _Avoid_: Candidates, options, menu
 The dim text after a name in a picker row, saying what there is to know about it: the path of the worktree *Held*ing a branch, or why a row is inert. An annotation is not a *Marker* — it warns of no loss and licenses no *Forcing*, exactly as a *Ground* doesn't. Rows share a column for it, so a list reads down as well as across. See [ADR 0004](./docs/adr/0004-a-ground-is-not-a-marker.md) and [ADR 0008](./docs/adr/0008-one-list-whichever-verb-is-picking.md).
 _Avoid_: Marker (reserved for risk), label, badge, hint
 
+**Worktree directory name**:
+The final directory component reserved for a branch's new worktree. It normally follows the branch spelling, but a user may choose a separate name; it does not rename the branch or override an existing worktree already *Held*ing it.
+_Avoid_: Worktree name, branch name, path, folder
+
 **Subverb**:
-A word a *Verb* reads before it reads a branch name. `br` reads `rm`; `wt` reads `ls` and `rm`, plus the retired `list` and `remove`, which are refused rather than taken for branches. Collision is positional, and `--` is needed wherever the dispatcher would eat the spelling: after `br` or `wt` for a subverb, at the top level for a *Verb*. Everywhere else the bare name reaches the branch, so `perch list`, `perch br list` and `perch br wt` all work as written.
+A word a *Verb* reads before it reads a branch name. `br` reads `rm`; `wt` reads `ls` and `rm`, plus the retired `list` and `remove`, which are refused rather than taken for branches. Collision is positional: `--` is needed after `br` for a colliding branch, after `wt` for either a colliding branch or a *Worktree directory name* that looks like a subverb or option, and at the top level for a branch matching a *Verb*. Everywhere else the bare name reaches the branch, so `perch list`, `perch br list` and `perch br wt` all work as written.
 _Avoid_: Subcommand (reserved for the *Verb*), flag, option
 
 **Grammar**:
-The rules that decide whether each command word names a *Verb*, *Subverb*, option, or branch. At the top level and after `br` or `wt`, `--` stops command-word reading so the next word names a branch. Inside `wt rm`, it stops option reading so the next word names the target even when it begins with `-`; `br rm` does not accept it. Destructive forms reject duplicate options, unknown options, and extra targets rather than ignoring them.
+The rules that decide whether each command word names a *Verb*, *Subverb*, option, *Worktree directory name*, or branch. `--` makes the next word a branch at the top level and after `br`; after `wt` it introduces either one branch or a *Worktree directory name* followed by a branch without reading options or subverbs, except that the legacy `wt -- <branch> --no-switch` stays a single-branch form and does not suppress the *Handoff*; inside `wt rm` it introduces a target. Destructive forms reject duplicate options, unknown options, and extra targets; worktree creation rejects unknown options, invalid *Worktree directory names*, and extra arguments.
 _Avoid_: Dispatch, parsing
 
 **`.`**:

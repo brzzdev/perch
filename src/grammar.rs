@@ -277,7 +277,7 @@ fn parse_worktree(args: &[String]) -> Result<Invocation, GrammarError> {
     match remaining.first().map(|arg| arg.as_str()) {
         Some("--help" | "-h") => Ok(Invocation::Help(HelpPage::Worktree)),
         Some("--complete") => Ok(branch_completion(Position::Worktree)),
-        Some("--") => parse_worktree_navigation(&remaining[1..], shell_handoff, true),
+        Some("--") => parse_worktree_navigation(&remaining[1..], shell_handoff, Position::Escaped),
         Some(word) => match parse_worktree_subverb(word) {
             Some(_) if shell_handoff == ShellHandoff::Suppress => {
                 Err(GrammarError::no_switch_with_subverb(word.to_string()))
@@ -286,7 +286,7 @@ fn parse_worktree(args: &[String]) -> Result<Invocation, GrammarError> {
             Some(WorktreeSubverb::List) => Err(GrammarError::retired("list", "ls")),
             Some(WorktreeSubverb::Remove) => Err(GrammarError::retired("remove", "rm")),
             Some(WorktreeSubverb::Rm) => parse_worktree_removal(&remaining[1..]),
-            None => parse_worktree_navigation(&remaining, shell_handoff, false),
+            None => parse_worktree_navigation(&remaining, shell_handoff, Position::Worktree),
         },
         None => Ok(worktree_navigation(None, None, shell_handoff)),
     }
@@ -295,15 +295,11 @@ fn parse_worktree(args: &[String]) -> Result<Invocation, GrammarError> {
 fn parse_worktree_navigation(
     args: &[&String],
     shell_handoff: ShellHandoff,
-    escaped: bool,
+    completion_position: Position,
 ) -> Result<Invocation, GrammarError> {
     match args {
         [] => Ok(worktree_navigation(None, None, shell_handoff)),
-        [target] if target.as_str() == "--complete" => Ok(branch_completion(if escaped {
-            Position::Escaped
-        } else {
-            Position::Worktree
-        })),
+        [target] if target.as_str() == "--complete" => Ok(branch_completion(completion_position)),
         [target] => Ok(worktree_navigation(None, Some(target), shell_handoff)),
         [worktree_name, target] if target.as_str() == "--complete" => {
             validate_worktree_name(worktree_name)?;

@@ -427,7 +427,7 @@ fn main_of(worktrees: &[git::Worktree]) -> AppResult<&git::Worktree> {
         })
 }
 
-fn worktree_path_for(main_path: &Path, branch: &str) -> AppResult<PathBuf> {
+fn worktree_path_for(main_path: &Path, worktree_name: &str) -> AppResult<PathBuf> {
     let parent = main_path.parent().ok_or_else(|| Error::Git {
         command: "worktree".into(),
         message: format!("main worktree has no parent: {}", main_path.display()),
@@ -436,7 +436,7 @@ fn worktree_path_for(main_path: &Path, branch: &str) -> AppResult<PathBuf> {
         command: "worktree".into(),
         message: format!("cannot determine repo name from {}", main_path.display()),
     })?;
-    Ok(parent.join("worktrees").join(repo_name).join(branch))
+    Ok(parent.join("worktrees").join(repo_name).join(worktree_name))
 }
 
 fn ensure_path_clear(path: &Path) -> AppResult<()> {

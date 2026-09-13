@@ -7,6 +7,11 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
+/// The local-config key and directory prefix reclamation records use, mirrored
+/// from `src/app/reclamation.rs` so a rename there fails these tests loudly.
+const RECLAMATION_KEY: &str = "perch.reclamation.worktree";
+const TRASH_PREFIX: &str = ".perch-trash.";
+
 /// Serializes tests that mutate process cwd while calling library functions.
 static CWD_LOCK: Mutex<()> = Mutex::new(());
 
@@ -3180,7 +3185,7 @@ fn wt_rm_keeps_fast_reclamation_for_an_unmapped_gitlink() {
         "an unmapped gitlink should keep detached reclamation"
     );
     assert!(!path.exists(), "the original worktree path should be gone");
-    assert!(poll_until(|| staged_trash(&path).is_none()));
+    assert!(poll_until(|| ready_trash(&path).is_none()));
 }
 
 /// `--force` waives the confirmation, discarding uncommitted changes and the
@@ -3364,7 +3369,7 @@ fn wt_rm_from_inside_doomed_worktree_hands_off_to_main() {
         "stdout should be the main worktree path; got: {printed}"
     );
     assert!(
-        poll_until(|| staged_trash(&path).is_none()),
+        poll_until(|| ready_trash(&path).is_none()),
         "the worker inherited the surviving main-worktree cwd and reclaimed the trash"
     );
 }
@@ -3530,8 +3535,8 @@ impl Drop for GatedRm {
     }
 }
 
-/// The hidden sibling a Removal staged beside `worktree`, if one is left.
-fn staged_trash(worktree: &Path) -> Option<PathBuf> {
+/// The Ready trash a Removal left beside `worktree`, if it is still there.
+fn ready_trash(worktree: &Path) -> Option<PathBuf> {
     fs::read_dir(worktree.parent().unwrap())
         .unwrap()
         .filter_map(Result::ok)
@@ -3540,13 +3545,13 @@ fn staged_trash(worktree: &Path) -> Option<PathBuf> {
             candidate
                 .file_name()
                 .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with(".perch-trash."))
+                .is_some_and(|name| name.starts_with(TRASH_PREFIX))
         })
 }
 
 fn reclamation_record_is_cleared(work: &Path) -> bool {
     Command::new("git")
-        .args(["config", "--get-all", "perch.reclamation.worktree"])
+        .args(["config", "--get-all", RECLAMATION_KEY])
         .current_dir(work)
         .output()
         .is_ok_and(|output| output.status.code() == Some(1))
@@ -3573,8 +3578,7 @@ fn wt_rm_returns_while_the_detached_unlink_is_still_blocked() {
     );
     assert!(!path.exists(), "the original path must already be absent");
 
-    let trash =
-        staged_trash(&path).expect("blocked unlink should leave the staged directory visible");
+    let trash = ready_trash(&path).expect("blocked unlink should leave the trash visible");
     assert!(trash.exists());
 
     let list = stdout_str(&git(&work, &["worktree", "list", "--porcelain"]));
@@ -3584,10 +3588,7 @@ fn wt_rm_returns_while_the_detached_unlink_is_still_blocked() {
         !branches.lines().any(|branch| branch == "feature"),
         "branch survived: {branches}"
     );
-    let record = stdout_str(&git(
-        &work,
-        &["config", "--get", "perch.reclamation.worktree"],
-    ));
+    let record = stdout_str(&git(&work, &["config", "--get", RECLAMATION_KEY]));
     let duplicate = perch_command(&work, &[])
         .env("PERCH_INTERNAL_RECLAMATION", record.trim())
         .output()
@@ -3648,13 +3649,20 @@ fn reclamation_survives_a_hangup_sent_to_the_invoking_session() {
     drop(pty.slave);
     let session = libc::pid_t::try_from(child.0.process_id().expect("child has a pid")).unwrap();
     child.wait_bounded();
+    let mut rm_pid = None;
     assert!(
-        poll_until(|| rm.rm_pid().is_some()),
+        poll_until(|| {
+            rm_pid = rm.rm_pid();
+            rm_pid.is_some()
+        }),
         "the detached deleter never reached rm"
     );
-    let trash = staged_trash(&path).expect("blocked unlink should leave the staged directory");
+    let trash = ready_trash(&path).expect("blocked unlink should leave the trash visible");
+    // The session check is the fast regression detector: it fires at once,
+    // where the sweep below only fails once the trash poll times out. The
+    // sweep is still what proves the behaviour the fix exists for.
     // SAFETY: `getsid` only reads kernel state for the given pid.
-    let worker_session = unsafe { libc::getsid(rm.rm_pid().unwrap()) };
+    let worker_session = unsafe { libc::getsid(rm_pid.unwrap()) };
     assert_ne!(
         worker_session, session,
         "the worker still belongs to the session that ran perch"
@@ -3681,15 +3689,12 @@ fn the_next_wt_command_retries_an_exact_recorded_external_trash_path() {
     let (_bare, parent, work) = setup_with_parent();
     let manual_parent = parent.path().join("manual-worktrees");
     fs::create_dir(&manual_parent).unwrap();
-    let trash = manual_parent.join(".perch-trash.manual.123");
+    let trash = manual_parent.join(format!("{TRASH_PREFIX}manual.123"));
     let original = manual_parent.join("manual");
     fs::create_dir(&trash).unwrap();
     fs::write(trash.join("leftover"), "content\n").unwrap();
     let record = reclamation_record("ready", &original, &trash);
-    git(
-        &work,
-        &["config", "--add", "perch.reclamation.worktree", &record],
-    );
+    git(&work, &["config", "--add", RECLAMATION_KEY, &record]);
 
     let output = perch_args(&work, &["wt", "ls"]);
 
@@ -3711,13 +3716,10 @@ fn a_staged_record_deregisters_before_reclaiming_after_a_crash() {
     let trash = original
         .parent()
         .unwrap()
-        .join(".perch-trash.feature.crashed");
+        .join(format!("{TRASH_PREFIX}feature.crashed"));
     fs::rename(&original, &trash).unwrap();
     let record = reclamation_record("staged", &original, &trash);
-    git(
-        &work,
-        &["config", "--add", "perch.reclamation.worktree", &record],
-    );
+    git(&work, &["config", "--add", RECLAMATION_KEY, &record]);
 
     let output = perch_args(&work, &["wt", "ls"]);
 
@@ -3739,14 +3741,13 @@ fn a_staged_record_deregisters_before_reclaiming_after_a_crash() {
 fn a_staged_record_never_reclaims_an_existing_original() {
     let (_bare, parent, work) = setup_with_parent();
     let original = parent.path().join("manual-worktree");
-    let trash = parent.path().join(".perch-trash.manual-worktree.crashed");
+    let trash = parent
+        .path()
+        .join(format!("{TRASH_PREFIX}manual-worktree.crashed"));
     fs::create_dir(&original).unwrap();
     fs::write(original.join("keep"), "content\n").unwrap();
     let record = reclamation_record("staged", &original, &trash);
-    git(
-        &work,
-        &["config", "--add", "perch.reclamation.worktree", &record],
-    );
+    git(&work, &["config", "--add", RECLAMATION_KEY, &record]);
 
     let output = perch_args(&work, &["wt", "ls"]);
 

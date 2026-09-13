@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -3494,59 +3495,57 @@ fn wt_rm_clears_missing_detached_worktree_by_dir_name() {
     );
 }
 
-struct ReclamationGate(PathBuf);
+/// An `rm` on PATH that marks `started` once it runs and then blocks until
+/// `gate` exists, so a test can observe the detached worker mid-unlink. The
+/// guard opens the gate when the test ends, however it ends, so a failing
+/// assertion never leaves the worker parked forever.
+struct GatedRm {
+    gate: PathBuf,
+    path_env: OsString,
+    started: PathBuf,
+}
 
-impl Drop for ReclamationGate {
-    fn drop(&mut self) {
-        let _ = fs::write(&self.0, "go\n");
+impl GatedRm {
+    fn install(parent: &Path) -> Self {
+        let bin = parent.join("bin");
+        fs::create_dir(&bin).unwrap();
+        let fake_rm = bin.join("rm");
+        fs::write(
+            &fake_rm,
+            "#!/bin/sh\n\
+             : > \"$PERCH_TEST_RM_STARTED\"\n\
+             while [ ! -e \"$PERCH_TEST_RM_GATE\" ]; do sleep 0.01; done\n\
+             exec /bin/rm \"$@\"\n",
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&fake_rm).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&fake_rm, permissions).unwrap();
+        let path_env = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        )))
+        .unwrap();
+        Self {
+            gate: parent.join("allow-rm"),
+            path_env,
+            started: parent.join("rm-started"),
+        }
+    }
+
+    fn open(&self) {
+        fs::write(&self.gate, "go\n").unwrap();
     }
 }
 
-#[test]
-fn wt_rm_returns_while_the_detached_unlink_is_still_blocked() {
-    let (_bare, parent, work) = setup_with_parent();
-    let path = add_worktree(&work, &parent, "feature");
+impl Drop for GatedRm {
+    fn drop(&mut self) {
+        let _ = fs::write(&self.gate, "go\n");
+    }
+}
 
-    let bin = parent.path().join("bin");
-    fs::create_dir(&bin).unwrap();
-    let fake_rm = bin.join("rm");
-    fs::write(
-        &fake_rm,
-        "#!/bin/sh\n\
-         : > \"$PERCH_TEST_RM_STARTED\"\n\
-         while [ ! -e \"$PERCH_TEST_RM_GATE\" ]; do sleep 0.01; done\n\
-         exec /bin/rm \"$@\"\n",
-    )
-    .unwrap();
-    let mut permissions = fs::metadata(&fake_rm).unwrap().permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&fake_rm, permissions).unwrap();
-
-    let started = parent.path().join("rm-started");
-    let gate = parent.path().join("allow-rm");
-    let _gate_guard = ReclamationGate(gate.clone());
-    let path_env = std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(
-        &std::env::var_os("PATH").unwrap_or_default(),
-    )))
-    .unwrap();
-
-    let output = perch_command(&work, &["wt", "rm", "feature"])
-        .env("PERCH_NO_HOOKS", "1")
-        .env("PERCH_TEST_RM_STARTED", &started)
-        .env("PERCH_TEST_RM_GATE", &gate)
-        .env("PATH", path_env)
-        .output()
-        .expect("failed to run perch");
-
-    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
-    assert!(
-        poll_until(|| started.exists()),
-        "the detached deleter never reached rm"
-    );
-    assert!(!path.exists(), "the original path must already be absent");
-
-    let worktree_root = path.parent().unwrap();
-    let trash = fs::read_dir(worktree_root)
+/// The hidden sibling a Removal staged beside `worktree`, if one is left.
+fn staged_trash(worktree: &Path) -> Option<PathBuf> {
+    fs::read_dir(worktree.parent().unwrap())
         .unwrap()
         .filter_map(Result::ok)
         .map(|entry| entry.path())
@@ -3556,7 +3555,39 @@ fn wt_rm_returns_while_the_detached_unlink_is_still_blocked() {
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| name.starts_with(".perch-trash."))
         })
-        .expect("blocked unlink should leave the staged directory visible");
+}
+
+fn reclamation_record_is_cleared(work: &Path) -> bool {
+    Command::new("git")
+        .args(["config", "--get-all", "perch.reclamation.worktree"])
+        .current_dir(work)
+        .output()
+        .is_ok_and(|output| output.status.code() == Some(1))
+}
+
+#[test]
+fn wt_rm_returns_while_the_detached_unlink_is_still_blocked() {
+    let (_bare, parent, work) = setup_with_parent();
+    let path = add_worktree(&work, &parent, "feature");
+    let rm = GatedRm::install(parent.path());
+
+    let output = perch_command(&work, &["wt", "rm", "feature"])
+        .env("PERCH_NO_HOOKS", "1")
+        .env("PERCH_TEST_RM_STARTED", &rm.started)
+        .env("PERCH_TEST_RM_GATE", &rm.gate)
+        .env("PATH", &rm.path_env)
+        .output()
+        .expect("failed to run perch");
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(
+        poll_until(|| rm.started.exists()),
+        "the detached deleter never reached rm"
+    );
+    assert!(!path.exists(), "the original path must already be absent");
+
+    let trash =
+        staged_trash(&path).expect("blocked unlink should leave the staged directory visible");
     assert!(trash.exists());
 
     let list = stdout_str(&git(&work, &["worktree", "list", "--porcelain"]));
@@ -3584,10 +3615,72 @@ fn wt_rm_returns_while_the_detached_unlink_is_still_blocked() {
         "a duplicate worker reclaimed a directory already owned by a worker"
     );
 
-    fs::write(&gate, "go\n").unwrap();
+    rm.open();
     assert!(
         poll_until(|| !trash.exists()),
         "the staged directory survived after releasing rm"
+    );
+}
+
+/// Every live pid whose session is `session`: the set a session manager
+/// signals when it closes the pane that ran `perch`.
+fn session_members(session: u32) -> Vec<i32> {
+    let session = i32::try_from(session).unwrap();
+    let listing = Command::new("ps")
+        .args(["-A", "-o", "pid="])
+        .output()
+        .expect("failed to list processes");
+    stdout_str(&listing)
+        .lines()
+        .filter_map(|line| line.trim().parse::<i32>().ok())
+        // SAFETY: `getsid` only reads kernel state for the given pid.
+        .filter(|&pid| unsafe { libc::getsid(pid) } == session)
+        .collect()
+}
+
+#[test]
+fn reclamation_survives_a_hangup_sent_to_the_invoking_session() {
+    use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+
+    let (_bare, parent, work) = setup_with_parent();
+    let path = add_worktree(&work, &parent, "feature");
+    let rm = GatedRm::install(parent.path());
+
+    // A pty child leads its own session, the way a pane shell does, so the
+    // session it leaves behind can be swept the way a session manager does.
+    let pty = native_pty_system()
+        .openpty(PtySize::default())
+        .expect("failed to open pty");
+    let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_perch"));
+    cmd.args(["wt", "rm", "feature"]);
+    cmd.cwd(&work);
+    cmd.env("PERCH_NO_HOOKS", "1");
+    cmd.env("PERCH_TEST_RM_STARTED", &rm.started);
+    cmd.env("PERCH_TEST_RM_GATE", &rm.gate);
+    cmd.env("PATH", &rm.path_env);
+    let mut child = ChildGuard(pty.slave.spawn_command(cmd).expect("failed to spawn"));
+    drop(pty.slave);
+    let session = child.0.process_id().expect("child has a pid");
+    child.wait_bounded();
+    assert!(
+        poll_until(|| rm.started.exists()),
+        "the detached deleter never reached rm"
+    );
+    let trash = staged_trash(&path).expect("blocked unlink should leave the staged directory");
+
+    for pid in session_members(session) {
+        // SAFETY: plain signal delivery to a pid this test's child created.
+        unsafe { libc::kill(pid, libc::SIGHUP) };
+    }
+    rm.open();
+
+    assert!(
+        poll_until(|| !trash.exists()),
+        "hanging up the invoking session killed reclamation"
+    );
+    assert!(
+        poll_until(|| reclamation_record_is_cleared(&work)),
+        "successful reclamation should clear its durable record"
     );
 }
 
@@ -3614,13 +3707,7 @@ fn the_next_wt_command_retries_an_exact_recorded_external_trash_path() {
         "the next wt command did not retry the recorded path"
     );
     assert!(
-        poll_until(|| {
-            Command::new("git")
-                .args(["config", "--get-all", "perch.reclamation.worktree"])
-                .current_dir(&work)
-                .output()
-                .is_ok_and(|output| output.status.code() == Some(1))
-        }),
+        poll_until(|| reclamation_record_is_cleared(&work)),
         "successful reclamation should clear its durable record"
     );
 }

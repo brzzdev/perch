@@ -353,11 +353,9 @@ fn spawn_worker(record: &Record) -> std::io::Result<()> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    // A new session, not merely a new process group: session managers tear a
-    // pane down by signalling every process whose session is the pane shell's,
-    // which would kill a worker that shared it. `setsid` also makes the worker
-    // a group leader, so `process_group(0)` is redundant, and std would apply
-    // that before `pre_exec` and make `setsid` fail with EPERM.
+    // A new session, so a manager that sweeps the invoking session cannot kill
+    // the worker (ADR 0010). `process_group(0)` must not be set alongside it:
+    // std runs `setpgid` before `pre_exec`, and `setsid` then fails with EPERM.
     #[cfg(unix)]
     // SAFETY: `setsid` is async-signal-safe and touches no memory shared with
     // the parent.

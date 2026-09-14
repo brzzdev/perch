@@ -380,6 +380,7 @@ dependencies = [
  "crossterm",
  "ctrlc",
  "indicatif",
+ "libc",
  "portable-pty",
  "tempfile",
  "thiserror 2.0.20",

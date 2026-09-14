@@ -2,7 +2,7 @@
 
 `git worktree remove` deregisters a worktree and unlinks its directory in one synchronous command. The unlink dominates runtime for large ignored trees. A measured 260,000-file worktree takes about 15 seconds even though Perch has finished every repository decision before that wait.
 
-Perch now moves a removable worktree to a collision-resistant hidden sibling on the same volume, asks Git to prune and verify the missing registration, then starts deletion in a separate process group. `wt rm` returns after the worker starts. Reclaiming disk space may finish later.
+Perch now moves a removable worktree to a collision-resistant hidden sibling on the same volume, asks Git to prune and verify the missing registration, then starts deletion in a separate session. `wt rm` returns after the worker starts. Reclaiming disk space may finish later.
 
 ## Consequences
 
@@ -12,6 +12,6 @@ Perch now moves a removable worktree to a collision-resistant hidden sibling on 
 - **Recovery is durable and exact.** Before moving anything, Perch records the full trash path in the repository's local Git config. The worker clears that entry only after deleting that exact path. Every later `wt` command retries recorded paths without waiting. This covers the last linked worktree and worktrees created outside Perch's usual directory layout.
 - **Reclamation targets stay narrow.** A retry accepts only an absolute path whose final component starts with `.perch-trash.`. Failure leaves that path and its config entry intact. Perch never falls back to a parent directory or pattern.
 - **A lost record requires manual reclamation.** If local Git config loses a reclamation record, Perch cannot discover the corresponding trash directory. It remains beside the worktree until the user removes it. This is the accepted cost of refusing pattern-driven deletion.
-- **The worker is detached from terminal interruption.** It has its own process group and no inherited standard streams. A Ctrl-C sent to the invoking shell's foreground group does not kill reclamation.
+- **The worker is detached from terminal interruption.** It starts its own session, which also makes it a process group leader, and inherits no standard streams. Neither a Ctrl-C to the invoking shell's foreground group nor a pane manager that signals every process in the invoking session reaches it. A removed hook that closes the workspace is one such sweep: `wt rm .` from a worktree's own workspace tears that workspace down as soon as the worker has started.
 
 There is no synchronous configuration switch. Failed background deletion stays silent because no caller is listening by then; its durable entry makes the next `wt` command the recovery path.

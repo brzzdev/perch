@@ -1,6 +1,7 @@
 pub mod app;
 pub mod git;
 mod grammar;
+mod session;
 
 pub use grammar::GrammarError;
 

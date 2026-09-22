@@ -1992,6 +1992,132 @@ fn wt_no_switch_finds_an_existing_worktree_without_claiming_to_switch() {
     );
 }
 
+/// The `git fetch` invocations a `perch` run made, read back from a `GIT_TRACE`
+/// file every git it spawned appends to — the background fetch's own stderr is
+/// captured, so tracing to the terminal would miss it.
+fn perch_traced(parent: &TempDir, work: &Path, args: &[&str]) -> (Output, Vec<String>) {
+    let trace = parent.path().join("git-trace.log");
+    let output = perch_command(work, args)
+        .env("PERCH_NO_HOOKS", "1")
+        .env("GIT_TRACE", &trace)
+        .output()
+        .expect("failed to run perch");
+    let fetches = fs::read_to_string(&trace)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| line.contains("git fetch"))
+        .map(str::to_string)
+        .collect();
+    (output, fetches)
+}
+
+/// A branch the remote has that this clone has never fetched is what the
+/// prefetch is for: resolved against the refs from before it, the name looks
+/// new and gets a fresh branch off the default instead of the remote's commits.
+#[test]
+fn wt_creates_a_worktree_for_a_remote_branch_this_clone_has_never_fetched() {
+    let (bare, parent, work) = setup_with_parent();
+    let other = clone_bare(bare.path());
+    git(other.path(), &["switch", "-c", "feat/x"]);
+    commit_in(other.path(), "x.txt", "on feat/x");
+    git(other.path(), &["push", "origin", "feat/x"]);
+    let tip = remote_branch_tip(&work, "origin", "feat/x").unwrap();
+
+    let output = perch_args(&work, &["wt", "feat/x", "--no-switch"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    let path = parent.path().join("worktrees").join("repo").join("feat/x");
+    let head = git(&path, &["rev-parse", "HEAD"]);
+    assert_eq!(
+        stdout_str(&head).trim(),
+        tip,
+        "worktree is not at the remote tip"
+    );
+    let upstream = git(&path, &["rev-parse", "--abbrev-ref", "@{upstream}"]);
+    assert_eq!(stdout_str(&upstream).trim(), "origin/feat/x");
+}
+
+#[test]
+fn wt_updates_an_existing_worktree_with_a_single_fetch() {
+    let (_bare, parent, work) = setup_with_parent();
+    add_worktree(&work, &parent, "feature");
+
+    let (output, fetches) = perch_traced(&parent, &work, &["wt", "feature", "--no-switch"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert_eq!(fetches.len(), 1, "fetches: {fetches:?}");
+}
+
+#[test]
+fn wt_creates_a_worktree_with_a_single_fetch_when_the_branch_shares_the_remote() {
+    let (_bare, parent, work) = setup_with_parent();
+    git(&work, &["branch", "feature"]);
+
+    let (output, fetches) = perch_traced(&parent, &work, &["wt", "feature", "--no-switch"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert_eq!(fetches.len(), 1, "fetches: {fetches:?}");
+}
+
+/// The prefetch covers the current branch's remote and no other, so a branch
+/// tracking a second remote is still fetched from there before its worktree is
+/// made, as it was before the prefetch existed.
+#[test]
+fn wt_fetches_the_branch_remote_too_when_it_is_not_the_one_prefetched() {
+    let (_bare, parent, work) = setup_with_parent();
+    let upstream = TempDir::new().unwrap();
+    git(upstream.path(), &["init", "--bare"]);
+    git(
+        &work,
+        &[
+            "remote",
+            "add",
+            "upstream",
+            upstream.path().to_str().unwrap(),
+        ],
+    );
+    git(&work, &["branch", "feature"]);
+    git(&work, &["push", "-u", "upstream", "feature"]);
+
+    let (output, fetches) = perch_traced(&parent, &work, &["wt", "feature", "--no-switch"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert_eq!(fetches.len(), 2, "fetches: {fetches:?}");
+    assert!(fetches[0].ends_with("origin"), "fetches: {fetches:?}");
+    assert!(fetches[1].ends_with("upstream"), "fetches: {fetches:?}");
+}
+
+/// A remote that cannot be reached is worth one warning, not one per attempt,
+/// and no reason to refuse a new branch: making one offline is legitimate.
+#[test]
+fn wt_reports_an_unreachable_remote_once_and_still_creates_the_branch() {
+    let (_bare, parent, work) = setup_with_parent();
+    git(
+        &work,
+        &["remote", "set-url", "origin", "/nonexistent/nowhere"],
+    );
+
+    let output = perch_args(&work, &["wt", "brand-new", "--no-switch"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    let stderr = stderr_str(&output);
+    assert_eq!(
+        stderr.matches("fetch failed; results may be stale").count(),
+        1,
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.find("fetch failed").unwrap() < stderr.find("created brand-new").unwrap(),
+        "the fetch failure must be reported before the creation: {stderr}"
+    );
+    let path = parent
+        .path()
+        .join("worktrees")
+        .join("repo")
+        .join("brand-new");
+    assert!(path.is_dir(), "missing worktree: {}", path.display());
+}
+
 #[test]
 fn wt_no_switch_is_rejected_before_rm() {
     let (_bare, parent, work) = setup_with_parent();
@@ -3682,6 +3808,98 @@ fn reclamation_survives_a_hangup_sent_to_the_invoking_session() {
         poll_until(|| reclamation_record_is_cleared(&work)),
         "successful reclamation should clear its durable record"
     );
+}
+
+/// Whether any live process was started with `helper` on its command line.
+fn helper_is_running(helper: &Path) -> bool {
+    let listing = Command::new("ps")
+        .args(["-A", "-o", "command="])
+        .output()
+        .expect("failed to list processes");
+    stdout_str(&listing).contains(helper.to_str().unwrap())
+}
+
+/// The fetch starts before the picker and must not outlive it: Esc and Ctrl-C
+/// (a key in raw mode, not a signal, so nothing reaches the child on its own)
+/// each leave no transport running once `perch` has exited. And while the
+/// picker is open the fetch has no terminal, so a transport that wants a
+/// passphrase has nowhere to ask for one.
+#[test]
+fn dismissing_the_wt_picker_ends_a_background_fetch_that_never_reached_the_terminal() {
+    use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+    use std::io::{Read, Write};
+    use std::sync::Arc;
+
+    for key in [&b"\x1b"[..], &b"\x03"[..]] {
+        let (_bare, parent, work) = setup_with_parent();
+        // A transport that tries the terminal, says so, then hangs: the remote
+        // helper protocol reads nothing back from it, so the fetch waits.
+        let tried = parent.path().join("tried-the-terminal");
+        let helper = parent.path().join("hang.sh");
+        fs::write(
+            &helper,
+            format!(
+                "#!/bin/sh\nprintf 'PASSPHRASE?' > /dev/tty\ntouch '{}'\nsleep 60\n",
+                tried.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
+        git(
+            &work,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                &format!("ext::{}", helper.display()),
+            ],
+        );
+        git(&work, &["config", "protocol.ext.allow", "always"]);
+
+        let pty = native_pty_system()
+            .openpty(PtySize::default())
+            .expect("failed to open pty");
+        let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_perch"));
+        cmd.arg("wt");
+        cmd.cwd(&work);
+        cmd.env("PERCH_NO_HOOKS", "1");
+        let mut child = ChildGuard(pty.slave.spawn_command(cmd).expect("failed to spawn"));
+        drop(pty.slave);
+
+        let mut reader = pty.master.try_clone_reader().unwrap();
+        let mut writer = pty.master.take_writer().unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let collected = Arc::clone(&seen);
+        let output = std::thread::spawn(move || {
+            let mut chunk = [0u8; 1024];
+            while let Ok(n) = reader.read(&mut chunk) {
+                if n == 0 {
+                    break;
+                }
+                collected.lock().unwrap().extend_from_slice(&chunk[..n]);
+            }
+        });
+
+        assert!(poll_until(|| tried.exists()), "the transport never ran");
+        wait_for(&seen, "(type to filter):");
+        writer.write_all(key).unwrap();
+        writer.flush().unwrap();
+
+        child.wait_bounded();
+        drop(writer);
+        drop(pty.master);
+        output.join().unwrap();
+
+        let screen = String::from_utf8_lossy(&seen.lock().unwrap()).into_owned();
+        assert!(
+            !screen.contains("PASSPHRASE?"),
+            "the background fetch reached the terminal: {screen}"
+        );
+        assert!(
+            poll_until(|| !helper_is_running(&helper)),
+            "the fetch outlived perch after {key:?}"
+        );
+    }
 }
 
 #[test]

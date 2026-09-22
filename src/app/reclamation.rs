@@ -5,10 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[cfg(unix)]
-use std::os::unix::process::CommandExt;
-
-use crate::{AppResult, Error, git};
+use crate::{AppResult, Error, git, session};
 
 const CONFIG_KEY: &str = "perch.reclamation.worktree";
 const LOCK_FILE: &str = "perch-reclamation.lock";
@@ -354,19 +351,8 @@ fn spawn_worker(record: &Record) -> std::io::Result<()> {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     // A new session, so a manager that sweeps the invoking session cannot kill
-    // the worker (ADR 0010). `process_group(0)` must not be set alongside it:
-    // std runs `setpgid` before `pre_exec`, and `setsid` then fails with EPERM.
-    #[cfg(unix)]
-    // SAFETY: `setsid` is async-signal-safe and touches no memory shared with
-    // the parent.
-    unsafe {
-        command.pre_exec(|| {
-            if libc::setsid() == -1 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
+    // the worker (ADR 0010).
+    session::detach(&mut command);
     command.spawn().map(|_| ())
 }
 

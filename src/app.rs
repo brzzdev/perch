@@ -11,6 +11,7 @@ pub mod complete;
 pub(crate) mod hook;
 pub(crate) mod marker;
 pub(crate) mod picker;
+pub(crate) mod prefetch;
 mod reclamation;
 pub(crate) mod removal;
 pub mod wt;
@@ -160,7 +161,7 @@ fn run_verb(verb: Verb, target: Option<&str>) -> AppResult<()> {
         }
         // The target may track a different remote than the current branch.
         let target_remote = git::current_remote(Some(target.as_str()));
-        if let Err(e) = wt::update_in(&held_by.path, &target, &target_remote) {
+        if let Err(e) = wt::update_in(&held_by.path, &target, &target_remote, None) {
             eprintln!(
                 "{} update of {} failed: {e}",
                 style("!").yellow().bold(),
@@ -252,8 +253,7 @@ fn refresh_current(remote: &str, current: &str) -> AppResult<()> {
         let _cursor_guard = CursorGuard::hide();
         spinner.enable_steady_tick(std::time::Duration::from_millis(80));
 
-        let fetch_outcome =
-            git::fetch(None, remote).unwrap_or_else(|e| git::FetchOutcome::Failed(e.to_string()));
+        let fetch_outcome = git::fetch(None, remote);
         let has_remote = git::remote_branch_exists(remote, current);
 
         spinner.finish_and_clear();
@@ -396,7 +396,7 @@ fn switch_and_update(target: &str, old_branch: Option<&str>, remote: &str) -> Ap
         git::checkout(target)?;
     }
 
-    match fetch_and_ff(None, target, remote)? {
+    match fetch_and_ff(None, target, remote, None)? {
         git::FastForwardResult::Diverged => reconcile_diverged(target, remote)?,
         git::FastForwardResult::Merged(report) => report_update(&report),
     }
@@ -415,25 +415,29 @@ fn switch_and_update(target: &str, old_branch: Option<&str>, remote: &str) -> Ap
 /// worktree at `dir` (via `git -C`). Shows a spinner and surfaces fetch
 /// failures; the caller decides how to handle the [`git::FastForwardResult`]
 /// (the in-place switch offers a rebase on diverge; worktree updates don't).
+/// A `fetched` that covers `remote` skips the fetch; without one this fetches
+/// unconditionally, as every caller but `wt` needs.
 pub(crate) fn fetch_and_ff(
     dir: Option<&std::path::Path>,
     branch: &str,
     remote: &str,
+    fetched: Option<&prefetch::FetchedRemote>,
 ) -> AppResult<git::FastForwardResult> {
     let (fetch_outcome, merge_result) = {
         let spinner = ProgressBar::new_spinner().with_message(format!("Updating {branch}…"));
         let _cursor_guard = CursorGuard::hide();
         spinner.enable_steady_tick(std::time::Duration::from_millis(80));
 
-        let fetch_outcome =
-            git::fetch(dir, remote).unwrap_or_else(|e| git::FetchOutcome::Failed(e.to_string()));
+        let fetch_outcome = prefetch::fetch_unless_covered(dir, remote, fetched);
         let result = git::fast_forward_merge(dir, branch, remote);
 
         spinner.finish_and_clear();
         (fetch_outcome, result)
     };
 
-    report_fetch_failure(&fetch_outcome);
+    if let Some(outcome) = &fetch_outcome {
+        report_fetch_failure(outcome);
+    }
 
     merge_result
 }
@@ -441,7 +445,7 @@ pub(crate) fn fetch_and_ff(
 /// Warn that a fetch failed (so callers know results may be stale), printing
 /// git's detail lines. A no-op on success. Shared by the switch and refresh
 /// flows, both of which fetch behind a spinner.
-fn report_fetch_failure(outcome: &git::FetchOutcome) {
+pub(crate) fn report_fetch_failure(outcome: &git::FetchOutcome) {
     let git::FetchOutcome::Failed(detail) = outcome else {
         return;
     };

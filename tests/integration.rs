@@ -86,7 +86,8 @@ fn perch_hooked(dir: &Path, args: &[&str]) -> Output {
 fn perch_command(dir: &Path, args: &[&str]) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_perch"));
     // A transport program in the developer's own environment would make every
-    // worktree fetch for itself, and the tests that count fetches say so.
+    // worktree fetch for itself, and the tests that count fetches say so. So
+    // would a relative or empty `PATH` entry, or a relative `GIT_EXEC_PATH`.
     cmd.args(args)
         .current_dir(dir)
         .env_remove("GIT_PROXY_COMMAND")
@@ -2394,7 +2395,9 @@ fn wt_still_fetches_a_worktree_with_submodules() {
     );
     // Advance the submodule, and the gitlink on the remote's `feature` to match.
     commit_in(submodule.path(), "s2.txt", "sub ahead");
-    let sub_tip = stdout_str(&git(submodule.path(), &["rev-parse", "HEAD"]));
+    let sub_tip = stdout_str(&git(submodule.path(), &["rev-parse", "HEAD"]))
+        .trim()
+        .to_string();
     let pusher = clone_bare(bare.path());
     git(pusher.path(), &["switch", "feature"]);
     git(
@@ -2402,24 +2405,31 @@ fn wt_still_fetches_a_worktree_with_submodules() {
         &[
             "update-index",
             "--cacheinfo",
-            &format!("160000,{},sub", sub_tip.trim()),
+            &format!("160000,{sub_tip},sub"),
         ],
     );
     git(pusher.path(), &["commit", "-m", "advance sub"]);
     git(pusher.path(), &["push", "origin", "feature"]);
     let mut command = perch_command(&work, &["wt", "feature", "--no-switch"]);
+    // `allow_file` for perch's own git, including the submodule fetches.
     command
         .env("GIT_CONFIG_COUNT", "1")
         .env("GIT_CONFIG_KEY_0", "protocol.file.allow")
         .env("GIT_CONFIG_VALUE_0", "always");
 
-    let (output, _fetches) = perch_traced_with(&parent, command);
+    let (output, fetches) = perch_traced_with(&parent, command);
 
     assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    // The trace also carries each fetch's recursion into its submodule.
+    let own = fetches
+        .iter()
+        .filter(|line| line.ends_with("git fetch --quiet --prune origin"))
+        .count();
+    assert_eq!(own, 2, "fetches: {fetches:?}");
     // Fails unless the target's submodule repository holds the new commit.
     git(
         &worktree.join("sub"),
-        &["cat-file", "-e", &format!("{}^{{commit}}", sub_tip.trim())],
+        &["cat-file", "-e", &format!("{sub_tip}^{{commit}}")],
     );
 }
 

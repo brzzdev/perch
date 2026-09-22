@@ -99,7 +99,7 @@ impl FetchContext {
     fn names_one_repository(&self, remote: &str) -> bool {
         let upload_pack = format!("remote.{remote}.uploadpack");
         let vcs = format!("remote.{remote}.vcs");
-        let from_the_config = self.config.iter().any(|entry| {
+        let config_resolves_per_directory = self.config.iter().any(|entry| {
             // The key, then a newline and the value where it has one.
             let (key, value) = entry.split_once('\n').unwrap_or((entry, ""));
             match key {
@@ -115,7 +115,7 @@ impl FetchContext {
                 _ => false,
             }
         });
-        !from_the_config
+        !config_resolves_per_directory
             && !environment_resolves_per_directory()
             && self.url.as_deref().is_some_and(names_one_repository)
     }

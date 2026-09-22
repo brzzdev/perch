@@ -4020,10 +4020,13 @@ fn a_real_sigint_ends_the_background_fetch_before_perch_exits() {
     let (_bare, parent, work) = setup_with_parent();
     let tried = parent.path().join("tried-the-transport");
     let helper = parent.path().join("hang.sh");
+    // The transport shrugs off SIGTERM, so ending it takes the whole grace —
+    // the window in which a run that did not stop at the interrupt would get
+    // as far as making the worktree.
     fs::write(
         &helper,
         format!(
-            "#!/bin/sh\ntouch '{}'\nwhile :; do sleep 1; done\n",
+            "#!/bin/sh\ntouch '{}'\ntrap '' TERM\nwhile :; do sleep 1; done\n",
             tried.display()
         ),
     )
@@ -4057,6 +4060,14 @@ fn a_real_sigint_ends_the_background_fetch_before_perch_exits() {
     assert!(
         poll_until(|| !helper_is_running(&helper)),
         "the fetch outlived perch after a real SIGINT"
+    );
+    // The interrupt asked for none of the work the run was about to do, and
+    // laying out the directory a worktree goes in is the first of it.
+    let worktrees = parent.path().join("worktrees");
+    assert!(
+        !worktrees.exists(),
+        "the interrupted run carried on into making a worktree at {}",
+        worktrees.display()
     );
 }
 

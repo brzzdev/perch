@@ -65,7 +65,7 @@ pub(crate) fn run(
 
     // Joined before the worktrees are read again below, so a slow join cannot
     // make that snapshot stale in its turn.
-    let fetched = prefetch.map(Prefetch::join);
+    let fetched = prefetch.map(Prefetch::join).transpose()?;
 
     // Read the worktrees again before deciding what the branch needs: the list
     // above was drawn before the picker opened, and it then sat waiting on a

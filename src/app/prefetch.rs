@@ -5,12 +5,13 @@
 use std::path::Path;
 use std::process::Child;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use indicatif::ProgressBar;
 
 use super::{CursorGuard, report_fetch_failure};
-use crate::git;
+use crate::{AppResult, git};
 
 /// How long git gets to act on SIGTERM before the group is killed outright.
 /// Removing its lock files takes it milliseconds; the rest of the second is
@@ -22,6 +23,7 @@ const TERMINATION_GRACE: Duration = Duration::from_secs(1);
 const TERMINATION_POLL: Duration = Duration::from_millis(10);
 
 /// The process group of the background fetch, or `0` when none is running.
+/// One slot, because a run starts at most one [`Prefetch`].
 ///
 /// A real SIGINT leaves through the handler in `main`, which calls
 /// `process::exit` and so unwinds nothing: [`Prefetch::drop`] never runs, and
@@ -31,11 +33,22 @@ const TERMINATION_POLL: Duration = Duration::from_millis(10);
 /// since handed to someone else.
 static ACTIVE_GROUP: AtomicI32 = AtomicI32::new(0);
 
-/// Whether the run is being interrupted, so that [`Prefetch::join`] does not
-/// answer a fetch the interrupt just killed by starting another one. Set
-/// before the kill, and the kill is what releases the join, so the join
-/// cannot read this too early.
+/// Whether the run is being interrupted, so that [`Prefetch::join`] neither
+/// answers a fetch the interrupt just killed by starting another one, nor
+/// carries on into the work the run was going to do.
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+/// Held while the fetch is signalled, and while it is reaped, so that the two
+/// cannot interleave across threads. Reaping frees the process group id for
+/// reuse, so a reap that landed between an interrupt's SIGTERM and its SIGKILL
+/// would leave the SIGKILL naming whatever got the id next.
+static SIGNALLING: Mutex<()> = Mutex::new(());
+
+/// Poisoning is nothing to recover from here: the mutex guards no data, only
+/// the order of two operations on a child process.
+fn signalling() -> MutexGuard<'static, ()> {
+    SIGNALLING.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 /// How a remote name resolves where a fetch runs: the URL it fetches from,
 /// with any `insteadOf` rewrite applied, and the settings that shape what the
@@ -44,7 +57,7 @@ static INTERRUPTED: AtomicBool = AtomicBool::new(false);
 /// the same fetch only when the whole of this matches. Comparing the settings
 /// wholesale rather than naming the keys that matter keeps a key nobody
 /// thought of from quietly suppressing a fetch that was not covered.
-#[derive(PartialEq)]
+#[derive(Default, PartialEq)]
 struct FetchContext {
     settings: Vec<String>,
     url: Option<String>,
@@ -96,7 +109,12 @@ pub(crate) fn fetch_unless_covered(
 /// A no-op where none is running. Never reaps: the [`Child`] belongs to the
 /// thread that started it, and the process is exiting, so what is left is
 /// reparented and reaped by init.
+///
+/// This waits and sleeps, neither of which would be safe inside a signal
+/// handler. It is called from one only in the sense that `ctrlc` runs its
+/// handler on a thread of its own rather than on the interrupted stack.
 pub(crate) fn terminate_active() {
+    let _signalling = signalling();
     INTERRUPTED.store(true, Ordering::SeqCst);
     let group = ACTIVE_GROUP.swap(0, Ordering::SeqCst);
     if group != 0 {
@@ -137,7 +155,7 @@ impl Prefetch {
     /// retried in the foreground with the user's own environment, so a
     /// passphrase or credential prompt can be answered; only that final
     /// outcome is reported.
-    pub(crate) fn join(mut self) -> FetchedRemote {
+    pub(crate) fn join(mut self) -> AppResult<FetchedRemote> {
         let remote = std::mem::take(&mut self.remote);
         let outcome = {
             let spinner = ProgressBar::new_spinner().with_message(format!("Fetching {remote}…"));
@@ -145,8 +163,15 @@ impl Prefetch {
             spinner.enable_steady_tick(Duration::from_millis(80));
             let succeeded = self.child.take().is_some_and(|mut child| {
                 wait_for_exit(&child);
-                // Cleared once the fetch has exited but before the reap below
-                // frees its id, so the handler can never name a stranger.
+                let _signalling = signalling();
+                // An interrupt owns the fetch from the moment it is flagged.
+                // Leaving the child unreaped is what keeps its group id
+                // reserved until the interrupt's last signal has landed.
+                if INTERRUPTED.load(Ordering::SeqCst) {
+                    return false;
+                }
+                // Cleared before the reap below frees the id, so an interrupt
+                // arriving now finds nothing to signal rather than a stranger.
                 ACTIVE_GROUP.store(0, Ordering::SeqCst);
                 child.wait().is_ok_and(|status| status.success())
             });
@@ -162,13 +187,16 @@ impl Prefetch {
             outcome
         };
         report_fetch_failure(&outcome);
-        FetchedRemote {
-            context: FetchContext {
-                settings: std::mem::take(&mut self.context.settings),
-                url: self.context.url.take(),
-            },
-            name: remote,
+        // The run stops here rather than going on to make a worktree and fire
+        // its hooks: the interrupt is the user asking for none of that, and
+        // the handler is meanwhile seeing the fetch off.
+        if INTERRUPTED.load(Ordering::SeqCst) {
+            return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "interrupted").into());
         }
+        Ok(FetchedRemote {
+            context: std::mem::take(&mut self.context),
+            name: remote,
+        })
     }
 }
 
@@ -177,6 +205,7 @@ impl Drop for Prefetch {
         let Some(mut child) = self.child.take() else {
             return;
         };
+        let _signalling = signalling();
         match group_of(&child) {
             Some(group) => end_group(group),
             // Nothing to signal as a group, so git alone — rather than an
@@ -216,16 +245,18 @@ enum Signal {
     Term,
 }
 
-/// Blocks until the fetch has exited, leaving it unreaped. Reaping is what
-/// frees a pid for reuse, and [`ACTIVE_GROUP`] still names this one, so the
-/// caller clears that first and reaps second.
+/// Blocks until the fetch has exited, leaving it unreaped — `WNOWAIT` reports
+/// the exit without consuming it. Reaping is what frees a pid for reuse, and
+/// [`ACTIVE_GROUP`] still names this one, so the caller clears that first and
+/// reaps second. What the wait reports is discarded: the caller reads the
+/// status from the reap.
 #[cfg(unix)]
 fn wait_for_exit(child: &Child) {
     let pid: libc::id_t = child.id();
     loop {
-        let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
-        // SAFETY: `waitid` writes only the `siginfo_t` it is handed, and
-        // `WNOWAIT` leaves the child for the caller to reap.
+        let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::uninit();
+        // SAFETY: `info` is a live, aligned allocation of exactly the
+        // `siginfo_t` the call writes, and nothing reads it afterwards.
         let waited = unsafe {
             libc::waitid(
                 libc::P_PID,
@@ -241,9 +272,6 @@ fn wait_for_exit(child: &Child) {
         }
     }
 }
-
-#[cfg(not(unix))]
-fn wait_for_exit(_child: &Child) {}
 
 #[cfg(unix)]
 fn group_of(child: &Child) -> Option<i32> {
@@ -268,6 +296,9 @@ fn group_is_alive(group: i32) -> bool {
     // SAFETY: the null signal only probes for the group's existence.
     unsafe { libc::kill(-group, 0) == 0 }
 }
+
+#[cfg(not(unix))]
+fn wait_for_exit(_child: &Child) {}
 
 #[cfg(not(unix))]
 fn group_of(_child: &Child) -> Option<i32> {

@@ -303,6 +303,30 @@ pub fn remote_url(dir: Option<&Path>, remote: &str) -> Option<String> {
         .map(|url| url.trim().to_string())
 }
 
+/// Every `remote.<name>.*` setting in force in `dir`, as git prints them,
+/// sorted so that two directories compare equal whatever order each lists
+/// them in. The refspec is the one that matters most: it decides which refs a
+/// fetch brings back, and a worktree can carry its own.
+///
+/// Every remote is read and the wanted one filtered here, rather than asking
+/// git for `^remote\.<name>\.`, because a remote name may contain regex
+/// metacharacters — a `.` in the name would otherwise match any character and
+/// pull in a different remote's settings.
+#[must_use]
+pub fn remote_settings(dir: Option<&Path>, remote: &str) -> Vec<String> {
+    let Ok(output) = run_in(dir, &["config", "--get-regexp", "^remote\\."]) else {
+        return Vec::new();
+    };
+    let prefix = format!("remote.{remote}.");
+    let mut settings: Vec<String> = output
+        .lines()
+        .filter(|line| line.starts_with(&prefix))
+        .map(str::to_string)
+        .collect();
+    settings.sort();
+    settings
+}
+
 /// Rebase the current branch onto `onto` (e.g. `origin/main`). Git's stdout
 /// and stderr stream directly to the terminal so users see progress and
 /// conflict markers in real time. On failure the rebase is aborted, leaving

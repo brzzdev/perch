@@ -2087,6 +2087,57 @@ fn wt_fetches_the_branch_remote_too_when_it_is_not_the_one_prefetched() {
     assert!(fetches[1].ends_with("upstream"), "fetches: {fetches:?}");
 }
 
+/// Two worktrees can point one remote name at the same URL and still fetch
+/// different refs, since the refspec is per-worktree config like any other.
+/// A prefetch that brought back only `main` covers nothing the target worktree
+/// needs, so its update must still fetch for itself.
+#[test]
+fn wt_still_fetches_a_worktree_whose_origin_fetches_other_refs() {
+    let (bare, parent, work) = setup_with_parent();
+    let worktree = add_worktree(&work, &parent, "feature");
+    git(&work, &["push", "origin", "feature"]);
+    git(&work, &["fetch", "--prune", "origin"]);
+    git(&work, &["config", "core.repositoryFormatVersion", "1"]);
+    git(&work, &["config", "extensions.worktreeConfig", "true"]);
+    // The invoking worktree fetches only `main`; the target fetches the lot.
+    git(&work, &["config", "--unset-all", "remote.origin.fetch"]);
+    git(
+        &work,
+        &[
+            "config",
+            "--worktree",
+            "remote.origin.fetch",
+            "+refs/heads/main:refs/remotes/origin/main",
+        ],
+    );
+    git(
+        &worktree,
+        &[
+            "config",
+            "--worktree",
+            "remote.origin.fetch",
+            "+refs/heads/*:refs/remotes/origin/*",
+        ],
+    );
+    // Advance `feature` on the remote behind both worktrees' backs.
+    let pusher = clone_bare(bare.path());
+    git(pusher.path(), &["switch", "feature"]);
+    commit_in(pusher.path(), "ahead.txt", "ahead");
+    git(pusher.path(), &["push", "origin", "feature"]);
+    let tip = remote_branch_tip(&work, "origin", "feature").unwrap();
+
+    let (output, fetches) = perch_traced(&parent, &work, &["wt", "feature", "--no-switch"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert_eq!(fetches.len(), 2, "fetches: {fetches:?}");
+    let head = git(&worktree, &["rev-parse", "HEAD"]);
+    assert_eq!(
+        stdout_str(&head).trim(),
+        tip,
+        "the worktree was not brought up to its own origin/feature"
+    );
+}
+
 /// The prefetch covers a remote *name* as the invoking worktree resolves it.
 /// With `extensions.worktreeConfig` the same name can point elsewhere from
 /// another worktree, and that worktree's update must still fetch from where
@@ -3959,6 +4010,54 @@ fn dismissing_the_wt_picker_ends_a_background_fetch_that_never_reached_the_termi
             "the fetch outlived perch after {key:?} with a helper that does `{hang}`"
         );
     }
+}
+
+/// A real SIGINT leaves through the handler in `main`, which exits without
+/// unwinding — so the drop guard never runs, and the fetch leads a session of
+/// its own that the signal never reached. Nothing else would end it.
+#[test]
+fn a_real_sigint_ends_the_background_fetch_before_perch_exits() {
+    let (_bare, parent, work) = setup_with_parent();
+    let tried = parent.path().join("tried-the-transport");
+    let helper = parent.path().join("hang.sh");
+    fs::write(
+        &helper,
+        format!(
+            "#!/bin/sh\ntouch '{}'\nwhile :; do sleep 1; done\n",
+            tried.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
+    git(
+        &work,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            &format!("ext::{}", helper.display()),
+        ],
+    );
+    git(&work, &["config", "protocol.ext.allow", "always"]);
+
+    // A named target needs no terminal, so the run reaches the join — and
+    // blocks there on the fetch — with no picker in the way.
+    let mut child = perch_command(&work, &["wt", "feature", "--no-switch"])
+        .env("PERCH_NO_HOOKS", "1")
+        .spawn()
+        .expect("failed to spawn perch");
+    assert!(poll_until(|| tried.exists()), "the transport never ran");
+
+    let pid = libc::pid_t::try_from(child.id()).unwrap();
+    // SAFETY: plain signal delivery to a child this test spawned.
+    unsafe { libc::kill(pid, libc::SIGINT) };
+    let status = child.wait().expect("failed to wait for perch");
+
+    assert_eq!(status.code(), Some(130), "perch did not exit on the signal");
+    assert!(
+        poll_until(|| !helper_is_running(&helper)),
+        "the fetch outlived perch after a real SIGINT"
+    );
 }
 
 #[test]

@@ -99,6 +99,13 @@ pub(crate) fn run_invocation(invocation: Invocation) -> AppResult<()> {
     }
 }
 
+/// End any background work this process started, for a caller about to exit
+/// without unwinding — the Ctrl-C handler, which `process::exit`s and so runs
+/// no destructor. A no-op where nothing is running.
+pub fn terminate_background_work() {
+    prefetch::terminate_active();
+}
+
 /// Run the private detached reclamation mode when requested by a child process.
 /// `None` means this is an ordinary user invocation.
 #[must_use]

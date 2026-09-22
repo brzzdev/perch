@@ -303,10 +303,11 @@ pub fn remote_url(dir: Option<&Path>, remote: &str) -> Option<String> {
         .map(|url| url.trim().to_string())
 }
 
-/// Every `remote.<name>.*` setting in force in `dir`, sorted so that two
-/// directories compare equal whatever order each lists them in. The refspec is
-/// the one that matters most: it decides which refs a fetch brings back, and a
-/// worktree can carry its own.
+/// Every `remote.<name>.*` setting in force in `dir`, in the order git reads
+/// them. The order is kept because it carries precedence: a scalar setting
+/// takes its last value, so the same entries listed in another order can mean
+/// a different fetch. The refspec is the one that matters most: it decides
+/// which refs a fetch brings back, and a worktree can carry its own.
 ///
 /// Entries come back NUL-separated, which keeps a value containing a newline
 /// whole — line-separated output would split it and the tail would be dropped
@@ -320,13 +321,11 @@ pub fn remote_settings(dir: Option<&Path>, remote: &str) -> Vec<String> {
         return Vec::new();
     };
     let prefix = format!("remote.{remote}.");
-    let mut settings: Vec<String> = output
+    output
         .split('\0')
         .filter(|entry| entry.starts_with(&prefix))
         .map(str::to_string)
-        .collect();
-    settings.sort();
-    settings
+        .collect()
 }
 
 /// Rebase the current branch onto `onto` (e.g. `origin/main`). Git's stdout

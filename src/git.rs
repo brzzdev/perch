@@ -279,13 +279,18 @@ pub fn fetch(dir: Option<&Path>, remote: &str) -> FetchOutcome {
 /// to know `SSH_ASKPASS_REQUIRE` and for a `core.sshCommand` of the user's
 /// own; left unset instead, OpenSSH would fall back to its default askpass.
 /// `SSH_ASKPASS_REQUIRE=never` says the same to an OpenSSH that does know it.
-/// A fetch that needs a person fails fast
-/// into the foreground retry, which has the user's askpass back. Auth that
-/// needs no person, an agent or a keychain helper, still works. Its output
-/// goes nowhere: only whether it succeeded is ever read.
+/// Credential helpers can prompt with no terminal too, in a window of their
+/// own, and `credential.interactive=false` asks them not to — Git Credential
+/// Manager among those that listen. A helper that ignores it is the user's to
+/// answer for: running no helpers at all would also lose the keychain ones.
+/// A fetch that needs a person fails fast into the foreground retry, which has
+/// the user's askpass and helpers back. Auth that needs no person, an agent or
+/// a keychain helper, still works. Its output goes nowhere: only whether it
+/// succeeded is ever read.
 pub fn fetch_in_background(remote: &str) -> std::io::Result<Child> {
     let mut command = git_cmd(None);
     command
+        .args(["-c", "credential.interactive=false"])
         .args(fetch_args(remote))
         .env("GIT_ASKPASS", "")
         .env("GIT_TERMINAL_PROMPT", "0")

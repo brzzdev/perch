@@ -4152,78 +4152,119 @@ fn dismissing_the_wt_picker_ends_a_background_fetch_that_never_reached_the_termi
 /// An askpass program prompts without a terminal, so from the background
 /// fetch it would open a dialog behind the picker, or block it. Only the
 /// foreground retry, where the user is waiting on the fetch, may run one —
-/// whether git asks for a credential or ssh for a passphrase.
+/// whether git asks for a credential or ssh for a passphrase. A credential
+/// helper can open a window of its own just the same, so the background fetch
+/// asks it not to.
 #[test]
-fn only_the_foreground_retry_runs_askpass() {
-    // A transport that wants credentials, then fails either way.
-    const NEEDS_CREDENTIALS: &str = "#!/bin/sh\nprintf 'protocol=https\\nhost=example.com\\n\\n' \\\n  | git -c credential.helper= credential fill >/dev/null\nexit 1\n";
-    // An ssh that, like an OpenSSH too old for `SSH_ASKPASS_REQUIRE`, runs
-    // whatever `SSH_ASKPASS` names when it has no terminal.
-    const ASKS_FOR_A_PASSPHRASE: &str =
-        "#!/bin/sh\n[ -n \"$SSH_ASKPASS\" ] && \"$SSH_ASKPASS\" 'Passphrase:' >/dev/null\nexit 1\n";
+fn only_the_foreground_retry_prompts() {
+    enum Prompt {
+        Askpass,
+        CredentialHelper,
+        SshPassphrase,
+    }
 
-    for (script, ssh) in [(NEEDS_CREDENTIALS, false), (ASKS_FOR_A_PASSPHRASE, true)] {
+    for prompt in [
+        Prompt::Askpass,
+        Prompt::CredentialHelper,
+        Prompt::SshPassphrase,
+    ] {
         let (_bare, parent, work) = setup_with_parent();
         let asked = parent.path().join("asked");
-        let askpass = parent.path().join("askpass.sh");
-        // The background fetch runs with `GIT_TERMINAL_PROMPT=0`, the retry
-        // without.
+        let prompter = parent.path().join("prompter.sh");
+        // Records each prompt shown. The background fetch runs with
+        // `GIT_TERMINAL_PROMPT=0`, the retry without. As a credential helper
+        // it listens to `credential.interactive`, as Git Credential Manager
+        // does, and answers only `get`.
         fs::write(
-            &askpass,
+            &prompter,
             format!(
-                "#!/bin/sh\necho \"prompt=${{GIT_TERMINAL_PROMPT:-unset}}\" >> '{}'\necho x\n",
+                "#!/bin/sh\n\
+                 case \"$1\" in store|erase) exit 0 ;; esac\n\
+                 [ \"$(git config --get credential.interactive)\" = false ] && exit 0\n\
+                 echo \"prompt=${{GIT_TERMINAL_PROMPT:-unset}}\" >> '{}'\n\
+                 case \"$1\" in get) echo username=x; echo password=x ;; *) echo x ;; esac\n",
                 asked.display()
             ),
         )
         .unwrap();
+        // A transport that wants credentials or a passphrase, then fails
+        // either way. The ssh one, like an OpenSSH too old for
+        // `SSH_ASKPASS_REQUIRE`, runs whatever `SSH_ASKPASS` names when it has
+        // no terminal.
+        let helper = match prompt {
+            Prompt::Askpass | Prompt::SshPassphrase => String::new(),
+            Prompt::CredentialHelper => format!("!{}", prompter.display()),
+        };
+        let script = match prompt {
+            Prompt::Askpass | Prompt::CredentialHelper => format!(
+                "#!/bin/sh\nprintf 'protocol=https\\nhost=example.com\\n\\n' \\\n  \
+                 | git -c credential.helper= -c credential.helper='{helper}' credential fill >/dev/null\n\
+                 exit 1\n"
+            ),
+            Prompt::SshPassphrase => {
+                "#!/bin/sh\n[ -n \"$SSH_ASKPASS\" ] && \"$SSH_ASKPASS\" 'Passphrase:' >/dev/null\nexit 1\n"
+                    .to_string()
+            }
+        };
         let transport = parent.path().join("transport.sh");
         fs::write(&transport, script).unwrap();
-        for script in [&askpass, &transport] {
+        for script in [&prompter, &transport] {
             fs::set_permissions(script, fs::Permissions::from_mode(0o755)).unwrap();
         }
-        if ssh {
-            git(
-                &work,
-                &[
-                    "remote",
-                    "set-url",
-                    "origin",
-                    "ssh://example.invalid/repo.git",
-                ],
-            );
-            git(
-                &work,
-                &["config", "core.sshCommand", transport.to_str().unwrap()],
-            );
-            git(&work, &["config", "ssh.variant", "simple"]);
-        } else {
-            git(
-                &work,
-                &[
-                    "remote",
-                    "set-url",
-                    "origin",
-                    &format!("ext::{}", transport.display()),
-                ],
-            );
-            git(&work, &["config", "protocol.ext.allow", "always"]);
+        match prompt {
+            Prompt::Askpass | Prompt::CredentialHelper => {
+                git(
+                    &work,
+                    &[
+                        "remote",
+                        "set-url",
+                        "origin",
+                        &format!("ext::{}", transport.display()),
+                    ],
+                );
+                git(&work, &["config", "protocol.ext.allow", "always"]);
+            }
+            Prompt::SshPassphrase => {
+                git(
+                    &work,
+                    &[
+                        "remote",
+                        "set-url",
+                        "origin",
+                        "ssh://example.invalid/repo.git",
+                    ],
+                );
+                git(
+                    &work,
+                    &["config", "core.sshCommand", transport.to_str().unwrap()],
+                );
+                git(&work, &["config", "ssh.variant", "simple"]);
+            }
+        }
+        let mut command = perch_command(&work, &["wt", "feature", "--no-switch"]);
+        command.env("PERCH_NO_HOOKS", "1");
+        // The helper route must reach the helper, not an askpass.
+        if !matches!(prompt, Prompt::CredentialHelper) {
+            command
+                .env("GIT_ASKPASS", &prompter)
+                .env("SSH_ASKPASS", &prompter);
         }
 
-        perch_command(&work, &["wt", "feature", "--no-switch"])
-            .env("GIT_ASKPASS", &askpass)
-            .env("PERCH_NO_HOOKS", "1")
-            .env("SSH_ASKPASS", &askpass)
-            .output()
-            .expect("failed to run perch");
+        command.output().expect("failed to run perch");
 
         let asked = fs::read_to_string(&asked).unwrap_or_default();
+        let route = match prompt {
+            Prompt::Askpass => "askpass",
+            Prompt::CredentialHelper => "credential helper",
+            Prompt::SshPassphrase => "ssh askpass",
+        };
         assert!(
             !asked.is_empty(),
-            "ssh: {ssh}: the foreground retry never ran askpass"
+            "{route}: the foreground retry never prompted"
         );
         assert!(
             !asked.contains("prompt=0"),
-            "ssh: {ssh}: the background fetch ran askpass: {asked}"
+            "{route}: the background fetch prompted: {asked}"
         );
     }
 }

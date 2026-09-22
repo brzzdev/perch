@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::{AppResult, Error, git, session};
+#[cfg(unix)]
+use crate::session;
+use crate::{AppResult, Error, git};
 
 const CONFIG_KEY: &str = "perch.reclamation.worktree";
 const LOCK_FILE: &str = "perch-reclamation.lock";
@@ -352,6 +354,7 @@ fn spawn_worker(record: &Record) -> std::io::Result<()> {
         .stderr(Stdio::null());
     // A new session, so a manager that sweeps the invoking session cannot kill
     // the worker (ADR 0010).
+    #[cfg(unix)]
     session::detach(&mut command);
     command.spawn().map(|_| ())
 }

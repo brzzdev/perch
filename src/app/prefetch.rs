@@ -91,13 +91,16 @@ impl Drop for Prefetch {
 /// `refs/remotes/*.lock` behind for the next fetch to trip over; and to the
 /// whole process group rather than git alone, so the `ssh` or remote helper
 /// it spawned goes with it. The child led its own session from the start, so
-/// its pid names the group. Should the group signal miss all the same, git
-/// alone is killed rather than waited on forever.
+/// its pid names the group. Where there is no group to signal, or the signal
+/// misses all the same, git alone is killed rather than waited on forever.
 fn terminate(child: &mut Child) {
     // SAFETY: plain signal delivery to a process group this process created
     // and has not yet reaped.
+    #[cfg(unix)]
     let signalled = libc::pid_t::try_from(child.id())
         .is_ok_and(|pid| unsafe { libc::kill(-pid, libc::SIGTERM) } == 0);
+    #[cfg(not(unix))]
+    let signalled = false;
     if !signalled {
         let _ = child.kill();
     }

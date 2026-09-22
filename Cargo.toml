@@ -22,7 +22,8 @@ ctrlc = "3"
 indicatif = "0.18"
 thiserror = "2"
 
-# std has no `setsid`; the detached reclamation worker needs one.
+# std has no `setsid` and no process-group `kill`; the detached reclamation
+# worker and the background fetch need them.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 

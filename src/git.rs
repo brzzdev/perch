@@ -7,7 +7,9 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
-use crate::{AppResult, Error, session};
+#[cfg(unix)]
+use crate::session;
+use crate::{AppResult, Error};
 
 pub enum MergeReport {
     UpToDate,
@@ -281,6 +283,7 @@ pub fn fetch_in_background(remote: &str) -> std::io::Result<Child> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    #[cfg(unix)]
     session::detach(&mut command);
     command.spawn()
 }

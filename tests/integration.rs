@@ -1993,8 +1993,8 @@ fn wt_no_switch_finds_an_existing_worktree_without_claiming_to_switch() {
 }
 
 /// The `git fetch` invocations a `perch` run made, read back from a `GIT_TRACE`
-/// file every git it spawned appends to — the background fetch's own stderr is
-/// captured, so tracing to the terminal would miss it.
+/// file every git it spawned appends to — the background fetch's own output
+/// goes nowhere, so tracing to the terminal would miss it.
 fn perch_traced(parent: &TempDir, work: &Path, args: &[&str]) -> (Output, Vec<String>) {
     let trace = parent.path().join("git-trace.log");
     let output = perch_command(work, args)

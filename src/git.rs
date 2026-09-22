@@ -274,8 +274,12 @@ pub fn fetch(dir: Option<&Path>, remote: &str) -> FetchOutcome {
 /// prompt on, and `GIT_TERMINAL_PROMPT=0` has git fail at once rather than try
 /// stdin, which is `/dev/null`. Askpass programs are switched off too, since
 /// they prompt without a terminal: an empty `GIT_ASKPASS` stands in for both
-/// `core.askPass` and `SSH_ASKPASS` on git's side, and `SSH_ASKPASS_REQUIRE`
-/// covers ssh's own passphrase prompt. A fetch that needs a person fails fast
+/// `core.askPass` and `SSH_ASKPASS` on git's side. On ssh's, an empty
+/// `SSH_ASKPASS` names no program to run, which holds for an OpenSSH too old
+/// to know `SSH_ASKPASS_REQUIRE` and for a `core.sshCommand` of the user's
+/// own; left unset instead, OpenSSH would fall back to its default askpass.
+/// `SSH_ASKPASS_REQUIRE=never` says the same to an OpenSSH that does know it.
+/// A fetch that needs a person fails fast
 /// into the foreground retry, which has the user's askpass back. Auth that
 /// needs no person, an agent or a keychain helper, still works. Its output
 /// goes nowhere: only whether it succeeded is ever read.
@@ -285,6 +289,7 @@ pub fn fetch_in_background(remote: &str) -> std::io::Result<Child> {
         .args(fetch_args(remote))
         .env("GIT_ASKPASS", "")
         .env("GIT_TERMINAL_PROMPT", "0")
+        .env("SSH_ASKPASS", "")
         .env("SSH_ASKPASS_REQUIRE", "never")
         .stdin(Stdio::null())
         .stdout(Stdio::null())

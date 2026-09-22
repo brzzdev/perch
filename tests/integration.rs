@@ -4088,54 +4088,81 @@ fn dismissing_the_wt_picker_ends_a_background_fetch_that_never_reached_the_termi
 
 /// An askpass program prompts without a terminal, so from the background
 /// fetch it would open a dialog behind the picker, or block it. Only the
-/// foreground retry, where the user is waiting on the fetch, may run one.
+/// foreground retry, where the user is waiting on the fetch, may run one —
+/// whether git asks for a credential or ssh for a passphrase.
 #[test]
 fn only_the_foreground_retry_runs_askpass() {
-    let (_bare, parent, work) = setup_with_parent();
-    let asked = parent.path().join("asked");
-    let askpass = parent.path().join("askpass.sh");
-    // The background fetch runs with `GIT_TERMINAL_PROMPT=0`, the retry without.
-    fs::write(
-        &askpass,
-        format!(
-            "#!/bin/sh\necho \"prompt=${{GIT_TERMINAL_PROMPT:-unset}}\" >> '{}'\necho x\n",
-            asked.display()
-        ),
-    )
-    .unwrap();
     // A transport that wants credentials, then fails either way.
-    let helper = parent.path().join("needs-credentials.sh");
-    fs::write(
-        &helper,
-        "#!/bin/sh\nprintf 'protocol=https\\nhost=example.com\\n\\n' \\\n  | git -c credential.helper= credential fill >/dev/null\nexit 1\n",
-    )
-    .unwrap();
-    for script in [&askpass, &helper] {
-        fs::set_permissions(script, fs::Permissions::from_mode(0o755)).unwrap();
+    const NEEDS_CREDENTIALS: &str = "#!/bin/sh\nprintf 'protocol=https\\nhost=example.com\\n\\n' \\\n  | git -c credential.helper= credential fill >/dev/null\nexit 1\n";
+    // An ssh that, like an OpenSSH too old for `SSH_ASKPASS_REQUIRE`, runs
+    // whatever `SSH_ASKPASS` names when it has no terminal.
+    const ASKS_FOR_A_PASSPHRASE: &str =
+        "#!/bin/sh\n[ -n \"$SSH_ASKPASS\" ] && \"$SSH_ASKPASS\" 'Passphrase:' >/dev/null\nexit 1\n";
+
+    for (script, ssh) in [(NEEDS_CREDENTIALS, false), (ASKS_FOR_A_PASSPHRASE, true)] {
+        let (_bare, parent, work) = setup_with_parent();
+        let asked = parent.path().join("asked");
+        let askpass = parent.path().join("askpass.sh");
+        // The background fetch runs with `GIT_TERMINAL_PROMPT=0`, the retry
+        // without.
+        fs::write(
+            &askpass,
+            format!(
+                "#!/bin/sh\necho \"prompt=${{GIT_TERMINAL_PROMPT:-unset}}\" >> '{}'\necho x\n",
+                asked.display()
+            ),
+        )
+        .unwrap();
+        let transport = parent.path().join("transport.sh");
+        fs::write(&transport, script).unwrap();
+        for script in [&askpass, &transport] {
+            fs::set_permissions(script, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        if ssh {
+            git(
+                &work,
+                &[
+                    "remote",
+                    "set-url",
+                    "origin",
+                    "ssh://example.invalid/repo.git",
+                ],
+            );
+            git(
+                &work,
+                &["config", "core.sshCommand", transport.to_str().unwrap()],
+            );
+            git(&work, &["config", "ssh.variant", "simple"]);
+        } else {
+            git(
+                &work,
+                &[
+                    "remote",
+                    "set-url",
+                    "origin",
+                    &format!("ext::{}", transport.display()),
+                ],
+            );
+            git(&work, &["config", "protocol.ext.allow", "always"]);
+        }
+
+        perch_command(&work, &["wt", "feature", "--no-switch"])
+            .env("GIT_ASKPASS", &askpass)
+            .env("PERCH_NO_HOOKS", "1")
+            .env("SSH_ASKPASS", &askpass)
+            .output()
+            .expect("failed to run perch");
+
+        let asked = fs::read_to_string(&asked).unwrap_or_default();
+        assert!(
+            !asked.is_empty(),
+            "ssh: {ssh}: the foreground retry never ran askpass"
+        );
+        assert!(
+            !asked.contains("prompt=0"),
+            "ssh: {ssh}: the background fetch ran askpass: {asked}"
+        );
     }
-    git(
-        &work,
-        &[
-            "remote",
-            "set-url",
-            "origin",
-            &format!("ext::{}", helper.display()),
-        ],
-    );
-    git(&work, &["config", "protocol.ext.allow", "always"]);
-
-    perch_command(&work, &["wt", "feature", "--no-switch"])
-        .env("GIT_ASKPASS", &askpass)
-        .env("PERCH_NO_HOOKS", "1")
-        .output()
-        .expect("failed to run perch");
-
-    let asked = fs::read_to_string(&asked).unwrap_or_default();
-    assert!(!asked.is_empty(), "the foreground retry never ran askpass");
-    assert!(
-        !asked.contains("prompt=0"),
-        "the background fetch ran askpass: {asked}"
-    );
 }
 
 /// A real SIGINT leaves through the handler in `main`, which exits without

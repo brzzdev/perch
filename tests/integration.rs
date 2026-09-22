@@ -85,7 +85,13 @@ fn perch_hooked(dir: &Path, args: &[&str]) -> Output {
 
 fn perch_command(dir: &Path, args: &[&str]) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_perch"));
-    cmd.args(args).current_dir(dir);
+    // A transport program in the developer's own environment would make every
+    // worktree fetch for itself, and the tests that count fetches say so.
+    cmd.args(args)
+        .current_dir(dir)
+        .env_remove("GIT_PROXY_COMMAND")
+        .env_remove("GIT_SSH")
+        .env_remove("GIT_SSH_COMMAND");
     cmd
 }
 
@@ -2189,6 +2195,11 @@ fn wt_still_fetches_a_worktree_whose_origin_resolves_from_where_it_runs() {
         &[("remote.origin.vcs", "relative")],
         &[
             ("core.sshCommand", "./ssh-wrapper"),
+            ("remote.origin.url", "ssh://example.invalid/repo.git"),
+            ("ssh.variant", "simple"),
+        ],
+        &[
+            ("core.sshCommand", "env WRAPPED=1 ./ssh-wrapper"),
             ("remote.origin.url", "ssh://example.invalid/repo.git"),
             ("ssh.variant", "simple"),
         ],

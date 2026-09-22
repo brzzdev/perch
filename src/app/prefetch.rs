@@ -76,39 +76,37 @@ impl FetchContext {
     /// Whether `remote` fetches one repository here whichever directory git
     /// runs in. Never where `remote.<name>.vcs` picks a helper, which gets the
     /// URL, if any, only as an argument to read as it likes, nor where there
-    /// is no URL to judge, nor where the fetch runs a program named by a
-    /// relative path. Otherwise it is down to the URL.
+    /// is no URL to judge, nor where the fetch runs a program of the user's
+    /// choosing. Otherwise it is down to the URL.
     ///
-    /// The programs checked are the ones known to run on a fetch, not every
-    /// setting that can name one; the rest are a known limit (#133).
+    /// Such a program is a shell command, so a relative path anywhere in it,
+    /// behind `env` or as `sh`'s script, is found from where git runs. Rather
+    /// than parse shell, any such setting at all declines coverage, at the
+    /// price of one extra fetch for a setup that has one. Settings outside
+    /// these are a known limit (#133).
     fn names_one_repository(&self, remote: &str) -> bool {
         let upload_pack = format!("remote.{remote}.uploadpack");
         let vcs = format!("remote.{remote}.vcs");
-        let depends_on_where_it_runs = self.config.iter().any(|entry| {
+        let runs_a_program = self.config.iter().any(|entry| {
             // The key, then a newline and the value where it has one.
             let (key, value) = entry.split_once('\n').unwrap_or((entry, ""));
-            let program = match key {
-                "core.gitproxy" | "core.sshcommand" => value,
-                key if key == upload_pack => value,
-                key if key == vcs => return true,
+            match key {
+                "core.gitproxy" | "core.sshcommand" => true,
+                key if key == upload_pack || key == vcs => true,
                 // Only the `!` form is a shell command; any other value names
                 // a `git credential-*` helper or an absolute path.
                 key if key.starts_with("credential.") && key.ends_with(".helper") => {
-                    let Some(command) = value.strip_prefix('!') else {
-                        return false;
-                    };
-                    command
+                    value.starts_with('!')
                 }
-                _ => return false,
-            };
-            is_relative_program(program)
+                _ => false,
+            }
         });
-        // The environment is the same for both fetches, but a relative program
-        // in it resolves from each one's directory all the same.
+        // The environment is the same for both fetches, but a program it
+        // names runs from each one's directory all the same.
         let from_the_environment = PROGRAM_VARIABLES
             .iter()
-            .any(|name| std::env::var(name).is_ok_and(|program| is_relative_program(&program)));
-        !depends_on_where_it_runs
+            .any(|name| std::env::var_os(name).is_some_and(|program| !program.is_empty()));
+        !runs_a_program
             && !from_the_environment
             && self.url.as_deref().is_some_and(names_one_repository)
     }
@@ -117,16 +115,6 @@ impl FetchContext {
 /// The environment variables through which a fetch runs a program of the
 /// user's choosing, in place of the config settings of the same purpose.
 const PROGRAM_VARIABLES: [&str; 3] = ["GIT_PROXY_COMMAND", "GIT_SSH", "GIT_SSH_COMMAND"];
-
-/// Whether the first word of the shell command `command` is a program named by
-/// a path relative to where it runs. A bare name is looked up on `PATH`, and
-/// `/` or `~` makes it absolute.
-fn is_relative_program(command: &str) -> bool {
-    command
-        .split_whitespace()
-        .next()
-        .is_some_and(|program| program.contains('/') && !program.starts_with(['/', '~']))
-}
 
 /// A remote this run has already fetched and reported on, handed to the steps
 /// that would otherwise fetch it again. A failed fetch earns the token too:

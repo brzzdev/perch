@@ -85,7 +85,13 @@ fn perch_hooked(dir: &Path, args: &[&str]) -> Output {
 
 fn perch_command(dir: &Path, args: &[&str]) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_perch"));
-    cmd.args(args).current_dir(dir);
+    // A transport program in the developer's own environment would make every
+    // worktree fetch for itself, and the tests that count fetches say so.
+    cmd.args(args)
+        .current_dir(dir)
+        .env_remove("GIT_PROXY_COMMAND")
+        .env_remove("GIT_SSH")
+        .env_remove("GIT_SSH_COMMAND");
     cmd
 }
 
@@ -1992,6 +1998,423 @@ fn wt_no_switch_finds_an_existing_worktree_without_claiming_to_switch() {
     );
 }
 
+/// The `git fetch` invocations a `perch` run made, read back from a `GIT_TRACE`
+/// file every git it spawned appends to — the background fetch's own output
+/// goes nowhere, so tracing to the terminal would miss it.
+fn perch_traced(parent: &TempDir, work: &Path, args: &[&str]) -> (Output, Vec<String>) {
+    perch_traced_with(parent, perch_command(work, args))
+}
+
+/// [`perch_traced`], for a `perch` command the caller has already set up.
+fn perch_traced_with(parent: &TempDir, mut command: Command) -> (Output, Vec<String>) {
+    let trace = parent.path().join("git-trace.log");
+    let output = command
+        .env("PERCH_NO_HOOKS", "1")
+        .env("GIT_TRACE", &trace)
+        .output()
+        .expect("failed to run perch");
+    let fetches = fs::read_to_string(&trace)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| line.contains("git fetch"))
+        .map(str::to_string)
+        .collect();
+    (output, fetches)
+}
+
+/// A branch the remote has that this clone has never fetched is what the
+/// prefetch is for: resolved against the refs from before it, the name looks
+/// new and gets a fresh branch off the default instead of the remote's commits.
+#[test]
+fn wt_creates_a_worktree_for_a_remote_branch_this_clone_has_never_fetched() {
+    let (bare, parent, work) = setup_with_parent();
+    let other = clone_bare(bare.path());
+    git(other.path(), &["switch", "-c", "feat/x"]);
+    commit_in(other.path(), "x.txt", "on feat/x");
+    git(other.path(), &["push", "origin", "feat/x"]);
+    let tip = remote_branch_tip(&work, "origin", "feat/x").unwrap();
+
+    let output = perch_args(&work, &["wt", "feat/x", "--no-switch"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    let path = parent.path().join("worktrees").join("repo").join("feat/x");
+    let head = git(&path, &["rev-parse", "HEAD"]);
+    assert_eq!(
+        stdout_str(&head).trim(),
+        tip,
+        "worktree is not at the remote tip"
+    );
+    let upstream = git(&path, &["rev-parse", "--abbrev-ref", "@{upstream}"]);
+    assert_eq!(stdout_str(&upstream).trim(), "origin/feat/x");
+}
+
+#[test]
+fn wt_updates_an_existing_worktree_with_a_single_fetch() {
+    let (_bare, parent, work) = setup_with_parent();
+    add_worktree(&work, &parent, "feature");
+
+    let (output, fetches) = perch_traced(&parent, &work, &["wt", "feature", "--no-switch"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert_eq!(fetches.len(), 1, "fetches: {fetches:?}");
+}
+
+#[test]
+fn wt_creates_a_worktree_with_a_single_fetch_when_the_branch_shares_the_remote() {
+    let (_bare, parent, work) = setup_with_parent();
+    git(&work, &["branch", "feature"]);
+
+    let (output, fetches) = perch_traced(&parent, &work, &["wt", "feature", "--no-switch"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert_eq!(fetches.len(), 1, "fetches: {fetches:?}");
+}
+
+/// The prefetch covers the current branch's remote and no other, so a branch
+/// tracking a second remote is still fetched from there before its worktree is
+/// made, as it was before the prefetch existed.
+#[test]
+fn wt_fetches_the_branch_remote_too_when_it_is_not_the_one_prefetched() {
+    let (_bare, parent, work) = setup_with_parent();
+    let upstream = TempDir::new().unwrap();
+    git(upstream.path(), &["init", "--bare"]);
+    git(
+        &work,
+        &[
+            "remote",
+            "add",
+            "upstream",
+            upstream.path().to_str().unwrap(),
+        ],
+    );
+    git(&work, &["branch", "feature"]);
+    git(&work, &["push", "-u", "upstream", "feature"]);
+
+    let (output, fetches) = perch_traced(&parent, &work, &["wt", "feature", "--no-switch"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert_eq!(fetches.len(), 2, "fetches: {fetches:?}");
+    assert!(fetches[0].ends_with("origin"), "fetches: {fetches:?}");
+    assert!(fetches[1].ends_with("upstream"), "fetches: {fetches:?}");
+}
+
+/// Two worktrees can point one remote name at the same URL and still fetch
+/// different refs, since the refspec is per-worktree config like any other.
+/// A prefetch that brought back only `main` covers nothing the target worktree
+/// needs, so its update must still fetch for itself.
+#[test]
+fn wt_still_fetches_a_worktree_whose_origin_fetches_other_refs() {
+    let (bare, parent, work) = setup_with_parent();
+    let worktree = add_worktree(&work, &parent, "feature");
+    git(&work, &["push", "origin", "feature"]);
+    git(&work, &["fetch", "--prune", "origin"]);
+    git(&work, &["config", "core.repositoryFormatVersion", "1"]);
+    git(&work, &["config", "extensions.worktreeConfig", "true"]);
+    // The invoking worktree fetches only `main`; the target fetches the lot.
+    git(&work, &["config", "--unset-all", "remote.origin.fetch"]);
+    git(
+        &work,
+        &[
+            "config",
+            "--worktree",
+            "remote.origin.fetch",
+            "+refs/heads/main:refs/remotes/origin/main",
+        ],
+    );
+    git(
+        &worktree,
+        &[
+            "config",
+            "--worktree",
+            "remote.origin.fetch",
+            "+refs/heads/*:refs/remotes/origin/*",
+        ],
+    );
+    // Advance `feature` on the remote behind both worktrees' backs.
+    let pusher = clone_bare(bare.path());
+    git(pusher.path(), &["switch", "feature"]);
+    commit_in(pusher.path(), "ahead.txt", "ahead");
+    git(pusher.path(), &["push", "origin", "feature"]);
+    let tip = remote_branch_tip(&work, "origin", "feature").unwrap();
+
+    let (output, fetches) = perch_traced(&parent, &work, &["wt", "feature", "--no-switch"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert_eq!(fetches.len(), 2, "fetches: {fetches:?}");
+    let head = git(&worktree, &["rev-parse", "HEAD"]);
+    assert_eq!(
+        stdout_str(&head).trim(),
+        tip,
+        "the worktree was not brought up to its own origin/feature"
+    );
+}
+
+/// Settings outside `remote.<name>.*` shape a fetch too: with `fetch.pruneTags`
+/// the target worktree's own fetch prunes tags the remote no longer has, which
+/// the invoking worktree's prefetch does not.
+#[test]
+fn wt_still_fetches_a_worktree_whose_fetch_config_differs() {
+    let (_bare, parent, work) = setup_with_parent();
+    let worktree = add_worktree(&work, &parent, "feature");
+    git(&work, &["push", "origin", "feature"]);
+    git(&work, &["config", "core.repositoryFormatVersion", "1"]);
+    git(&work, &["config", "extensions.worktreeConfig", "true"]);
+    git(
+        &worktree,
+        &["config", "--worktree", "fetch.pruneTags", "true"],
+    );
+    // A tag the remote never had, so the target's own fetch prunes it.
+    git(&work, &["tag", "stale"]);
+
+    let (output, fetches) = perch_traced(&parent, &work, &["wt", "feature", "--no-switch"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert_eq!(fetches.len(), 2, "fetches: {fetches:?}");
+    let tags = git(&work, &["tag", "--list", "stale"]);
+    assert_eq!(stdout_str(&tags).trim(), "", "the stale tag was not pruned");
+}
+
+/// A relative URL has the same text in every worktree, but git resolves it
+/// against the directory it runs in, so `../origin.git` names a different
+/// repository from each. A transport helper can read its address the same way,
+/// as `ext::` does, and `remote.<name>.vcs` hands the fetch to a helper
+/// whatever the URL says, or with no URL at all. A transport program named by
+/// a relative path is found from where it runs too, whether config or the
+/// environment names it. Config and URL can both match while the fetches do
+/// not.
+#[test]
+fn wt_still_fetches_a_worktree_whose_origin_resolves_from_where_it_runs() {
+    for settings in [
+        &[("remote.origin.url", "../origin.git")][..],
+        &[("remote.origin.url", "ext::git %s ../origin.git")],
+        &[
+            ("remote.origin.url", "file://../origin.git"),
+            ("remote.origin.vcs", "relative"),
+        ],
+        &[("remote.origin.url", "relative://../origin.git")],
+        &[("remote.origin.vcs", "relative")],
+        &[
+            ("core.sshCommand", "./ssh-wrapper"),
+            ("remote.origin.url", "ssh://example.invalid/repo.git"),
+            ("ssh.variant", "simple"),
+        ],
+        &[
+            ("core.sshCommand", "env WRAPPED=1 ./ssh-wrapper"),
+            ("remote.origin.url", "ssh://example.invalid/repo.git"),
+            ("ssh.variant", "simple"),
+        ],
+        &[
+            ("GIT_SSH_COMMAND", "./ssh-wrapper"),
+            ("remote.origin.url", "ssh://example.invalid/repo.git"),
+            ("ssh.variant", "simple"),
+        ],
+    ] {
+        let case = format!("{settings:?}");
+        // A key with no `.` is an environment variable, where config has none.
+        let (config, env): (Vec<_>, Vec<_>) =
+            settings.iter().partition(|(key, _)| key.contains('.'));
+        let (bare, parent, work) = setup_with_parent();
+        let worktree = add_worktree(&work, &parent, "feature");
+        git(&work, &["push", "origin", "feature"]);
+        let near = parent.path().join("origin.git");
+        let far = parent.path().join("worktrees/repo/origin.git");
+        for clone in [&near, &far] {
+            git(
+                parent.path(),
+                &[
+                    "clone",
+                    "--bare",
+                    bare.path().to_str().unwrap(),
+                    clone.to_str().unwrap(),
+                ],
+            );
+        }
+        // Advance `feature` only in the repository the target worktree resolves.
+        let pusher = clone_bare(&far);
+        git(pusher.path(), &["switch", "feature"]);
+        commit_in(pusher.path(), "ahead.txt", "ahead");
+        git(pusher.path(), &["push", "origin", "feature"]);
+        let tip = stdout_str(&git(&far, &["rev-parse", "feature"]));
+        git(&work, &["config", "--unset", "remote.origin.url"]);
+        for (key, value) in config {
+            git(&work, &["config", key, value]);
+        }
+        git(&work, &["config", "protocol.ext.allow", "always"]);
+        // An ssh of the user's own in each worktree, serving the repository
+        // its relative path reaches from there. Ignored, so the worktrees stay
+        // clean.
+        fs::write(work.join(".git/info/exclude"), "ssh-wrapper\n").unwrap();
+        for dir in [&work, &worktree] {
+            let wrapper = dir.join("ssh-wrapper");
+            fs::write(&wrapper, "#!/bin/sh\nexec git upload-pack ../origin.git\n").unwrap();
+            fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        // A helper of the user's own, reading its address as a path from where
+        // it runs, as the `ext::` URL above does. Where the remote has no URL,
+        // git passes its name instead, and the helper falls back to the path.
+        let helpers = parent.path().join("helpers");
+        fs::create_dir(&helpers).unwrap();
+        let helper = helpers.join("git-remote-relative");
+        fs::write(
+            &helper,
+            "#!/bin/sh\ncase \"$2\" in\n  *://*) address=\"${2#*://}\" ;;\n  *) address=../origin.git ;;\nesac\nexec git remote-ext \"$1\" \"git %s $address\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::join_paths(
+            std::iter::once(helpers)
+                .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+        )
+        .unwrap();
+        let mut command = perch_command(&work, &["wt", "feature", "--no-switch"]);
+        command.env("PATH", path).envs(env.iter().copied());
+
+        let (output, fetches) = perch_traced_with(&parent, command);
+
+        assert!(
+            output.status.success(),
+            "{case}: stderr: {}",
+            stderr_str(&output)
+        );
+        assert_eq!(fetches.len(), 2, "{case}: fetches: {fetches:?}");
+        let head = git(&worktree, &["rev-parse", "HEAD"]);
+        assert_eq!(
+            stdout_str(&head).trim(),
+            tip.trim(),
+            "{case}: the worktree was not brought up to its own origin/feature"
+        );
+    }
+}
+
+/// The prefetch covers a remote *name* as the invoking worktree resolves it.
+/// With `extensions.worktreeConfig` the same name can point elsewhere from
+/// another worktree, and that worktree's update must still fetch from where
+/// its own `origin` goes, as it did before the prefetch existed.
+#[test]
+fn wt_still_fetches_a_worktree_whose_origin_points_elsewhere() {
+    let (bare, parent, work) = setup_with_parent();
+    let elsewhere = TempDir::new().unwrap();
+    git(elsewhere.path(), &["init", "--bare"]);
+    let worktree = add_worktree(&work, &parent, "feature");
+    // Each worktree carries its own `origin` URL and the shared config none.
+    git(&work, &["config", "core.repositoryFormatVersion", "1"]);
+    git(&work, &["config", "extensions.worktreeConfig", "true"]);
+    git(&work, &["config", "--unset", "remote.origin.url"]);
+    git(
+        &work,
+        &[
+            "config",
+            "--worktree",
+            "remote.origin.url",
+            bare.path().to_str().unwrap(),
+        ],
+    );
+    git(
+        &worktree,
+        &[
+            "config",
+            "--worktree",
+            "remote.origin.url",
+            elsewhere.path().to_str().unwrap(),
+        ],
+    );
+    commit_in(&worktree, "b.txt", "only elsewhere");
+    git(&worktree, &["push", "origin", "feature"]);
+    git(&worktree, &["reset", "--hard", "HEAD~1"]);
+    let tip = remote_branch_tip(&worktree, "origin", "feature").unwrap();
+
+    let (output, fetches) = perch_traced(&parent, &work, &["wt", "feature", "--no-switch"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert_eq!(fetches.len(), 2, "fetches: {fetches:?}");
+    let head = git(&worktree, &["rev-parse", "HEAD"]);
+    assert_eq!(
+        stdout_str(&head).trim(),
+        tip,
+        "the worktree was not updated from its own origin"
+    );
+}
+
+/// A remote that cannot be reached is worth one warning, not one per attempt,
+/// and no reason to refuse a new branch: making one offline is legitimate.
+#[test]
+fn wt_reports_an_unreachable_remote_once_and_still_creates_the_branch() {
+    let (_bare, parent, work) = setup_with_parent();
+    git(
+        &work,
+        &["remote", "set-url", "origin", "/nonexistent/nowhere"],
+    );
+
+    let output = perch_args(&work, &["wt", "brand-new", "--no-switch"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    let stderr = stderr_str(&output);
+    assert_eq!(
+        stderr.matches("fetch failed; results may be stale").count(),
+        1,
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.find("fetch failed").unwrap() < stderr.find("created brand-new").unwrap(),
+        "the fetch failure must be reported before the creation: {stderr}"
+    );
+    let path = parent
+        .path()
+        .join("worktrees")
+        .join("repo")
+        .join("brand-new");
+    assert!(path.is_dir(), "missing worktree: {}", path.display());
+}
+
+/// Each worktree has its own `FETCH_HEAD`, so a fetch that fails from one can
+/// succeed from another, and the prefetch failing covers nothing there.
+#[test]
+fn wt_still_fetches_a_worktree_the_prefetch_failed_to_cover() {
+    let (bare, parent, work) = setup_with_parent();
+    let worktree = add_worktree(&work, &parent, "feature");
+    git(&work, &["push", "origin", "feature"]);
+    let pusher = clone_bare(bare.path());
+    git(pusher.path(), &["switch", "feature"]);
+    commit_in(pusher.path(), "ahead.txt", "ahead");
+    git(pusher.path(), &["push", "origin", "feature"]);
+    let tip = remote_branch_tip(&work, "origin", "feature").unwrap();
+    // A directory where the invoking worktree's `FETCH_HEAD` goes makes every
+    // fetch from there fail, and none from the target.
+    fs::create_dir(work.join(".git/FETCH_HEAD")).unwrap();
+
+    let (output, fetches) = perch_traced(&parent, &work, &["wt", "feature", "--no-switch"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert_eq!(fetches.len(), 3, "fetches: {fetches:?}");
+    let head = git(&worktree, &["rev-parse", "HEAD"]);
+    assert_eq!(
+        stdout_str(&head).trim(),
+        tip,
+        "the worktree was not brought up to its own origin/feature"
+    );
+}
+
+/// Updating a worktree fetches again where the prefetch failed, and where that
+/// fails the same way the warning has already been printed.
+#[test]
+fn wt_reports_an_unreachable_remote_once_when_updating_a_worktree() {
+    let (_bare, parent, work) = setup_with_parent();
+    add_worktree(&work, &parent, "feature");
+    git(
+        &work,
+        &["remote", "set-url", "origin", "/nonexistent/nowhere"],
+    );
+
+    let output = perch_args(&work, &["wt", "feature", "--no-switch"]);
+
+    let stderr = stderr_str(&output);
+    assert_eq!(
+        stderr.matches("fetch failed; results may be stale").count(),
+        1,
+        "stderr: {stderr}"
+    );
+}
+
 #[test]
 fn wt_no_switch_is_rejected_before_rm() {
     let (_bare, parent, work) = setup_with_parent();
@@ -3681,6 +4104,287 @@ fn reclamation_survives_a_hangup_sent_to_the_invoking_session() {
     assert!(
         poll_until(|| reclamation_record_is_cleared(&work)),
         "successful reclamation should clear its durable record"
+    );
+}
+
+/// Whether any live process was started with `helper` on its command line.
+fn helper_is_running(helper: &Path) -> bool {
+    let listing = Command::new("ps")
+        .args(["-A", "-o", "command="])
+        .output()
+        .expect("failed to list processes");
+    stdout_str(&listing).contains(helper.to_str().unwrap())
+}
+
+/// The fetch starts before the picker and must not outlive it: Esc and Ctrl-C
+/// (a key in raw mode, not a signal, so nothing reaches the child on its own)
+/// each leave no transport running once `perch` has exited, whether the
+/// transport goes quietly on SIGTERM or has to be killed. And while the picker
+/// is open the fetch has no terminal, so a transport that wants a passphrase
+/// has nowhere to ask for one.
+#[test]
+fn dismissing_the_wt_picker_ends_a_background_fetch_that_never_reached_the_terminal() {
+    use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+    use std::io::{Read, Write};
+    use std::sync::Arc;
+
+    // A transport that tries the terminal, says so, then hangs: the remote
+    // helper protocol reads nothing back from it, so the fetch waits. The
+    // second one also shrugs off SIGTERM, as a helper is free to.
+    const HANGS: &str = "sleep 60";
+    const HANGS_AND_TRAPS_TERM: &str = "trap '' TERM\nwhile :; do sleep 1; done";
+
+    for (key, hang) in [
+        (&b"\x1b"[..], HANGS),
+        (&b"\x03"[..], HANGS),
+        (&b"\x1b"[..], HANGS_AND_TRAPS_TERM),
+        (&b"\x03"[..], HANGS_AND_TRAPS_TERM),
+    ] {
+        let (_bare, parent, work) = setup_with_parent();
+        let tried = parent.path().join("tried-the-terminal");
+        let helper = parent.path().join("hang.sh");
+        fs::write(
+            &helper,
+            format!(
+                "#!/bin/sh\nprintf 'PASSPHRASE?' > /dev/tty\ntouch '{}'\n{hang}\n",
+                tried.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
+        git(
+            &work,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                &format!("ext::{}", helper.display()),
+            ],
+        );
+        git(&work, &["config", "protocol.ext.allow", "always"]);
+
+        let pty = native_pty_system()
+            .openpty(PtySize::default())
+            .expect("failed to open pty");
+        let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_perch"));
+        cmd.arg("wt");
+        cmd.cwd(&work);
+        cmd.env("PERCH_NO_HOOKS", "1");
+        let mut child = ChildGuard(pty.slave.spawn_command(cmd).expect("failed to spawn"));
+        drop(pty.slave);
+
+        let mut reader = pty.master.try_clone_reader().unwrap();
+        let mut writer = pty.master.take_writer().unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let collected = Arc::clone(&seen);
+        let output = std::thread::spawn(move || {
+            let mut chunk = [0u8; 1024];
+            while let Ok(n) = reader.read(&mut chunk) {
+                if n == 0 {
+                    break;
+                }
+                collected.lock().unwrap().extend_from_slice(&chunk[..n]);
+            }
+        });
+
+        assert!(poll_until(|| tried.exists()), "the transport never ran");
+        wait_for(&seen, "(type to filter):");
+        writer.write_all(key).unwrap();
+        writer.flush().unwrap();
+
+        child.wait_bounded();
+        drop(writer);
+        drop(pty.master);
+        output.join().unwrap();
+
+        let screen = String::from_utf8_lossy(&seen.lock().unwrap()).into_owned();
+        assert!(
+            !screen.contains("PASSPHRASE?"),
+            "the background fetch reached the terminal: {screen}"
+        );
+        assert!(
+            poll_until(|| !helper_is_running(&helper)),
+            "the fetch outlived perch after {key:?} with a helper that does `{hang}`"
+        );
+    }
+}
+
+/// An askpass program prompts without a terminal, so from the background
+/// fetch it would open a dialog behind the picker, or block it. Only the
+/// foreground retry, where the user is waiting on the fetch, may run one —
+/// whether git asks for a credential or ssh for a passphrase. A credential
+/// helper can open a window of its own just the same, so the background fetch
+/// asks it not to.
+#[test]
+fn only_the_foreground_retry_prompts() {
+    enum Prompt {
+        Askpass,
+        CredentialHelper,
+        SshPassphrase,
+    }
+
+    for prompt in [
+        Prompt::Askpass,
+        Prompt::CredentialHelper,
+        Prompt::SshPassphrase,
+    ] {
+        let (_bare, parent, work) = setup_with_parent();
+        let asked = parent.path().join("asked");
+        let prompter = parent.path().join("prompter.sh");
+        // Records each prompt shown. The background fetch runs with
+        // `GIT_TERMINAL_PROMPT=0`, the retry without. As a credential helper
+        // it listens to `credential.interactive`, as Git Credential Manager
+        // does, and answers only `get`.
+        fs::write(
+            &prompter,
+            format!(
+                "#!/bin/sh\n\
+                 case \"$1\" in store|erase) exit 0 ;; esac\n\
+                 [ \"$(git config --get credential.interactive)\" = false ] && exit 0\n\
+                 echo \"prompt=${{GIT_TERMINAL_PROMPT:-unset}}\" >> '{}'\n\
+                 case \"$1\" in get) echo username=x; echo password=x ;; *) echo x ;; esac\n",
+                asked.display()
+            ),
+        )
+        .unwrap();
+        // A transport that wants credentials or a passphrase, then fails
+        // either way. The ssh one, like an OpenSSH too old for
+        // `SSH_ASKPASS_REQUIRE`, runs whatever `SSH_ASKPASS` names when it has
+        // no terminal.
+        let helper = match prompt {
+            Prompt::Askpass | Prompt::SshPassphrase => String::new(),
+            Prompt::CredentialHelper => format!("!{}", prompter.display()),
+        };
+        let script = match prompt {
+            Prompt::Askpass | Prompt::CredentialHelper => format!(
+                "#!/bin/sh\nprintf 'protocol=https\\nhost=example.com\\n\\n' \\\n  \
+                 | git -c credential.helper= -c credential.helper='{helper}' credential fill >/dev/null\n\
+                 exit 1\n"
+            ),
+            Prompt::SshPassphrase => {
+                "#!/bin/sh\n[ -n \"$SSH_ASKPASS\" ] && \"$SSH_ASKPASS\" 'Passphrase:' >/dev/null\nexit 1\n"
+                    .to_string()
+            }
+        };
+        let transport = parent.path().join("transport.sh");
+        fs::write(&transport, script).unwrap();
+        for script in [&prompter, &transport] {
+            fs::set_permissions(script, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        match prompt {
+            Prompt::Askpass | Prompt::CredentialHelper => {
+                git(
+                    &work,
+                    &[
+                        "remote",
+                        "set-url",
+                        "origin",
+                        &format!("ext::{}", transport.display()),
+                    ],
+                );
+                git(&work, &["config", "protocol.ext.allow", "always"]);
+            }
+            Prompt::SshPassphrase => {
+                git(
+                    &work,
+                    &[
+                        "remote",
+                        "set-url",
+                        "origin",
+                        "ssh://example.invalid/repo.git",
+                    ],
+                );
+                git(
+                    &work,
+                    &["config", "core.sshCommand", transport.to_str().unwrap()],
+                );
+                git(&work, &["config", "ssh.variant", "simple"]);
+            }
+        }
+        let mut command = perch_command(&work, &["wt", "feature", "--no-switch"]);
+        command.env("PERCH_NO_HOOKS", "1");
+        // The helper route must reach the helper, not an askpass.
+        if !matches!(prompt, Prompt::CredentialHelper) {
+            command
+                .env("GIT_ASKPASS", &prompter)
+                .env("SSH_ASKPASS", &prompter);
+        }
+
+        command.output().expect("failed to run perch");
+
+        let asked = fs::read_to_string(&asked).unwrap_or_default();
+        let route = match prompt {
+            Prompt::Askpass => "askpass",
+            Prompt::CredentialHelper => "credential helper",
+            Prompt::SshPassphrase => "ssh askpass",
+        };
+        assert!(
+            !asked.is_empty(),
+            "{route}: the foreground retry never prompted"
+        );
+        assert!(
+            !asked.contains("prompt=0"),
+            "{route}: the background fetch prompted: {asked}"
+        );
+    }
+}
+
+/// A real SIGINT leaves through the handler in `main`, which exits without
+/// unwinding — so the drop guard never runs, and the fetch leads a session of
+/// its own that the signal never reached. Nothing else would end it.
+#[test]
+fn a_real_sigint_ends_the_background_fetch_before_perch_exits() {
+    let (_bare, parent, work) = setup_with_parent();
+    let tried = parent.path().join("tried-the-transport");
+    let helper = parent.path().join("hang.sh");
+    // The transport shrugs off SIGTERM, so ending it takes the whole grace —
+    // the window in which a run that did not stop at the interrupt would get
+    // as far as making the worktree.
+    fs::write(
+        &helper,
+        format!(
+            "#!/bin/sh\ntouch '{}'\ntrap '' TERM\nwhile :; do sleep 1; done\n",
+            tried.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
+    git(
+        &work,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            &format!("ext::{}", helper.display()),
+        ],
+    );
+    git(&work, &["config", "protocol.ext.allow", "always"]);
+
+    // A named target needs no terminal, so the run reaches the join — and
+    // blocks there on the fetch — with no picker in the way.
+    let mut child = perch_command(&work, &["wt", "feature", "--no-switch"])
+        .env("PERCH_NO_HOOKS", "1")
+        .spawn()
+        .expect("failed to spawn perch");
+    assert!(poll_until(|| tried.exists()), "the transport never ran");
+
+    let pid = libc::pid_t::try_from(child.id()).unwrap();
+    // SAFETY: plain signal delivery to a child this test spawned.
+    unsafe { libc::kill(pid, libc::SIGINT) };
+    let status = child.wait().expect("failed to wait for perch");
+
+    assert_eq!(status.code(), Some(130), "perch did not exit on the signal");
+    assert!(
+        poll_until(|| !helper_is_running(&helper)),
+        "the fetch outlived perch after a real SIGINT"
+    );
+    // The interrupt asked for none of the work the run was about to do, and
+    // laying out the directory a worktree goes in is the first of it.
+    let worktrees = parent.path().join("worktrees");
+    assert!(
+        !worktrees.exists(),
+        "the interrupted run carried on into making a worktree at {}",
+        worktrees.display()
     );
 }
 

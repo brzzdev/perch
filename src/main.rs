@@ -9,6 +9,9 @@ fn main() {
     }
 
     let _ = ctrlc::set_handler(|| {
+        // The exit below unwinds nothing, so a running background fetch would
+        // never reach its drop guard. End it here, before leaving.
+        perch::app::terminate_background_work();
         let _ = console::Term::stderr().show_cursor();
         process::exit(130);
     });

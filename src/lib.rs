@@ -1,6 +1,8 @@
 pub mod app;
 pub mod git;
 mod grammar;
+#[cfg(unix)]
+mod session;
 
 pub use grammar::GrammarError;
 

@@ -5,8 +5,10 @@ use std::io::ErrorKind;
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
 
+#[cfg(unix)]
+use crate::session;
 use crate::{AppResult, Error};
 
 pub enum MergeReport {
@@ -255,15 +257,82 @@ pub fn checkout(branch: &str) -> AppResult<()> {
     Ok(())
 }
 
-pub fn fetch(dir: Option<&Path>, remote: &str) -> AppResult<FetchOutcome> {
-    let output = git_cmd(dir)
-        .args(["fetch", "--quiet", "--prune", remote])
-        .output()?;
+#[must_use]
+pub fn fetch(dir: Option<&Path>, remote: &str) -> FetchOutcome {
+    let output = match git_cmd(dir).args(fetch_args(remote)).output() {
+        Ok(output) => output,
+        Err(e) => return FetchOutcome::Failed(e.to_string()),
+    };
     if output.status.success() {
-        return Ok(FetchOutcome::Ok);
+        return FetchOutcome::Ok;
     }
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    Ok(FetchOutcome::Failed(stderr))
+    FetchOutcome::Failed(String::from_utf8_lossy(&output.stderr).trim().to_string())
+}
+
+/// Starts `git fetch` without waiting for it, for a caller with something to
+/// do meanwhile. The child leads its own session, so it has no terminal to
+/// prompt on, and `GIT_TERMINAL_PROMPT=0` has git fail at once rather than try
+/// stdin, which is `/dev/null`. Askpass programs are switched off too, since
+/// they prompt without a terminal: an empty `GIT_ASKPASS` stands in for both
+/// `core.askPass` and `SSH_ASKPASS` on git's side. On ssh's, an empty
+/// `SSH_ASKPASS` names no program to run, which holds for an OpenSSH too old
+/// to know `SSH_ASKPASS_REQUIRE` and for a `core.sshCommand` of the user's
+/// own; left unset instead, OpenSSH would fall back to its default askpass.
+/// `SSH_ASKPASS_REQUIRE=never` says the same to an OpenSSH that does know it.
+/// Credential helpers can prompt with no terminal too, in a window of their
+/// own, and `credential.interactive=false` asks them not to — Git Credential
+/// Manager among those that listen. A helper that ignores it is the user's to
+/// answer for: running no helpers at all would also lose the keychain ones.
+/// A fetch that needs a person fails fast into the foreground retry, which has
+/// the user's askpass and helpers back. Auth that needs no person, an agent or
+/// a keychain helper, still works. Its output goes nowhere: only whether it
+/// succeeded is ever read.
+pub fn fetch_in_background(remote: &str) -> std::io::Result<Child> {
+    let mut command = git_cmd(None);
+    command
+        .args(["-c", "credential.interactive=false"])
+        .args(fetch_args(remote))
+        .env("GIT_ASKPASS", "")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("SSH_ASKPASS", "")
+        .env("SSH_ASKPASS_REQUIRE", "never")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    session::detach(&mut command);
+    command.spawn()
+}
+
+fn fetch_args(remote: &str) -> [&str; 4] {
+    ["fetch", "--quiet", "--prune", remote]
+}
+
+/// The URL `remote` fetches from, as resolved in `dir`. The same remote name
+/// can point elsewhere from another worktree, through `extensions.worktreeConfig`
+/// or an `includeIf`, so where a fetch runs is part of what it fetches. `None`
+/// where the remote has no URL there.
+#[must_use]
+pub fn remote_url(dir: Option<&Path>, remote: &str) -> Option<String> {
+    run_in(dir, &["remote", "get-url", remote])
+        .ok()
+        .map(|url| url.trim().to_string())
+}
+
+/// Every config entry in force in `dir`, in the order git reads them. The
+/// order is kept because it carries precedence: a scalar setting takes its
+/// last value, so the same entries listed in another order can mean something
+/// different.
+///
+/// Entries come back NUL-separated, which keeps a value containing a newline
+/// whole — line-separated output would split it into two entries that no
+/// longer say what the config does.
+#[must_use]
+pub fn config_entries(dir: Option<&Path>) -> Vec<String> {
+    let Ok(output) = run_in(dir, &["config", "--null", "--list"]) else {
+        return Vec::new();
+    };
+    output.split('\0').map(str::to_string).collect()
 }
 
 /// Rebase the current branch onto `onto` (e.g. `origin/main`). Git's stdout

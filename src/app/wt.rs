@@ -6,9 +6,11 @@ use console::{measure_text_width, style};
 use indicatif::ProgressBar;
 
 use super::picker::{PickerOptions, Selection, interactive_keys, pick};
+use super::prefetch::{FetchedRemote, Prefetch, fetch_unless_covered};
 use super::{
     CursorGuard, build_catalogue, display_path, fetch_and_ff, handoff_cd, hook, marker, picker,
-    prompt_delete_stale_branches, removal, report_update, select_removal_locals,
+    prompt_delete_stale_branches, removal, report_fetch_failure, report_update,
+    select_removal_locals,
 };
 use crate::grammar::{ShellHandoff, Verb, WorktreeRemoval};
 use crate::{AppResult, Error, git};
@@ -36,12 +38,21 @@ pub(crate) fn run(
     target: Option<&str>,
     shell_handoff: ShellHandoff,
 ) -> AppResult<()> {
+    let current_branch = git::current_branch()?;
+    let remote = git::current_remote(current_branch.as_deref());
+
+    // Started before the *Catalogue* is read, so the round trip overlaps the
+    // local reads and the wait for a pick. With no name and no terminal,
+    // `select` gives up at once, and there would be nothing to join. The
+    // catalogue may therefore be read while the fetch is updating refs, so its
+    // local and remote-only halves can reflect slightly different moments;
+    // `resolve_target` runs after the join and decides the final action.
+    let prefetch = (target.is_some() || super::is_interactive()).then(|| Prefetch::start(&remote));
+
     // A worktree whose directory was deleted by hand can't be entered, so its
     // branch is one to (re)create. `worktree_add`/`checkout` prune the stale
     // registration when it gets in the way.
     let listed = super::live_worktrees()?;
-    let current_branch = git::current_branch()?;
-    let remote = git::current_remote(current_branch.as_deref());
 
     let (branch, existence) = if let Some(name) = target {
         (name.to_string(), Existence::MayCreate)
@@ -51,6 +62,10 @@ pub(crate) fn run(
         };
         picked
     };
+
+    // Joined before the worktrees are read again below, so a slow join cannot
+    // make that snapshot stale in its turn.
+    let fetched = prefetch.map(Prefetch::join).transpose()?;
 
     // Read the worktrees again before deciding what the branch needs: the list
     // above was drawn before the picker opened, and it then sat waiting on a
@@ -68,7 +83,7 @@ pub(crate) fn run(
             let branch = wt.branch.clone().unwrap_or_default();
             // The worktree's branch may track a different remote than ours.
             let branch_remote = git::current_remote(Some(branch.as_str()));
-            if let Err(e) = update_in(&wt.path, &branch, &branch_remote) {
+            if let Err(e) = update_in(&wt.path, &branch, &branch_remote, fetched.as_ref()) {
                 eprintln!(
                     "{} update of {} failed: {e}",
                     style("!").yellow().bold(),
@@ -98,6 +113,7 @@ pub(crate) fn run(
                 &branch,
                 None,
                 &branch_remote,
+                fetched.as_ref(),
             )?;
             (path, branch)
         }
@@ -113,6 +129,7 @@ pub(crate) fn run(
                 &branch,
                 Some(&base),
                 &remote,
+                fetched.as_ref(),
             )?;
             (path, branch)
         }
@@ -283,8 +300,13 @@ pub(crate) fn removal_candidates() -> AppResult<Vec<String>> {
 /// Fetch + fast-forward `branch` in the worktree at `path`. Unlike the in-place
 /// switch, a diverged branch is only reported (we don't drive an interactive
 /// rebase in a worktree the user isn't sitting in).
-pub(crate) fn update_in(path: &Path, branch: &str, remote: &str) -> AppResult<()> {
-    match fetch_and_ff(Some(path), branch, remote)? {
+pub(crate) fn update_in(
+    path: &Path,
+    branch: &str,
+    remote: &str,
+    fetched: Option<&FetchedRemote>,
+) -> AppResult<()> {
+    match fetch_and_ff(Some(path), branch, remote, fetched)? {
         git::FastForwardResult::Diverged => eprintln!(
             "{} {} has diverged from {}/{}; not updating.",
             style("!").yellow().bold(),
@@ -304,28 +326,34 @@ pub(crate) fn update_in(path: &Path, branch: &str, remote: &str) -> AppResult<()
 /// created hook. Every worktree `perch` creates comes through here, which
 /// is what makes the hook a consequence of creation and of nothing else rather
 /// than a line each creation arm has to remember.
+///
+/// Fetches `remote` first unless `fetched` covers it. A failed fetch is
+/// reported and creation goes ahead regardless: a new branch made offline is
+/// legitimate.
 fn create_worktree(
     main_path: &Path,
     worktree_name: &str,
     branch: &str,
     base: Option<&str>,
     remote: &str,
+    fetched: Option<&FetchedRemote>,
 ) -> AppResult<PathBuf> {
     let path = worktree_path_for(main_path, worktree_name)?;
     ensure_path_clear(&path)?;
     ensure_parent(&path);
 
-    let result = {
+    let (fetch_outcome, result) = {
         let spinner = ProgressBar::new_spinner();
         let _g = CursorGuard::hide();
         spinner.enable_steady_tick(std::time::Duration::from_millis(80));
         spinner.set_message(format!("Fetching {remote}…"));
-        let _ = git::fetch(None, remote);
+        let fetch_outcome = fetch_unless_covered(None, remote, fetched);
         spinner.set_message(format!("Creating worktree for {branch}…"));
         let outcome = git::worktree_add(&path, branch, base);
         spinner.finish_and_clear();
-        outcome
+        (fetch_outcome, outcome)
     };
+    report_fetch_failure(&fetch_outcome);
     result?;
 
     if let Some(base) = base {

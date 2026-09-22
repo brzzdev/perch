@@ -87,10 +87,33 @@ impl FetchedRemote {
     /// Whether the fetch already done stands in for a fetch of `remote` from
     /// `dir`. A fetch from the directory this one ran in is covered by name;
     /// one from a worktree is covered only where that worktree resolves the
-    /// name to the same [`FetchContext`].
+    /// name to the same [`FetchContext`], and never where the URL is a
+    /// relative path: git resolves that against the directory it runs in, so
+    /// the same text names a different repository from each worktree.
     fn covers(&self, dir: Option<&Path>, remote: &str) -> bool {
-        self.name == remote
-            && dir.is_none_or(|dir| FetchContext::read(Some(dir), remote) == self.context)
+        if self.name != remote {
+            return false;
+        }
+        let Some(dir) = dir else {
+            return true;
+        };
+        !self.context.url.as_deref().is_some_and(is_relative_path)
+            && FetchContext::read(Some(dir), remote) == self.context
+    }
+}
+
+/// Whether `url` is a filesystem path relative to where git runs, by git's own
+/// reading of a URL: anything with a `://` scheme, or with a `:` before its
+/// first `/` (scp-style `host:path`, and `<transport>::<address>`), goes over a
+/// transport rather than naming a local path.
+fn is_relative_path(url: &str) -> bool {
+    if url.contains("://") || url.starts_with('/') {
+        return false;
+    }
+    match (url.find(':'), url.find('/')) {
+        (Some(colon), Some(slash)) => slash < colon,
+        (Some(_), None) => false,
+        (None, _) => true,
     }
 }
 

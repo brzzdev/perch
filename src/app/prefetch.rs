@@ -18,8 +18,8 @@ use crate::{AppResult, git};
 /// for a loaded machine.
 const TERMINATION_GRACE: Duration = Duration::from_secs(1);
 
-/// Gap between checks that the group has gone, short enough that an ordinary
-/// exit is not perceptibly delayed.
+/// Gap between checks that git has exited, short enough that an ordinary exit
+/// is not perceptibly delayed.
 const TERMINATION_POLL: Duration = Duration::from_millis(10);
 
 /// The process group of the background fetch, or `0` when none is running.
@@ -236,18 +236,22 @@ fn spawn_unless_interrupted(remote: &str) -> Option<Child> {
 
 /// Ends every process in `group`. SIGTERM first, because git removes its lock
 /// files on SIGTERM and SIGKILL would leave a `refs/remotes/*.lock` behind for
-/// the next fetch to trip over. Then SIGKILL, once the group has had its grace
-/// and unconditionally, because git can be gone while an `ssh` or remote
-/// helper that trapped SIGTERM lives on in the group. The fetch led its own
-/// session from the start, so its pid names the group.
+/// the next fetch to trip over. Then SIGKILL, unconditionally, because git can
+/// be gone while an `ssh` or remote helper that trapped SIGTERM lives on in the
+/// group. The fetch led its own session from the start, so its pid names the
+/// group.
 ///
-/// Waiting on the group rather than on the child is what keeps the SIGKILL
-/// safe: reaping the leader first would free its id, and the kernel could hand
-/// the same one to an unrelated new group before the signal lands.
+/// The grace lasts only until git itself exits. Git holds the locks, so once
+/// it has gone nothing is left that needs the time. Probing the group with
+/// `kill(-group, 0)` would not tell anyway: on Linux the unreaped leader stays
+/// in the group as a zombie, so the group never looks empty. Git is checked without being
+/// reaped, which is what keeps the SIGKILL safe. Reaping would free its id,
+/// and the kernel could give that id to an unrelated new group before the
+/// signal lands.
 fn end_group(group: i32) {
     signal_group(group, Signal::Term);
     let deadline = Instant::now() + TERMINATION_GRACE;
-    while group_is_alive(group) && Instant::now() < deadline {
+    while !leader_has_exited(group) && Instant::now() < deadline {
         std::thread::sleep(TERMINATION_POLL);
     }
     signal_group(group, Signal::Kill);
@@ -302,13 +306,29 @@ fn signal_group(group: i32, signal: Signal) {
     unsafe { libc::kill(-group, signal) };
 }
 
-/// Whether anything in `group` is still running. Signal `0` asks without
-/// sending, and fails once every member has exited — an unreaped leader is a
-/// zombie, which is no longer a member.
+/// Whether the fetch leading `group` has exited, without reaping it —
+/// `WNOHANG` returns at once and `WNOWAIT` leaves the exit for the caller's
+/// own reap. A failed call means there is no such child left to wait for.
 #[cfg(unix)]
-fn group_is_alive(group: i32) -> bool {
-    // SAFETY: the null signal only probes for the group's existence.
-    unsafe { libc::kill(-group, 0) == 0 }
+fn leader_has_exited(group: i32) -> bool {
+    let Ok(pid) = libc::id_t::try_from(group) else {
+        return true;
+    };
+    // Zeroed, because `WNOHANG` may leave it untouched when nothing has
+    // exited, and a zero `si_pid` is how that case reads.
+    // SAFETY: `siginfo_t` is plain C data, for which all zeroes is valid.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    // SAFETY: `info` is a live, aligned `siginfo_t`, the one the call writes.
+    let waited = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            pid,
+            &raw mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    // SAFETY: a successful `waitid` has filled in `si_pid` or left it zeroed.
+    waited != 0 || unsafe { info.si_pid() } != 0
 }
 
 #[cfg(not(unix))]
@@ -323,6 +343,36 @@ fn group_of(_child: &Child) -> Option<i32> {
 fn signal_group(_group: i32, _signal: Signal) {}
 
 #[cfg(not(unix))]
-fn group_is_alive(_group: i32) -> bool {
-    false
+fn leader_has_exited(_group: i32) -> bool {
+    true
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::os::unix::process::CommandExt;
+    use std::process::Command;
+
+    use super::*;
+
+    /// On Linux a probe of the whole group sees the unreaped leader and never
+    /// finds it empty, so every cleanup sat out the full grace.
+    #[test]
+    fn a_group_that_goes_on_sigterm_ends_without_waiting_out_the_grace() {
+        let mut child = Command::new("sleep")
+            .arg("60")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let group = group_of(&child).unwrap();
+
+        let started = Instant::now();
+        end_group(group);
+        let took = started.elapsed();
+        let _ = child.wait();
+
+        assert!(
+            took < TERMINATION_GRACE / 2,
+            "ending the group took {took:?}"
+        );
+    }
 }

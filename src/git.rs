@@ -303,29 +303,20 @@ pub fn remote_url(dir: Option<&Path>, remote: &str) -> Option<String> {
         .map(|url| url.trim().to_string())
 }
 
-/// Every `remote.<name>.*` setting in force in `dir`, in the order git reads
-/// them. The order is kept because it carries precedence: a scalar setting
-/// takes its last value, so the same entries listed in another order can mean
-/// a different fetch. The refspec is the one that matters most: it decides
-/// which refs a fetch brings back, and a worktree can carry its own.
+/// Every config entry in force in `dir`, in the order git reads them. The
+/// order is kept because it carries precedence: a scalar setting takes its
+/// last value, so the same entries listed in another order can mean something
+/// different.
 ///
 /// Entries come back NUL-separated, which keeps a value containing a newline
-/// whole — line-separated output would split it and the tail would be dropped
-/// below. Every remote is read and the wanted one filtered here, rather than
-/// asking git for `^remote\.<name>\.`, because a remote name may contain regex
-/// metacharacters: a `.` in the name would otherwise match any character and
-/// pull in a different remote's settings.
+/// whole — line-separated output would split it into two entries that no
+/// longer say what the config does.
 #[must_use]
-pub fn remote_settings(dir: Option<&Path>, remote: &str) -> Vec<String> {
-    let Ok(output) = run_in(dir, &["config", "--null", "--get-regexp", "^remote\\."]) else {
+pub fn config_entries(dir: Option<&Path>) -> Vec<String> {
+    let Ok(output) = run_in(dir, &["config", "--null", "--list"]) else {
         return Vec::new();
     };
-    let prefix = format!("remote.{remote}.");
-    output
-        .split('\0')
-        .filter(|entry| entry.starts_with(&prefix))
-        .map(str::to_string)
-        .collect()
+    output.split('\0').map(str::to_string).collect()
 }
 
 /// Rebase the current branch onto `onto` (e.g. `origin/main`). Git's stdout

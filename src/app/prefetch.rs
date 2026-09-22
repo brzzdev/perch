@@ -51,22 +51,24 @@ fn signalling() -> MutexGuard<'static, ()> {
 }
 
 /// How a remote name resolves where a fetch runs: the URL it fetches from,
-/// with any `insteadOf` rewrite applied, and the settings that shape what the
-/// fetch brings back. `extensions.worktreeConfig` and `includeIf` can differ
-/// any of these from one worktree to the next, so two fetches of one name are
-/// the same fetch only when the whole of this matches. Comparing the settings
-/// wholesale rather than naming the keys that matter keeps a key nobody
-/// thought of from quietly suppressing a fetch that was not covered.
+/// with any `insteadOf` rewrite applied, and the whole config the fetch runs
+/// under. `extensions.worktreeConfig` and `includeIf` can differ any of these
+/// from one worktree to the next, so two fetches of one name are the same
+/// fetch only when the whole of this matches. The config is compared wholesale
+/// because refspecs, `fetch.*`, transport and credential settings all shape a
+/// fetch, and naming the ones that matter would let a key nobody thought of
+/// quietly suppress a fetch that was not covered. A worktree whose config
+/// differs in some unrelated key costs one extra fetch, nothing more.
 #[derive(Default, PartialEq)]
 struct FetchContext {
-    settings: Vec<String>,
+    config: Vec<String>,
     url: Option<String>,
 }
 
 impl FetchContext {
     fn read(dir: Option<&Path>, remote: &str) -> Self {
         Self {
-            settings: git::remote_settings(dir, remote),
+            config: git::config_entries(dir),
             url: git::remote_url(dir, remote),
         }
     }

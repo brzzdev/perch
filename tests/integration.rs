@@ -2138,6 +2138,31 @@ fn wt_still_fetches_a_worktree_whose_origin_fetches_other_refs() {
     );
 }
 
+/// Settings outside `remote.<name>.*` shape a fetch too: with `fetch.pruneTags`
+/// the target worktree's own fetch prunes tags the remote no longer has, which
+/// the invoking worktree's prefetch does not.
+#[test]
+fn wt_still_fetches_a_worktree_whose_fetch_config_differs() {
+    let (_bare, parent, work) = setup_with_parent();
+    let worktree = add_worktree(&work, &parent, "feature");
+    git(&work, &["push", "origin", "feature"]);
+    git(&work, &["config", "core.repositoryFormatVersion", "1"]);
+    git(&work, &["config", "extensions.worktreeConfig", "true"]);
+    git(
+        &worktree,
+        &["config", "--worktree", "fetch.pruneTags", "true"],
+    );
+    // A tag the remote never had, so the target's own fetch prunes it.
+    git(&work, &["tag", "stale"]);
+
+    let (output, fetches) = perch_traced(&parent, &work, &["wt", "feature", "--no-switch"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert_eq!(fetches.len(), 2, "fetches: {fetches:?}");
+    let tags = git(&work, &["tag", "--list", "stale"]);
+    assert_eq!(stdout_str(&tags).trim(), "", "the stale tag was not pruned");
+}
+
 /// The prefetch covers a remote *name* as the invoking worktree resolves it.
 /// With `extensions.worktreeConfig` the same name can point elsewhere from
 /// another worktree, and that worktree's update must still fetch from where

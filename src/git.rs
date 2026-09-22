@@ -298,14 +298,9 @@ fn fetch_args(remote: &str) -> [&str; 4] {
 /// where the remote has no URL there.
 #[must_use]
 pub fn remote_url(dir: Option<&Path>, remote: &str) -> Option<String> {
-    let output = git_cmd(dir)
-        .args(["remote", "get-url", remote])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    run_in(dir, &["remote", "get-url", remote])
+        .ok()
+        .map(|url| url.trim().to_string())
 }
 
 /// Rebase the current branch onto `onto` (e.g. `origin/main`). Git's stdout

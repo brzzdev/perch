@@ -177,7 +177,11 @@ impl FetchedRemote {
     /// can fetch where another could not. Nor does a fetch cover a worktree
     /// with submodules, whose own fetch recurses into submodule repositories
     /// that only it has. `wt` skips the prefetch where any worktree has them,
-    /// so this is for one that gained them while the picker was open.
+    /// so this is for one that gained them while the picker was open. Such a
+    /// fetch reaches its submodules only where recursion is forced: on demand,
+    /// it finds no superproject commit the prefetch has not already fetched.
+    /// That is an accepted limit, since closing it would mean forcing
+    /// recursion over the user's `fetch.recurseSubmodules`.
     fn covers(&self, dir: Option<&Path>, remote: &str) -> bool {
         if self.name != remote {
             return false;

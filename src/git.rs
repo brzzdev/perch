@@ -327,12 +327,25 @@ pub fn remote_url(dir: Option<&Path>, remote: &str) -> Option<String> {
 /// Entries come back NUL-separated, which keeps a value containing a newline
 /// whole — line-separated output would split it into two entries that no
 /// longer say what the config does.
+///
+/// `GIT_CONFIG` is left out: `git config` would list only that file, while
+/// `git fetch` ignores it and reads the config actually in force.
 #[must_use]
 pub fn config_entries(dir: Option<&Path>) -> Vec<String> {
-    let Ok(output) = run_in(dir, &["config", "--null", "--list"]) else {
+    let Ok(output) = git_cmd(dir)
+        .args(["config", "--null", "--list"])
+        .env_remove("GIT_CONFIG")
+        .output()
+    else {
         return Vec::new();
     };
-    output.split('\0').map(str::to_string).collect()
+    if !output.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .split('\0')
+        .map(str::to_string)
+        .collect()
 }
 
 /// Rebase the current branch onto `onto` (e.g. `origin/main`). Git's stdout

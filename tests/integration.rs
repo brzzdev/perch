@@ -2180,10 +2180,16 @@ fn wt_still_fetches_a_worktree_whose_fetch_config_differs() {
 /// as `ext::` does, and `remote.<name>.vcs` hands the fetch to a helper
 /// whatever the URL says, or with no URL at all. A transport program named by
 /// a relative path is found from where it runs too, whether config or the
-/// environment names it. Config and URL can both match while the fetches do
-/// not.
+/// environment names it, and so is a bare `ssh` found through a relative or
+/// empty `PATH` entry, or a relative `GIT_EXEC_PATH`, which git puts first on
+/// `PATH`. Config and URL can both match while the fetches do not.
 #[test]
 fn wt_still_fetches_a_worktree_whose_origin_resolves_from_where_it_runs() {
+    // An `ssh://` remote whose `ssh` is the wrapper written below.
+    const SSH_REMOTE: [(&str, &str); 2] = [
+        ("remote.origin.url", "ssh://example.invalid/repo.git"),
+        ("ssh.variant", "simple"),
+    ];
     for settings in [
         &[("remote.origin.url", "../origin.git")][..],
         &[("remote.origin.url", "ext::git %s ../origin.git")],
@@ -2193,26 +2199,24 @@ fn wt_still_fetches_a_worktree_whose_origin_resolves_from_where_it_runs() {
         ],
         &[("remote.origin.url", "relative://../origin.git")],
         &[("remote.origin.vcs", "relative")],
+        &[("core.sshCommand", "./ssh"), SSH_REMOTE[0], SSH_REMOTE[1]],
         &[
-            ("core.sshCommand", "./ssh-wrapper"),
-            ("remote.origin.url", "ssh://example.invalid/repo.git"),
-            ("ssh.variant", "simple"),
+            ("core.sshCommand", "env WRAPPED=1 ./ssh"),
+            SSH_REMOTE[0],
+            SSH_REMOTE[1],
         ],
-        &[
-            ("core.sshCommand", "env WRAPPED=1 ./ssh-wrapper"),
-            ("remote.origin.url", "ssh://example.invalid/repo.git"),
-            ("ssh.variant", "simple"),
-        ],
-        &[
-            ("GIT_SSH_COMMAND", "./ssh-wrapper"),
-            ("remote.origin.url", "ssh://example.invalid/repo.git"),
-            ("ssh.variant", "simple"),
-        ],
+        &[("GIT_EXEC_PATH", "."), SSH_REMOTE[0], SSH_REMOTE[1]],
+        &[("GIT_SSH_COMMAND", "./ssh"), SSH_REMOTE[0], SSH_REMOTE[1]],
+        // A `PATH` setting goes in front of the test's own `PATH`.
+        &[("PATH", "."), SSH_REMOTE[0], SSH_REMOTE[1]],
+        &[("PATH", ""), SSH_REMOTE[0], SSH_REMOTE[1]],
     ] {
         let case = format!("{settings:?}");
         // A key with no `.` is an environment variable, where config has none.
         let (config, env): (Vec<_>, Vec<_>) =
             settings.iter().partition(|(key, _)| key.contains('.'));
+        let (path_front, env): (Vec<_>, Vec<_>) =
+            env.into_iter().partition(|(key, _)| *key == "PATH");
         let (bare, parent, work) = setup_with_parent();
         let worktree = add_worktree(&work, &parent, "feature");
         git(&work, &["push", "origin", "feature"]);
@@ -2243,26 +2247,18 @@ fn wt_still_fetches_a_worktree_whose_origin_resolves_from_where_it_runs() {
         // An ssh of the user's own in each worktree, serving the repository
         // its relative path reaches from there. Ignored, so the worktrees stay
         // clean.
-        fs::write(work.join(".git/info/exclude"), "ssh-wrapper\n").unwrap();
+        fs::write(work.join(".git/info/exclude"), "ssh\n").unwrap();
         for dir in [&work, &worktree] {
-            let wrapper = dir.join("ssh-wrapper");
+            let wrapper = dir.join("ssh");
             fs::write(&wrapper, "#!/bin/sh\nexec git upload-pack ../origin.git\n").unwrap();
             fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
         }
-        // A helper of the user's own, reading its address as a path from where
-        // it runs, as the `ext::` URL above does. Where the remote has no URL,
-        // git passes its name instead, and the helper falls back to the path.
-        let helpers = parent.path().join("helpers");
-        fs::create_dir(&helpers).unwrap();
-        let helper = helpers.join("git-remote-relative");
-        fs::write(
-            &helper,
-            "#!/bin/sh\ncase \"$2\" in\n  *://*) address=\"${2#*://}\" ;;\n  *) address=../origin.git ;;\nesac\nexec git remote-ext \"$1\" \"git %s $address\"\n",
-        )
-        .unwrap();
-        fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
+        let helpers = relative_remote_helper(&parent);
         let path = std::env::join_paths(
-            std::iter::once(helpers)
+            path_front
+                .iter()
+                .map(|(_, entry)| PathBuf::from(entry))
+                .chain(std::iter::once(helpers))
                 .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
         )
         .unwrap();
@@ -2284,6 +2280,23 @@ fn wt_still_fetches_a_worktree_whose_origin_resolves_from_where_it_runs() {
             "{case}: the worktree was not brought up to its own origin/feature"
         );
     }
+}
+
+/// A helper of the user's own for `relative::` remotes, in a directory of its
+/// own under `parent` for the caller to put on `PATH`. It reads its address as
+/// a path from where it runs, as an `ext::` URL does. Where the remote has no
+/// URL, git passes its name instead, and the helper falls back to the path.
+fn relative_remote_helper(parent: &TempDir) -> PathBuf {
+    let helpers = parent.path().join("helpers");
+    fs::create_dir(&helpers).unwrap();
+    let helper = helpers.join("git-remote-relative");
+    fs::write(
+        &helper,
+        "#!/bin/sh\ncase \"$2\" in\n  *://*) address=\"${2#*://}\" ;;\n  *) address=../origin.git ;;\nesac\nexec git remote-ext \"$1\" \"git %s $address\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
+    helpers
 }
 
 /// The prefetch covers a remote *name* as the invoking worktree resolves it.
@@ -2333,6 +2346,132 @@ fn wt_still_fetches_a_worktree_whose_origin_points_elsewhere() {
         tip,
         "the worktree was not updated from its own origin"
     );
+}
+
+/// Each worktree keeps its own submodule repositories, and a fetch recurses
+/// only into those checked out where it runs. The target's own fetch is what
+/// brings its submodule the commit its advanced gitlink names.
+#[test]
+fn wt_still_fetches_a_worktree_with_submodules() {
+    let (bare, parent, work) = setup_with_parent();
+    let sub_bare = parent.path().join("sub.git");
+    git(
+        parent.path(),
+        &["init", "--bare", sub_bare.to_str().unwrap()],
+    );
+    pin_default_branch(&sub_bare);
+    let sub_work = clone_bare(&sub_bare);
+    commit_in(sub_work.path(), "s.txt", "sub initial");
+    git(sub_work.path(), &["push", "origin", "HEAD:main"]);
+    // Submodules clone and fetch over the file transport only when allowed.
+    let allow_file = ["-c", "protocol.file.allow=always"];
+    git(
+        &work,
+        &[
+            &allow_file[..],
+            &["submodule", "add", sub_bare.to_str().unwrap(), "sub"],
+        ]
+        .concat(),
+    );
+    git(&work, &["commit", "-m", "add sub"]);
+    git(&work, &["push", "origin", "main"]);
+    let worktree = add_worktree(&work, &parent, "feature");
+    git(&work, &["push", "-u", "origin", "feature"]);
+    git(
+        &worktree,
+        &[&allow_file[..], &["submodule", "update", "--init"]].concat(),
+    );
+    // Advance the submodule upstream, and the gitlink on `feature` to match.
+    commit_in(sub_work.path(), "s2.txt", "sub ahead");
+    git(sub_work.path(), &["push", "origin", "HEAD:main"]);
+    let sub_tip = stdout_str(&git(sub_work.path(), &["rev-parse", "HEAD"]));
+    let pusher = clone_bare(bare.path());
+    git(pusher.path(), &["switch", "feature"]);
+    git(
+        pusher.path(),
+        &[&allow_file[..], &["submodule", "update", "--init"]].concat(),
+    );
+    git(
+        &pusher.path().join("sub"),
+        &[&allow_file[..], &["pull", "origin", "main"]].concat(),
+    );
+    git(pusher.path(), &["commit", "-am", "advance sub"]);
+    git(pusher.path(), &["push", "origin", "feature"]);
+    let mut command = perch_command(&work, &["wt", "feature", "--no-switch"]);
+    command
+        .env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "protocol.file.allow")
+        .env("GIT_CONFIG_VALUE_0", "always");
+
+    let (output, _fetches) = perch_traced_with(&parent, command);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    let found = Command::new("git")
+        .args(["cat-file", "-e", &format!("{}^{{commit}}", sub_tip.trim())])
+        .current_dir(worktree.join("sub"))
+        .status()
+        .unwrap();
+    assert!(
+        found.success(),
+        "the target's submodule lacks the new commit"
+    );
+}
+
+/// `git config` reads only the `GIT_CONFIG` file, so every worktree would
+/// report the same config, but `git fetch` ignores it. The comparison has to
+/// read what the fetch reads, here the target's own `fetch.pruneTags`.
+#[test]
+fn wt_still_fetches_a_worktree_whose_config_differs_under_git_config() {
+    let (_bare, parent, work) = setup_with_parent();
+    let worktree = add_worktree(&work, &parent, "feature");
+    git(&work, &["push", "origin", "feature"]);
+    git(&work, &["config", "core.repositoryFormatVersion", "1"]);
+    git(&work, &["config", "extensions.worktreeConfig", "true"]);
+    git(
+        &worktree,
+        &["config", "--worktree", "fetch.pruneTags", "true"],
+    );
+    git(&work, &["tag", "stale"]);
+    let mut command = perch_command(&work, &["wt", "feature", "--no-switch"]);
+    command.env("GIT_CONFIG", work.join(".git/config"));
+
+    let (output, fetches) = perch_traced_with(&parent, command);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert_eq!(fetches.len(), 2, "fetches: {fetches:?}");
+    let tags = git(&work, &["tag", "--list", "stale"]);
+    assert_eq!(stdout_str(&tags).trim(), "", "the stale tag was not pruned");
+}
+
+/// A relative `core.hooksPath` resolves from each worktree's root, so each
+/// fetch can run a different `reference-transaction` hook.
+#[test]
+fn wt_still_fetches_a_worktree_under_a_relative_hooks_path() {
+    let (_bare, parent, work) = setup_with_parent();
+    add_worktree(&work, &parent, "feature");
+    git(&work, &["push", "origin", "feature"]);
+    git(&work, &["config", "core.hooksPath", "hooks"]);
+
+    let (output, fetches) = perch_traced(&parent, &work, &["wt", "feature", "--no-switch"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert_eq!(fetches.len(), 2, "fetches: {fetches:?}");
+}
+
+/// A variable that picks the repository overrides it for both fetches alike,
+/// so there is no tip to compare, only the fetch that coverage must not skip.
+#[test]
+fn wt_still_fetches_a_worktree_when_the_environment_picks_the_repository() {
+    let (_bare, parent, work) = setup_with_parent();
+    add_worktree(&work, &parent, "feature");
+    git(&work, &["push", "origin", "feature"]);
+    let mut command = perch_command(&work, &["wt", "feature", "--no-switch"]);
+    command.env("GIT_COMMON_DIR", work.join(".git"));
+
+    let (output, fetches) = perch_traced_with(&parent, command);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert_eq!(fetches.len(), 2, "fetches: {fetches:?}");
 }
 
 /// A remote that cannot be reached is worth one warning, not one per attempt,

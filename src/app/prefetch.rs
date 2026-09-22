@@ -82,8 +82,22 @@ impl FetchContext {
     /// Such a program is a shell command, so a relative path anywhere in it,
     /// behind `env` or as `sh`'s script, is found from where git runs. Rather
     /// than parse shell, any such setting at all declines coverage, at the
-    /// price of one extra fetch for a setup that has one. Settings outside
-    /// these are a known limit (#133).
+    /// price of one extra fetch for a setup that has one. So does anything
+    /// else that git finds from where it runs: a relative `PATH` entry, where
+    /// `ssh` and helpers are looked up, a relative `GIT_EXEC_PATH`, and a
+    /// relative `core.hooksPath`, whose `reference-transaction` hook can
+    /// reject the fetch's ref updates. A variable that picks the repository
+    /// itself declines it whatever its value.
+    ///
+    /// Accepted limits, each costing a fetch that is wrongly skipped rather
+    /// than one wrongly run: fetch-affecting settings git adds later; absolute
+    /// hooks that behave differently per directory; refspecs whose
+    /// destination is a per-worktree namespace (`refs/worktree/`,
+    /// `refs/bisect/`, `refs/rewritten/`); and relative credential and TLS
+    /// paths (`core.askPass`, `GIT_ASKPASS`, `http.sslCAInfo`,
+    /// `http.sslCert`, `http.sslKey`, `http.cookieFile`), which decide
+    /// whether authentication succeeds rather than which repository is
+    /// fetched.
     fn names_one_repository(&self, remote: &str) -> bool {
         let upload_pack = format!("remote.{remote}.uploadpack");
         let vcs = format!("remote.{remote}.vcs");
@@ -92,6 +106,8 @@ impl FetchContext {
             let (key, value) = entry.split_once('\n').unwrap_or((entry, ""));
             match key {
                 "core.gitproxy" | "core.sshcommand" => true,
+                // `~` is expanded, so it is as absolute as a leading `/`.
+                "core.hookspath" => !(value.starts_with('/') || value.starts_with('~')),
                 key if key == upload_pack || key == vcs => true,
                 // Only the `!` form is a shell command; any other value names
                 // a `git credential-*` helper or an absolute path.
@@ -106,8 +122,19 @@ impl FetchContext {
         let from_the_environment = PROGRAM_VARIABLES
             .iter()
             .any(|name| std::env::var_os(name).is_some_and(|program| !program.is_empty()));
+        // An empty `PATH` entry means the current directory.
+        let relative_path = std::env::var_os("PATH")
+            .is_some_and(|path| std::env::split_paths(&path).any(|entry| entry.is_relative()));
+        let relative_exec_path = std::env::var_os("GIT_EXEC_PATH")
+            .is_some_and(|exec_path| Path::new(&exec_path).is_relative());
+        let picks_the_repository = REPOSITORY_VARIABLES
+            .iter()
+            .any(|name| std::env::var_os(name).is_some());
         !runs_a_program
             && !from_the_environment
+            && !relative_path
+            && !relative_exec_path
+            && !picks_the_repository
             && self.url.as_deref().is_some_and(names_one_repository)
     }
 }
@@ -115,6 +142,16 @@ impl FetchContext {
 /// The environment variables through which a fetch runs a program of the
 /// user's choosing, in place of the config settings of the same purpose.
 const PROGRAM_VARIABLES: [&str; 3] = ["GIT_PROXY_COMMAND", "GIT_SSH", "GIT_SSH_COMMAND"];
+
+/// The environment variables that choose the repository, or part of it, in
+/// place of the directory git runs in.
+const REPOSITORY_VARIABLES: [&str; 5] = [
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_WORK_TREE",
+];
 
 /// A remote this run has already fetched and reported on, handed to the steps
 /// that would otherwise fetch it again. A failed fetch earns the token too:
@@ -134,7 +171,9 @@ impl FetchedRemote {
     /// that worktree resolves the name to the same [`FetchContext`], and where
     /// that context names one repository whichever directory git runs in. A
     /// failure covers no worktree: each has a `FETCH_HEAD` of its own, so one
-    /// can fetch where another could not.
+    /// can fetch where another could not. Nor does a fetch cover a worktree
+    /// with submodules, since each worktree keeps its own submodule
+    /// repositories and a fetch recurses only into those where it runs.
     fn covers(&self, dir: Option<&Path>, remote: &str) -> bool {
         if self.name != remote {
             return false;
@@ -143,6 +182,7 @@ impl FetchedRemote {
             return true;
         };
         self.failure.is_none()
+            && !dir.join(".gitmodules").exists()
             && self.context.names_one_repository(remote)
             && FetchContext::read(Some(dir), remote) == self.context
     }

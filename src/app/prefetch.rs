@@ -87,9 +87,8 @@ impl FetchedRemote {
     /// Whether the fetch already done stands in for a fetch of `remote` from
     /// `dir`. A fetch from the directory this one ran in is covered by name;
     /// one from a worktree is covered only where that worktree resolves the
-    /// name to the same [`FetchContext`], and never where the URL is a
-    /// relative path: git resolves that against the directory it runs in, so
-    /// the same text names a different repository from each worktree.
+    /// name to the same [`FetchContext`], and only where the URL names one
+    /// repository whichever directory git runs in.
     fn covers(&self, dir: Option<&Path>, remote: &str) -> bool {
         if self.name != remote {
             return false;
@@ -97,23 +96,33 @@ impl FetchedRemote {
         let Some(dir) = dir else {
             return true;
         };
-        !self.context.url.as_deref().is_some_and(is_relative_path)
+        self.context.url.as_deref().is_none_or(names_one_repository)
             && FetchContext::read(Some(dir), remote) == self.context
     }
 }
 
-/// Whether `url` is a filesystem path relative to where git runs, by git's own
-/// reading of a URL: anything with a `://` scheme, or with a `:` before its
-/// first `/` (scp-style `host:path`, and `<transport>::<address>`), goes over a
-/// transport rather than naming a local path.
-fn is_relative_path(url: &str) -> bool {
-    if url.contains("://") || url.starts_with('/') {
+/// Whether `url` names the same repository whichever directory git fetches it
+/// from, by git's own reading of a URL. A `scheme://` URL, an absolute path and
+/// scp-style `host:path` do. A relative path does not, since git resolves it
+/// against the directory it runs in. Nor can a `<transport>::<address>` URL be
+/// trusted to: its helper, `ext::` included, is free to read the address as a
+/// path relative to where it runs.
+fn names_one_repository(url: &str) -> bool {
+    // A leading run of scheme characters, as git reads a transport name.
+    let scheme = url
+        .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')))
+        .unwrap_or(url.len());
+    let rest = &url[scheme..];
+    if scheme > 0 && rest.starts_with("::") {
         return false;
     }
+    if rest.starts_with("://") || url.starts_with('/') {
+        return true;
+    }
+    // A `:` before any `/` makes it scp-style, and anything else local.
     match (url.find(':'), url.find('/')) {
-        (Some(colon), Some(slash)) => slash < colon,
-        (Some(_), None) => false,
-        (None, _) => true,
+        (Some(colon), slash) => slash.is_none_or(|slash| colon < slash),
+        (None, _) => false,
     }
 }
 

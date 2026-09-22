@@ -2165,44 +2165,51 @@ fn wt_still_fetches_a_worktree_whose_fetch_config_differs() {
 
 /// A relative URL has the same text in every worktree, but git resolves it
 /// against the directory it runs in, so `../origin.git` names a different
-/// repository from each. Config and URL can both match while the fetches do
-/// not.
+/// repository from each. A transport helper can read its address the same way,
+/// as `ext::` does. Config and URL can both match while the fetches do not.
 #[test]
-fn wt_still_fetches_a_worktree_whose_origin_is_a_relative_path() {
-    let (bare, parent, work) = setup_with_parent();
-    let worktree = add_worktree(&work, &parent, "feature");
-    git(&work, &["push", "origin", "feature"]);
-    let near = parent.path().join("origin.git");
-    let far = parent.path().join("worktrees/repo/origin.git");
-    for clone in [&near, &far] {
-        git(
-            parent.path(),
-            &[
-                "clone",
-                "--bare",
-                bare.path().to_str().unwrap(),
-                clone.to_str().unwrap(),
-            ],
+fn wt_still_fetches_a_worktree_whose_origin_resolves_from_where_it_runs() {
+    for url in ["../origin.git", "ext::git %s ../origin.git"] {
+        let (bare, parent, work) = setup_with_parent();
+        let worktree = add_worktree(&work, &parent, "feature");
+        git(&work, &["push", "origin", "feature"]);
+        let near = parent.path().join("origin.git");
+        let far = parent.path().join("worktrees/repo/origin.git");
+        for clone in [&near, &far] {
+            git(
+                parent.path(),
+                &[
+                    "clone",
+                    "--bare",
+                    bare.path().to_str().unwrap(),
+                    clone.to_str().unwrap(),
+                ],
+            );
+        }
+        // Advance `feature` only in the repository the target worktree resolves.
+        let pusher = clone_bare(&far);
+        git(pusher.path(), &["switch", "feature"]);
+        commit_in(pusher.path(), "ahead.txt", "ahead");
+        git(pusher.path(), &["push", "origin", "feature"]);
+        git(&work, &["remote", "set-url", "origin", url]);
+        git(&work, &["config", "protocol.ext.allow", "always"]);
+        let tip = remote_branch_tip(&worktree, "origin", "feature").unwrap();
+
+        let (output, fetches) = perch_traced(&parent, &work, &["wt", "feature", "--no-switch"]);
+
+        assert!(
+            output.status.success(),
+            "{url}: stderr: {}",
+            stderr_str(&output)
+        );
+        assert_eq!(fetches.len(), 2, "{url}: fetches: {fetches:?}");
+        let head = git(&worktree, &["rev-parse", "HEAD"]);
+        assert_eq!(
+            stdout_str(&head).trim(),
+            tip,
+            "{url}: the worktree was not brought up to its own origin/feature"
         );
     }
-    // Advance `feature` only in the repository the target worktree resolves.
-    let pusher = clone_bare(&far);
-    git(pusher.path(), &["switch", "feature"]);
-    commit_in(pusher.path(), "ahead.txt", "ahead");
-    git(pusher.path(), &["push", "origin", "feature"]);
-    git(&work, &["remote", "set-url", "origin", "../origin.git"]);
-    let tip = remote_branch_tip(&worktree, "origin", "feature").unwrap();
-
-    let (output, fetches) = perch_traced(&parent, &work, &["wt", "feature", "--no-switch"]);
-
-    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
-    assert_eq!(fetches.len(), 2, "fetches: {fetches:?}");
-    let head = git(&worktree, &["rev-parse", "HEAD"]);
-    assert_eq!(
-        stdout_str(&head).trim(),
-        tip,
-        "the worktree was not brought up to its own origin/feature"
-    );
 }
 
 /// The prefetch covers a remote *name* as the invoking worktree resolves it.

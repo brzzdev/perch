@@ -2173,8 +2173,9 @@ fn wt_still_fetches_a_worktree_whose_fetch_config_differs() {
 /// repository from each. A transport helper can read its address the same way,
 /// as `ext::` does, and `remote.<name>.vcs` hands the fetch to a helper
 /// whatever the URL says, or with no URL at all. A transport program named by
-/// a relative path is found from where it runs too. Config and URL can both
-/// match while the fetches do not.
+/// a relative path is found from where it runs too, whether config or the
+/// environment names it. Config and URL can both match while the fetches do
+/// not.
 #[test]
 fn wt_still_fetches_a_worktree_whose_origin_resolves_from_where_it_runs() {
     for settings in [
@@ -2191,8 +2192,16 @@ fn wt_still_fetches_a_worktree_whose_origin_resolves_from_where_it_runs() {
             ("remote.origin.url", "ssh://example.invalid/repo.git"),
             ("ssh.variant", "simple"),
         ],
+        &[
+            ("GIT_SSH_COMMAND", "./ssh-wrapper"),
+            ("remote.origin.url", "ssh://example.invalid/repo.git"),
+            ("ssh.variant", "simple"),
+        ],
     ] {
         let case = format!("{settings:?}");
+        // A key with no `.` is an environment variable, where config has none.
+        let (config, env): (Vec<_>, Vec<_>) =
+            settings.iter().partition(|(key, _)| key.contains('.'));
         let (bare, parent, work) = setup_with_parent();
         let worktree = add_worktree(&work, &parent, "feature");
         git(&work, &["push", "origin", "feature"]);
@@ -2216,7 +2225,7 @@ fn wt_still_fetches_a_worktree_whose_origin_resolves_from_where_it_runs() {
         git(pusher.path(), &["push", "origin", "feature"]);
         let tip = stdout_str(&git(&far, &["rev-parse", "feature"]));
         git(&work, &["config", "--unset", "remote.origin.url"]);
-        for (key, value) in settings {
+        for (key, value) in config {
             git(&work, &["config", key, value]);
         }
         git(&work, &["config", "protocol.ext.allow", "always"]);
@@ -2247,7 +2256,7 @@ fn wt_still_fetches_a_worktree_whose_origin_resolves_from_where_it_runs() {
         )
         .unwrap();
         let mut command = perch_command(&work, &["wt", "feature", "--no-switch"]);
-        command.env("PATH", path);
+        command.env("PATH", path).envs(env.iter().copied());
 
         let (output, fetches) = perch_traced_with(&parent, command);
 

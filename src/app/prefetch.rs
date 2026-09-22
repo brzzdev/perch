@@ -103,9 +103,20 @@ impl FetchContext {
             };
             is_relative_program(program)
         });
-        !depends_on_where_it_runs && self.url.as_deref().is_some_and(names_one_repository)
+        // The environment is the same for both fetches, but a relative program
+        // in it resolves from each one's directory all the same.
+        let from_the_environment = PROGRAM_VARIABLES
+            .iter()
+            .any(|name| std::env::var(name).is_ok_and(|program| is_relative_program(&program)));
+        !depends_on_where_it_runs
+            && !from_the_environment
+            && self.url.as_deref().is_some_and(names_one_repository)
     }
 }
+
+/// The environment variables through which a fetch runs a program of the
+/// user's choosing, in place of the config settings of the same purpose.
+const PROGRAM_VARIABLES: [&str; 3] = ["GIT_PROXY_COMMAND", "GIT_SSH", "GIT_SSH_COMMAND"];
 
 /// Whether the first word of the shell command `command` is a program named by
 /// a path relative to where it runs. A bare name is looked up on `PATH`, and

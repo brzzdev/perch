@@ -77,17 +77,15 @@ impl FetchContext {
     /// runs in. Never where `remote.<name>.vcs` picks a helper, which gets the
     /// URL, if any, only as an argument to read as it likes, nor where there
     /// is no URL to judge, nor where the fetch runs a program of the user's
-    /// choosing. Otherwise it is down to the URL.
+    /// choosing or anything else git finds from where it runs. Otherwise it is
+    /// down to the URL.
     ///
     /// Such a program is a shell command, so a relative path anywhere in it,
     /// behind `env` or as `sh`'s script, is found from where git runs. Rather
     /// than parse shell, any such setting at all declines coverage, at the
-    /// price of one extra fetch for a setup that has one. So does anything
-    /// else that git finds from where it runs: a relative `PATH` entry, where
-    /// `ssh` and helpers are looked up, a relative `GIT_EXEC_PATH`, and a
-    /// relative `core.hooksPath`, whose `reference-transaction` hook can
-    /// reject the fetch's ref updates. A variable that picks the repository
-    /// itself declines it whatever its value.
+    /// price of one extra fetch for a setup that has one. A relative
+    /// `core.hooksPath` declines it too: its `reference-transaction` hook can
+    /// reject the fetch's ref updates.
     ///
     /// Accepted limits, each costing a fetch that is wrongly skipped rather
     /// than one wrongly run: fetch-affecting settings git adds later; absolute
@@ -101,13 +99,13 @@ impl FetchContext {
     fn names_one_repository(&self, remote: &str) -> bool {
         let upload_pack = format!("remote.{remote}.uploadpack");
         let vcs = format!("remote.{remote}.vcs");
-        let runs_a_program = self.config.iter().any(|entry| {
+        let from_the_config = self.config.iter().any(|entry| {
             // The key, then a newline and the value where it has one.
             let (key, value) = entry.split_once('\n').unwrap_or((entry, ""));
             match key {
                 "core.gitproxy" | "core.sshcommand" => true,
                 // `~` is expanded, so it is as absolute as a leading `/`.
-                "core.hookspath" => !(value.starts_with('/') || value.starts_with('~')),
+                "core.hookspath" => !value.starts_with(['/', '~']),
                 key if key == upload_pack || key == vcs => true,
                 // Only the `!` form is a shell command; any other value names
                 // a `git credential-*` helper or an absolute path.
@@ -117,26 +115,31 @@ impl FetchContext {
                 _ => false,
             }
         });
-        // The environment is the same for both fetches, but a program it
-        // names runs from each one's directory all the same.
-        let from_the_environment = PROGRAM_VARIABLES
-            .iter()
-            .any(|name| std::env::var_os(name).is_some_and(|program| !program.is_empty()));
-        // An empty `PATH` entry means the current directory.
-        let relative_path = std::env::var_os("PATH")
-            .is_some_and(|path| std::env::split_paths(&path).any(|entry| entry.is_relative()));
-        let relative_exec_path = std::env::var_os("GIT_EXEC_PATH")
-            .is_some_and(|exec_path| Path::new(&exec_path).is_relative());
-        let picks_the_repository = REPOSITORY_VARIABLES
-            .iter()
-            .any(|name| std::env::var_os(name).is_some());
-        !runs_a_program
-            && !from_the_environment
-            && !relative_path
-            && !relative_exec_path
-            && !picks_the_repository
+        !from_the_config
+            && !environment_resolves_per_directory()
             && self.url.as_deref().is_some_and(names_one_repository)
     }
+}
+
+/// Whether the environment has git find anything from the directory it runs
+/// in. The environment is the same for both fetches, but what it names is
+/// found from each one's directory all the same: a program, a relative `PATH`
+/// entry where `ssh` and helpers are looked up, or a relative `GIT_EXEC_PATH`,
+/// which git puts first on `PATH`. A variable that picks the repository itself
+/// counts whatever its value.
+fn environment_resolves_per_directory() -> bool {
+    let runs_a_program = PROGRAM_VARIABLES
+        .iter()
+        .any(|name| std::env::var_os(name).is_some_and(|program| !program.is_empty()));
+    // An empty `PATH` entry means the current directory.
+    let relative_path = std::env::var_os("PATH")
+        .is_some_and(|path| std::env::split_paths(&path).any(|entry| entry.is_relative()));
+    let relative_exec_path = std::env::var_os("GIT_EXEC_PATH")
+        .is_some_and(|exec_path| Path::new(&exec_path).is_relative());
+    let picks_the_repository = REPOSITORY_VARIABLES
+        .iter()
+        .any(|name| std::env::var_os(name).is_some());
+    runs_a_program || relative_path || relative_exec_path || picks_the_repository
 }
 
 /// The environment variables through which a fetch runs a program of the

@@ -332,20 +332,17 @@ pub fn remote_url(dir: Option<&Path>, remote: &str) -> Option<String> {
 /// `git fetch` ignores it and reads the config actually in force.
 #[must_use]
 pub fn config_entries(dir: Option<&Path>) -> Vec<String> {
-    let Ok(output) = git_cmd(dir)
+    match git_cmd(dir)
         .args(["config", "--null", "--list"])
         .env_remove("GIT_CONFIG")
         .output()
-    else {
-        return Vec::new();
-    };
-    if !output.status.success() {
-        return Vec::new();
+    {
+        Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout)
+            .split('\0')
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
     }
-    String::from_utf8_lossy(&output.stdout)
-        .split('\0')
-        .map(str::to_string)
-        .collect()
 }
 
 /// Rebase the current branch onto `onto` (e.g. `origin/main`). Git's stdout

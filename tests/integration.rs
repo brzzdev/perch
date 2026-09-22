@@ -2151,27 +2151,47 @@ fn wt_still_fetches_a_worktree_whose_origin_fetches_other_refs() {
 
 /// Settings outside `remote.<name>.*` shape a fetch too: with `fetch.pruneTags`
 /// the target worktree's own fetch prunes tags the remote no longer has, which
-/// the invoking worktree's prefetch does not.
+/// the invoking worktree's prefetch does not. Under `GIT_CONFIG`, `git config`
+/// reads only that file and so reports the same config everywhere, while
+/// `git fetch` ignores it; the comparison has to read what the fetch reads.
 #[test]
 fn wt_still_fetches_a_worktree_whose_fetch_config_differs() {
-    let (_bare, parent, work) = setup_with_parent();
-    let worktree = add_worktree(&work, &parent, "feature");
-    git(&work, &["push", "origin", "feature"]);
-    git(&work, &["config", "core.repositoryFormatVersion", "1"]);
-    git(&work, &["config", "extensions.worktreeConfig", "true"]);
-    git(
-        &worktree,
-        &["config", "--worktree", "fetch.pruneTags", "true"],
-    );
-    // A tag the remote never had, so the target's own fetch prunes it.
-    git(&work, &["tag", "stale"]);
+    for git_config in [false, true] {
+        let (_bare, parent, work) = setup_with_parent();
+        let worktree = add_worktree(&work, &parent, "feature");
+        git(&work, &["push", "origin", "feature"]);
+        git(&work, &["config", "core.repositoryFormatVersion", "1"]);
+        git(&work, &["config", "extensions.worktreeConfig", "true"]);
+        git(
+            &worktree,
+            &["config", "--worktree", "fetch.pruneTags", "true"],
+        );
+        // A tag the remote never had, so the target's own fetch prunes it.
+        git(&work, &["tag", "stale"]);
+        let mut command = perch_command(&work, &["wt", "feature", "--no-switch"]);
+        if git_config {
+            command.env("GIT_CONFIG", work.join(".git/config"));
+        }
 
-    let (output, fetches) = perch_traced(&parent, &work, &["wt", "feature", "--no-switch"]);
+        let (output, fetches) = perch_traced_with(&parent, command);
 
-    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
-    assert_eq!(fetches.len(), 2, "fetches: {fetches:?}");
-    let tags = git(&work, &["tag", "--list", "stale"]);
-    assert_eq!(stdout_str(&tags).trim(), "", "the stale tag was not pruned");
+        assert!(
+            output.status.success(),
+            "GIT_CONFIG {git_config}: stderr: {}",
+            stderr_str(&output)
+        );
+        assert_eq!(
+            fetches.len(),
+            2,
+            "GIT_CONFIG {git_config}: fetches: {fetches:?}"
+        );
+        let tags = git(&work, &["tag", "--list", "stale"]);
+        assert_eq!(
+            stdout_str(&tags).trim(),
+            "",
+            "GIT_CONFIG {git_config}: the stale tag was not pruned"
+        );
+    }
 }
 
 /// A relative URL has the same text in every worktree, but git resolves it
@@ -2354,48 +2374,38 @@ fn wt_still_fetches_a_worktree_whose_origin_points_elsewhere() {
 #[test]
 fn wt_still_fetches_a_worktree_with_submodules() {
     let (bare, parent, work) = setup_with_parent();
-    let sub_bare = parent.path().join("sub.git");
-    git(
-        parent.path(),
-        &["init", "--bare", sub_bare.to_str().unwrap()],
-    );
-    pin_default_branch(&sub_bare);
-    let sub_work = clone_bare(&sub_bare);
-    commit_in(sub_work.path(), "s.txt", "sub initial");
-    git(sub_work.path(), &["push", "origin", "HEAD:main"]);
+    let submodule = TempDir::new().unwrap();
+    git(submodule.path(), &["init", "--initial-branch=main"]);
+    commit_in(submodule.path(), "s.txt", "sub initial");
     // Submodules clone and fetch over the file transport only when allowed.
     let allow_file = ["-c", "protocol.file.allow=always"];
+    let url = submodule.path().to_str().unwrap();
     git(
         &work,
-        &[
-            &allow_file[..],
-            &["submodule", "add", sub_bare.to_str().unwrap(), "sub"],
-        ]
-        .concat(),
+        &[&allow_file[..], &["submodule", "add", url, "sub"]].concat(),
     );
     git(&work, &["commit", "-m", "add sub"]);
     git(&work, &["push", "origin", "main"]);
     let worktree = add_worktree(&work, &parent, "feature");
-    git(&work, &["push", "-u", "origin", "feature"]);
+    git(&work, &["push", "origin", "feature"]);
     git(
         &worktree,
         &[&allow_file[..], &["submodule", "update", "--init"]].concat(),
     );
-    // Advance the submodule upstream, and the gitlink on `feature` to match.
-    commit_in(sub_work.path(), "s2.txt", "sub ahead");
-    git(sub_work.path(), &["push", "origin", "HEAD:main"]);
-    let sub_tip = stdout_str(&git(sub_work.path(), &["rev-parse", "HEAD"]));
+    // Advance the submodule, and the gitlink on the remote's `feature` to match.
+    commit_in(submodule.path(), "s2.txt", "sub ahead");
+    let sub_tip = stdout_str(&git(submodule.path(), &["rev-parse", "HEAD"]));
     let pusher = clone_bare(bare.path());
     git(pusher.path(), &["switch", "feature"]);
     git(
         pusher.path(),
-        &[&allow_file[..], &["submodule", "update", "--init"]].concat(),
+        &[
+            "update-index",
+            "--cacheinfo",
+            &format!("160000,{},sub", sub_tip.trim()),
+        ],
     );
-    git(
-        &pusher.path().join("sub"),
-        &[&allow_file[..], &["pull", "origin", "main"]].concat(),
-    );
-    git(pusher.path(), &["commit", "-am", "advance sub"]);
+    git(pusher.path(), &["commit", "-m", "advance sub"]);
     git(pusher.path(), &["push", "origin", "feature"]);
     let mut command = perch_command(&work, &["wt", "feature", "--no-switch"]);
     command
@@ -2406,41 +2416,11 @@ fn wt_still_fetches_a_worktree_with_submodules() {
     let (output, _fetches) = perch_traced_with(&parent, command);
 
     assert!(output.status.success(), "stderr: {}", stderr_str(&output));
-    let found = Command::new("git")
-        .args(["cat-file", "-e", &format!("{}^{{commit}}", sub_tip.trim())])
-        .current_dir(worktree.join("sub"))
-        .status()
-        .unwrap();
-    assert!(
-        found.success(),
-        "the target's submodule lacks the new commit"
-    );
-}
-
-/// `git config` reads only the `GIT_CONFIG` file, so every worktree would
-/// report the same config, but `git fetch` ignores it. The comparison has to
-/// read what the fetch reads, here the target's own `fetch.pruneTags`.
-#[test]
-fn wt_still_fetches_a_worktree_whose_config_differs_under_git_config() {
-    let (_bare, parent, work) = setup_with_parent();
-    let worktree = add_worktree(&work, &parent, "feature");
-    git(&work, &["push", "origin", "feature"]);
-    git(&work, &["config", "core.repositoryFormatVersion", "1"]);
-    git(&work, &["config", "extensions.worktreeConfig", "true"]);
+    // Fails unless the target's submodule repository holds the new commit.
     git(
-        &worktree,
-        &["config", "--worktree", "fetch.pruneTags", "true"],
+        &worktree.join("sub"),
+        &["cat-file", "-e", &format!("{}^{{commit}}", sub_tip.trim())],
     );
-    git(&work, &["tag", "stale"]);
-    let mut command = perch_command(&work, &["wt", "feature", "--no-switch"]);
-    command.env("GIT_CONFIG", work.join(".git/config"));
-
-    let (output, fetches) = perch_traced_with(&parent, command);
-
-    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
-    assert_eq!(fetches.len(), 2, "fetches: {fetches:?}");
-    let tags = git(&work, &["tag", "--list", "stale"]);
-    assert_eq!(stdout_str(&tags).trim(), "", "the stale tag was not pruned");
 }
 
 /// A relative `core.hooksPath` resolves from each worktree's root, so each

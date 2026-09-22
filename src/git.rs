@@ -5,7 +5,7 @@ use std::io::ErrorKind;
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Output, Stdio};
+use std::process::{Child, Command, Stdio};
 
 use crate::{AppResult, Error, session};
 
@@ -257,42 +257,36 @@ pub fn checkout(branch: &str) -> AppResult<()> {
 
 #[must_use]
 pub fn fetch(dir: Option<&Path>, remote: &str) -> FetchOutcome {
-    match git_cmd(dir).args(fetch_args(remote)).output() {
-        Ok(output) => FetchOutcome::from_output(&output),
-        Err(e) => FetchOutcome::Failed(e.to_string()),
+    let output = match git_cmd(dir).args(fetch_args(remote)).output() {
+        Ok(output) => output,
+        Err(e) => return FetchOutcome::Failed(e.to_string()),
+    };
+    if output.status.success() {
+        return FetchOutcome::Ok;
     }
+    FetchOutcome::Failed(String::from_utf8_lossy(&output.stderr).trim().to_string())
 }
 
 /// Starts `git fetch` without waiting for it, for a caller with something to
 /// do meanwhile. The child leads its own session, so it has no terminal to
 /// prompt on, and `GIT_TERMINAL_PROMPT=0` has git fail at once rather than try
 /// stdin, which is `/dev/null`. Auth that needs no person, an agent or a
-/// keychain helper, still works; the ssh configuration is left as it is. Both
-/// output streams are captured for [`FetchOutcome::from_output`].
+/// keychain helper, still works; the ssh configuration is left as it is. Its
+/// output goes nowhere: only whether it succeeded is ever read.
 pub fn fetch_in_background(remote: &str) -> std::io::Result<Child> {
     let mut command = git_cmd(None);
     command
         .args(fetch_args(remote))
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     session::detach(&mut command);
     command.spawn()
 }
 
 fn fetch_args(remote: &str) -> [&str; 4] {
     ["fetch", "--quiet", "--prune", remote]
-}
-
-impl FetchOutcome {
-    #[must_use]
-    pub fn from_output(output: &Output) -> Self {
-        if output.status.success() {
-            return Self::Ok;
-        }
-        Self::Failed(String::from_utf8_lossy(&output.stderr).trim().to_string())
-    }
 }
 
 /// Rebase the current branch onto `onto` (e.g. `origin/main`). Git's stdout

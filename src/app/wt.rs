@@ -38,10 +38,6 @@ pub(crate) fn run(
     target: Option<&str>,
     shell_handoff: ShellHandoff,
 ) -> AppResult<()> {
-    // A worktree whose directory was deleted by hand can't be entered, so its
-    // branch is one to (re)create. `worktree_add`/`checkout` prune the stale
-    // registration when it gets in the way.
-    let listed = super::live_worktrees()?;
     let current_branch = git::current_branch()?;
     let remote = git::current_remote(current_branch.as_deref());
 
@@ -52,6 +48,11 @@ pub(crate) fn run(
     // local and remote-only halves can reflect slightly different moments;
     // `resolve_target` runs after the join and decides the final action.
     let prefetch = (target.is_some() || super::is_interactive()).then(|| Prefetch::start(&remote));
+
+    // A worktree whose directory was deleted by hand can't be entered, so its
+    // branch is one to (re)create. `worktree_add`/`checkout` prune the stale
+    // registration when it gets in the way.
+    let listed = super::live_worktrees()?;
 
     let (branch, existence) = if let Some(name) = target {
         (name.to_string(), Existence::MayCreate)
@@ -298,8 +299,7 @@ pub(crate) fn removal_candidates() -> AppResult<Vec<String>> {
 
 /// Fetch + fast-forward `branch` in the worktree at `path`. Unlike the in-place
 /// switch, a diverged branch is only reported (we don't drive an interactive
-/// rebase in a worktree the user isn't sitting in). `fetched` is passed
-/// through to [`fetch_and_ff`], which fetches unless it covers `remote`.
+/// rebase in a worktree the user isn't sitting in).
 pub(crate) fn update_in(
     path: &Path,
     branch: &str,
@@ -353,9 +353,7 @@ fn create_worktree(
         spinner.finish_and_clear();
         (fetch_outcome, outcome)
     };
-    if let Some(outcome) = &fetch_outcome {
-        report_fetch_failure(outcome);
-    }
+    report_fetch_failure(&fetch_outcome);
     result?;
 
     if let Some(base) = base {

@@ -415,8 +415,8 @@ fn switch_and_update(target: &str, old_branch: Option<&str>, remote: &str) -> Ap
 /// worktree at `dir` (via `git -C`). Shows a spinner and surfaces fetch
 /// failures; the caller decides how to handle the [`git::FastForwardResult`]
 /// (the in-place switch offers a rebase on diverge; worktree updates don't).
-/// A `fetched` that covers `remote` skips the fetch; without one this fetches
-/// unconditionally, as every caller but `wt` needs.
+/// Without a `fetched` covering `remote` this fetches unconditionally, which is
+/// what every caller but `wt` needs.
 pub(crate) fn fetch_and_ff(
     dir: Option<&std::path::Path>,
     branch: &str,
@@ -435,9 +435,7 @@ pub(crate) fn fetch_and_ff(
         (fetch_outcome, result)
     };
 
-    if let Some(outcome) = &fetch_outcome {
-        report_fetch_failure(outcome);
-    }
+    report_fetch_failure(&fetch_outcome);
 
     merge_result
 }

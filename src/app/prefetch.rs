@@ -17,23 +17,17 @@ use crate::git;
 /// print the same warning twice.
 pub(crate) struct FetchedRemote(String);
 
-impl FetchedRemote {
-    pub(crate) fn covers(&self, remote: &str) -> bool {
-        self.0 == remote
-    }
-}
-
-/// Fetches `remote` unless `fetched` already covers it. `None` is then
-/// "nothing to report", as distinct from a fetch that ran and succeeded.
+/// Fetches `remote` unless `fetched` already covers it, in which case there
+/// is nothing left to report and the outcome reads as a success.
 pub(crate) fn fetch_unless_covered(
     dir: Option<&Path>,
     remote: &str,
     fetched: Option<&FetchedRemote>,
-) -> Option<git::FetchOutcome> {
-    if fetched.is_some_and(|fetched| fetched.covers(remote)) {
-        return None;
+) -> git::FetchOutcome {
+    if fetched.is_some_and(|fetched| fetched.0 == remote) {
+        return git::FetchOutcome::Ok;
     }
-    Some(git::fetch(dir, remote))
+    git::fetch(dir, remote)
 }
 
 /// A `git fetch` running in the background, ended and reaped on drop unless
@@ -56,16 +50,27 @@ impl Prefetch {
         }
     }
 
-    /// Waits for the fetch, behind a spinner if it is still running. A
-    /// background fetch that failed is retried in the foreground with the
-    /// user's own environment, so a passphrase or credential prompt can be
-    /// answered; only that final outcome is reported.
+    /// Waits for the fetch behind a spinner. A background fetch that failed is
+    /// retried in the foreground with the user's own environment, so a
+    /// passphrase or credential prompt can be answered; only that final
+    /// outcome is reported.
     pub(crate) fn join(mut self) -> FetchedRemote {
         let remote = std::mem::take(&mut self.remote);
-        let background = self.child.take().and_then(|child| wait_for(child, &remote));
-        let outcome = match background {
-            Some(git::FetchOutcome::Ok) => git::FetchOutcome::Ok,
-            _ => fetch_in_foreground(&remote),
+        let outcome = {
+            let spinner = ProgressBar::new_spinner().with_message(format!("Fetching {remote}…"));
+            let _cursor_guard = CursorGuard::hide();
+            spinner.enable_steady_tick(Duration::from_millis(80));
+            let succeeded = self
+                .child
+                .take()
+                .is_some_and(|mut child| child.wait().is_ok_and(|status| status.success()));
+            let outcome = if succeeded {
+                git::FetchOutcome::Ok
+            } else {
+                git::fetch(None, &remote)
+            };
+            spinner.finish_and_clear();
+            outcome
         };
         report_fetch_failure(&outcome);
         FetchedRemote(remote)
@@ -79,31 +84,6 @@ impl Drop for Prefetch {
         };
         terminate(&mut child);
     }
-}
-
-fn wait_for(mut child: Child, remote: &str) -> Option<git::FetchOutcome> {
-    let running = !matches!(child.try_wait(), Ok(Some(_)));
-    let spinner = running.then(|| {
-        let spinner = ProgressBar::new_spinner().with_message(format!("Fetching {remote}…"));
-        spinner.enable_steady_tick(Duration::from_millis(80));
-        (spinner, CursorGuard::hide())
-    });
-    let output = child.wait_with_output();
-    if let Some((spinner, _cursor_guard)) = spinner {
-        spinner.finish_and_clear();
-    }
-    output
-        .ok()
-        .map(|output| git::FetchOutcome::from_output(&output))
-}
-
-fn fetch_in_foreground(remote: &str) -> git::FetchOutcome {
-    let spinner = ProgressBar::new_spinner().with_message(format!("Fetching {remote}…"));
-    let _cursor_guard = CursorGuard::hide();
-    spinner.enable_steady_tick(Duration::from_millis(80));
-    let outcome = git::fetch(None, remote);
-    spinner.finish_and_clear();
-    outcome
 }
 
 /// Ends the fetch and reaps it. SIGTERM rather than SIGKILL, because git

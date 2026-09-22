@@ -55,10 +55,12 @@ pub(crate) fn run(
     //
     // Not where any worktree has submodules. Each worktree keeps its own
     // submodule repositories, and a fetch recurses on demand only into those
-    // where it runs, for the gitlinks that commits it fetched moved. Once the
+    // where it runs, for gitlinks moved by the commits it fetched. Once the
     // prefetch has moved the shared remote refs, a worktree's own fetch finds
-    // nothing new and never reaches its submodules. Without the prefetch every
-    // fetch runs where it is needed, as before the prefetch existed.
+    // nothing new and never reaches its submodules. Without the prefetch each
+    // fetch runs from the worktree it updates. `.gitmodules` rather than
+    // initialised submodules, because it costs no git process per worktree
+    // and errs towards skipping.
     let has_submodules = listed
         .iter()
         .any(|worktree| worktree.path.join(".gitmodules").exists());

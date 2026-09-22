@@ -174,7 +174,10 @@ impl FetchedRemote {
     /// that worktree resolves the name to the same [`FetchContext`], and where
     /// that context names one repository whichever directory git runs in. A
     /// failure covers no worktree: each has a `FETCH_HEAD` of its own, so one
-    /// can fetch where another could not.
+    /// can fetch where another could not. Nor does a fetch cover a worktree
+    /// with submodules, whose own fetch recurses into submodule repositories
+    /// that only it has. `wt` skips the prefetch where any worktree has them,
+    /// so this is for one that gained them while the picker was open.
     fn covers(&self, dir: Option<&Path>, remote: &str) -> bool {
         if self.name != remote {
             return false;
@@ -183,6 +186,7 @@ impl FetchedRemote {
             return true;
         };
         self.failure.is_none()
+            && !dir.join(".gitmodules").exists()
             && self.context.names_one_repository(remote)
             && FetchContext::read(Some(dir), remote) == self.context
     }

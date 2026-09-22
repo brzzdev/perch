@@ -118,19 +118,23 @@ const PROGRAM_VARIABLES: [&str; 3] = ["GIT_PROXY_COMMAND", "GIT_SSH", "GIT_SSH_C
 
 /// A remote this run has already fetched and reported on, handed to the steps
 /// that would otherwise fetch it again. A failed fetch earns the token too:
-/// retrying seconds later from the same environment gains nothing and would
+/// retrying seconds later from the same directory gains nothing and would
 /// print the same warning twice.
 pub(crate) struct FetchedRemote {
     context: FetchContext,
+    /// What the fetch reported, where it failed.
+    failure: Option<String>,
     name: String,
 }
 
 impl FetchedRemote {
     /// Whether the fetch already done stands in for a fetch of `remote` from
     /// `dir`. A fetch from the directory this one ran in is covered by name;
-    /// one from a worktree is covered only where that worktree resolves the
-    /// name to the same [`FetchContext`], and only where that context names
-    /// one repository whichever directory git runs in.
+    /// one from a worktree is covered only where this fetch succeeded, where
+    /// that worktree resolves the name to the same [`FetchContext`], and where
+    /// that context names one repository whichever directory git runs in. A
+    /// failure covers no worktree: each has a `FETCH_HEAD` of its own, so one
+    /// can fetch where another could not.
     fn covers(&self, dir: Option<&Path>, remote: &str) -> bool {
         if self.name != remote {
             return false;
@@ -138,7 +142,8 @@ impl FetchedRemote {
         let Some(dir) = dir else {
             return true;
         };
-        self.context.names_one_repository(remote)
+        self.failure.is_none()
+            && self.context.names_one_repository(remote)
             && FetchContext::read(Some(dir), remote) == self.context
     }
 }
@@ -179,8 +184,10 @@ fn names_one_repository(url: &str) -> bool {
     }
 }
 
-/// Fetches `remote` from `dir` unless `fetched` already covers it, in which
-/// case there is nothing left to report and the outcome reads as a success.
+/// Fetches `remote` from `dir` unless `fetched` already covers it. The outcome
+/// is what is left to report, so it reads as a success where `fetched` covers
+/// the fetch, and where this one fails just as `fetched` did and that warning
+/// has already been printed.
 pub(crate) fn fetch_unless_covered(
     dir: Option<&Path>,
     remote: &str,
@@ -189,7 +196,16 @@ pub(crate) fn fetch_unless_covered(
     if fetched.is_some_and(|fetched| fetched.covers(dir, remote)) {
         return git::FetchOutcome::Ok;
     }
-    git::fetch(dir, remote)
+    match git::fetch(dir, remote) {
+        git::FetchOutcome::Failed(detail)
+            if fetched.is_some_and(|fetched| {
+                fetched.name == remote && fetched.failure.as_ref() == Some(&detail)
+            }) =>
+        {
+            git::FetchOutcome::Ok
+        }
+        outcome => outcome,
+    }
 }
 
 /// Ends the background fetch, for a caller about to leave without unwinding.
@@ -271,6 +287,10 @@ impl Prefetch {
             outcome
         };
         report_fetch_failure(&outcome);
+        let failure = match outcome {
+            git::FetchOutcome::Ok => None,
+            git::FetchOutcome::Failed(detail) => Some(detail),
+        };
         // The run stops here rather than going on to make a worktree and fire
         // its hooks: the interrupt is the user asking for none of that, and
         // the handler is meanwhile seeing the fetch off.
@@ -279,6 +299,7 @@ impl Prefetch {
         }
         Ok(FetchedRemote {
             context: std::mem::take(&mut self.context),
+            failure,
             name: remote,
         })
     }

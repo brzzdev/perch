@@ -2366,6 +2366,55 @@ fn wt_reports_an_unreachable_remote_once_and_still_creates_the_branch() {
     assert!(path.is_dir(), "missing worktree: {}", path.display());
 }
 
+/// Each worktree has its own `FETCH_HEAD`, so a fetch that fails from one can
+/// succeed from another, and the prefetch failing covers nothing there.
+#[test]
+fn wt_still_fetches_a_worktree_the_prefetch_failed_to_cover() {
+    let (bare, parent, work) = setup_with_parent();
+    let worktree = add_worktree(&work, &parent, "feature");
+    git(&work, &["push", "origin", "feature"]);
+    let pusher = clone_bare(bare.path());
+    git(pusher.path(), &["switch", "feature"]);
+    commit_in(pusher.path(), "ahead.txt", "ahead");
+    git(pusher.path(), &["push", "origin", "feature"]);
+    let tip = remote_branch_tip(&work, "origin", "feature").unwrap();
+    // A directory where the invoking worktree's `FETCH_HEAD` goes makes every
+    // fetch from there fail, and none from the target.
+    fs::create_dir(work.join(".git/FETCH_HEAD")).unwrap();
+
+    let (output, fetches) = perch_traced(&parent, &work, &["wt", "feature", "--no-switch"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert_eq!(fetches.len(), 3, "fetches: {fetches:?}");
+    let head = git(&worktree, &["rev-parse", "HEAD"]);
+    assert_eq!(
+        stdout_str(&head).trim(),
+        tip,
+        "the worktree was not brought up to its own origin/feature"
+    );
+}
+
+/// Updating a worktree fetches again where the prefetch failed, and where that
+/// fails the same way the warning has already been printed.
+#[test]
+fn wt_reports_an_unreachable_remote_once_when_updating_a_worktree() {
+    let (_bare, parent, work) = setup_with_parent();
+    add_worktree(&work, &parent, "feature");
+    git(
+        &work,
+        &["remote", "set-url", "origin", "/nonexistent/nowhere"],
+    );
+
+    let output = perch_args(&work, &["wt", "feature", "--no-switch"]);
+
+    let stderr = stderr_str(&output);
+    assert_eq!(
+        stderr.matches("fetch failed; results may be stale").count(),
+        1,
+        "stderr: {stderr}"
+    );
+}
+
 #[test]
 fn wt_no_switch_is_rejected_before_rm() {
     let (_bare, parent, work) = setup_with_parent();

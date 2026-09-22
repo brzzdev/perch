@@ -2369,11 +2369,16 @@ fn wt_still_fetches_a_worktree_whose_origin_points_elsewhere() {
     );
 }
 
-/// Each worktree keeps its own submodule repositories, and a fetch recurses
-/// only into those checked out where it runs. The target's own fetch is what
-/// brings its submodule the commit its advanced gitlink names.
+/// Each worktree keeps its own submodule repositories, and a fetch recurses on
+/// demand only into those where it runs, for gitlinks moved by the commits it
+/// fetched. A prefetch that had already moved the shared remote refs would
+/// leave the target's own fetch nothing new to recurse for, so a repository
+/// with submodules skips the prefetch and the target fetches for itself, once,
+/// bringing its submodule the commit its advanced gitlink names.
 #[test]
 fn wt_still_fetches_a_worktree_with_submodules() {
+    // The mode git records a submodule's commit under in its superproject.
+    const GITLINK_MODE: &str = "160000";
     let (bare, parent, work) = setup_with_parent();
     let submodule = TempDir::new().unwrap();
     git(submodule.path(), &["init", "--initial-branch=main"]);
@@ -2405,7 +2410,7 @@ fn wt_still_fetches_a_worktree_with_submodules() {
         &[
             "update-index",
             "--cacheinfo",
-            &format!("160000,{sub_tip},sub"),
+            &format!("{GITLINK_MODE},{sub_tip},sub"),
         ],
     );
     git(pusher.path(), &["commit", "-m", "advance sub"]);
@@ -2425,7 +2430,7 @@ fn wt_still_fetches_a_worktree_with_submodules() {
         .iter()
         .filter(|line| line.ends_with("git fetch --quiet --prune origin"))
         .count();
-    assert_eq!(own, 2, "fetches: {fetches:?}");
+    assert_eq!(own, 1, "fetches: {fetches:?}");
     // Fails unless the target's submodule repository holds the new commit.
     git(
         &worktree.join("sub"),

@@ -41,18 +41,29 @@ pub(crate) fn run(
     let current_branch = git::current_branch()?;
     let remote = git::current_remote(current_branch.as_deref());
 
+    // A worktree whose directory was deleted by hand can't be entered, so its
+    // branch is one to (re)create. `worktree_add`/`checkout` prune the stale
+    // registration when it gets in the way.
+    let listed = super::live_worktrees()?;
+
     // Started before the *Catalogue* is read, so the round trip overlaps the
     // local reads and the wait for a pick. With no name and no terminal,
     // `select` gives up at once, and there would be nothing to join. The
     // catalogue may therefore be read while the fetch is updating refs, so its
     // local and remote-only halves can reflect slightly different moments;
     // `resolve_target` runs after the join and decides the final action.
-    let prefetch = (target.is_some() || super::is_interactive()).then(|| Prefetch::start(&remote));
-
-    // A worktree whose directory was deleted by hand can't be entered, so its
-    // branch is one to (re)create. `worktree_add`/`checkout` prune the stale
-    // registration when it gets in the way.
-    let listed = super::live_worktrees()?;
+    //
+    // Not where any worktree has submodules. Each worktree keeps its own
+    // submodule repositories, and a fetch recurses on demand only into those
+    // where it runs, for the gitlinks that commits it fetched moved. Once the
+    // prefetch has moved the shared remote refs, a worktree's own fetch finds
+    // nothing new and never reaches its submodules. Without the prefetch every
+    // fetch runs where it is needed, as before the prefetch existed.
+    let has_submodules = listed
+        .iter()
+        .any(|worktree| worktree.path.join(".gitmodules").exists());
+    let prefetch = ((target.is_some() || super::is_interactive()) && !has_submodules)
+        .then(|| Prefetch::start(&remote));
 
     let (branch, existence) = if let Some(name) = target {
         (name.to_string(), Existence::MayCreate)

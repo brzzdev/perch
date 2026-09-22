@@ -1996,8 +1996,13 @@ fn wt_no_switch_finds_an_existing_worktree_without_claiming_to_switch() {
 /// file every git it spawned appends to — the background fetch's own output
 /// goes nowhere, so tracing to the terminal would miss it.
 fn perch_traced(parent: &TempDir, work: &Path, args: &[&str]) -> (Output, Vec<String>) {
+    perch_traced_with(parent, perch_command(work, args))
+}
+
+/// [`perch_traced`], for a `perch` command the caller has already set up.
+fn perch_traced_with(parent: &TempDir, mut command: Command) -> (Output, Vec<String>) {
     let trace = parent.path().join("git-trace.log");
-    let output = perch_command(work, args)
+    let output = command
         .env("PERCH_NO_HOOKS", "1")
         .env("GIT_TRACE", &trace)
         .output()
@@ -2169,7 +2174,11 @@ fn wt_still_fetches_a_worktree_whose_fetch_config_differs() {
 /// as `ext::` does. Config and URL can both match while the fetches do not.
 #[test]
 fn wt_still_fetches_a_worktree_whose_origin_resolves_from_where_it_runs() {
-    for url in ["../origin.git", "ext::git %s ../origin.git"] {
+    for url in [
+        "../origin.git",
+        "ext::git %s ../origin.git",
+        "relative://../origin.git",
+    ] {
         let (bare, parent, work) = setup_with_parent();
         let worktree = add_worktree(&work, &parent, "feature");
         git(&work, &["push", "origin", "feature"]);
@@ -2191,11 +2200,29 @@ fn wt_still_fetches_a_worktree_whose_origin_resolves_from_where_it_runs() {
         git(pusher.path(), &["switch", "feature"]);
         commit_in(pusher.path(), "ahead.txt", "ahead");
         git(pusher.path(), &["push", "origin", "feature"]);
+        let tip = stdout_str(&git(&far, &["rev-parse", "feature"]));
         git(&work, &["remote", "set-url", "origin", url]);
         git(&work, &["config", "protocol.ext.allow", "always"]);
-        let tip = remote_branch_tip(&worktree, "origin", "feature").unwrap();
+        // A helper of the user's own for `relative://`, reading its address as
+        // a path from where it runs, as the `ext::` URL above does.
+        let helpers = parent.path().join("helpers");
+        fs::create_dir(&helpers).unwrap();
+        let helper = helpers.join("git-remote-relative");
+        fs::write(
+            &helper,
+            "#!/bin/sh\nexec git remote-ext \"$1\" \"git %s ${2#relative://}\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
+        let path = std::env::join_paths(
+            std::iter::once(helpers)
+                .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+        )
+        .unwrap();
+        let mut command = perch_command(&work, &["wt", "feature", "--no-switch"]);
+        command.env("PATH", path);
 
-        let (output, fetches) = perch_traced(&parent, &work, &["wt", "feature", "--no-switch"]);
+        let (output, fetches) = perch_traced_with(&parent, command);
 
         assert!(
             output.status.success(),
@@ -2206,7 +2233,7 @@ fn wt_still_fetches_a_worktree_whose_origin_resolves_from_where_it_runs() {
         let head = git(&worktree, &["rev-parse", "HEAD"]);
         assert_eq!(
             stdout_str(&head).trim(),
-            tip,
+            tip.trim(),
             "{url}: the worktree was not brought up to its own origin/feature"
         );
     }

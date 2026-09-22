@@ -310,27 +310,41 @@ fn signal_group(group: i32, signal: Signal) {
 
 /// Whether the fetch leading `group` has exited, without reaping it —
 /// `WNOHANG` returns at once and `WNOWAIT` leaves the exit for the caller's
-/// own reap. A failed call means there is no such child left to wait for.
+/// own reap. Only `ECHILD`, no such child left to wait for, reads as an exit.
+/// Any other failure says nothing about git, so it reads as still running and
+/// the grace runs on: ending it early would SIGKILL git mid-way through
+/// removing its lock files.
 #[cfg(unix)]
 fn leader_has_exited(group: i32) -> bool {
     let Ok(pid) = libc::id_t::try_from(group) else {
         return true;
     };
-    // Zeroed, because `WNOHANG` may leave it untouched when nothing has
-    // exited, and a zero `si_pid` is how that case reads.
-    // SAFETY: `siginfo_t` is plain C data, for which all zeroes is valid.
-    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-    // SAFETY: `info` is a live, aligned `siginfo_t`, the one the call writes.
-    let waited = unsafe {
-        libc::waitid(
-            libc::P_PID,
-            pid,
-            &raw mut info,
-            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
-        )
-    };
-    // SAFETY: a successful `waitid` has filled in `si_pid` or left it zeroed.
-    waited != 0 || unsafe { info.si_pid() } != 0
+    loop {
+        // Zeroed, because `WNOHANG` may leave it untouched when nothing has
+        // exited, and a zero `si_pid` is how that case reads.
+        // SAFETY: `siginfo_t` is plain C data, for which all zeroes is valid.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // SAFETY: `info` is a live, aligned `siginfo_t`, the one the call
+        // writes.
+        let waited = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid,
+                &raw mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        if waited == 0 {
+            // SAFETY: a successful `waitid` has filled in `si_pid` or left it
+            // zeroed.
+            return unsafe { info.si_pid() } != 0;
+        }
+        match std::io::Error::last_os_error().raw_os_error() {
+            Some(libc::EINTR) => {}
+            Some(libc::ECHILD) => return true,
+            _ => return false,
+        }
+    }
 }
 
 #[cfg(not(unix))]

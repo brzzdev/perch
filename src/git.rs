@@ -272,14 +272,20 @@ pub fn fetch(dir: Option<&Path>, remote: &str) -> FetchOutcome {
 /// Starts `git fetch` without waiting for it, for a caller with something to
 /// do meanwhile. The child leads its own session, so it has no terminal to
 /// prompt on, and `GIT_TERMINAL_PROMPT=0` has git fail at once rather than try
-/// stdin, which is `/dev/null`. Auth that needs no person, an agent or a
-/// keychain helper, still works; the ssh configuration is left as it is. Its
-/// output goes nowhere: only whether it succeeded is ever read.
+/// stdin, which is `/dev/null`. Askpass programs are switched off too, since
+/// they prompt without a terminal: an empty `GIT_ASKPASS` stands in for both
+/// `core.askPass` and `SSH_ASKPASS` on git's side, and `SSH_ASKPASS_REQUIRE`
+/// covers ssh's own passphrase prompt. A fetch that needs a person fails fast
+/// into the foreground retry, which has the user's askpass back. Auth that
+/// needs no person, an agent or a keychain helper, still works. Its output
+/// goes nowhere: only whether it succeeded is ever read.
 pub fn fetch_in_background(remote: &str) -> std::io::Result<Child> {
     let mut command = git_cmd(None);
     command
         .args(fetch_args(remote))
+        .env("GIT_ASKPASS", "")
         .env("GIT_TERMINAL_PROMPT", "0")
+        .env("SSH_ASKPASS_REQUIRE", "never")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());

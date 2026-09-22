@@ -76,18 +76,45 @@ impl FetchContext {
     /// Whether `remote` fetches one repository here whichever directory git
     /// runs in. Never where `remote.<name>.vcs` picks a helper, which gets the
     /// URL, if any, only as an argument to read as it likes, nor where there
-    /// is no URL to judge. Otherwise it is down to the URL.
+    /// is no URL to judge, nor where the fetch runs a program named by a
+    /// relative path. Otherwise it is down to the URL.
+    ///
+    /// The programs checked are the ones known to run on a fetch, not every
+    /// setting that can name one; the rest are a known limit (#133).
     fn names_one_repository(&self, remote: &str) -> bool {
+        let upload_pack = format!("remote.{remote}.uploadpack");
         let vcs = format!("remote.{remote}.vcs");
-        // Each entry is the key, then a newline and the value where it has one.
-        let picks_a_helper = self.config.iter().any(|entry| {
-            entry
-                .split_once('\n')
-                .map_or(entry.as_str(), |(key, _)| key)
-                == vcs
+        let depends_on_where_it_runs = self.config.iter().any(|entry| {
+            // The key, then a newline and the value where it has one.
+            let (key, value) = entry.split_once('\n').unwrap_or((entry, ""));
+            let program = match key {
+                "core.gitproxy" | "core.sshcommand" => value,
+                key if key == upload_pack => value,
+                key if key == vcs => return true,
+                // Only the `!` form is a shell command; any other value names
+                // a `git credential-*` helper or an absolute path.
+                key if key.starts_with("credential.") && key.ends_with(".helper") => {
+                    let Some(command) = value.strip_prefix('!') else {
+                        return false;
+                    };
+                    command
+                }
+                _ => return false,
+            };
+            is_relative_program(program)
         });
-        !picks_a_helper && self.url.as_deref().is_some_and(names_one_repository)
+        !depends_on_where_it_runs && self.url.as_deref().is_some_and(names_one_repository)
     }
+}
+
+/// Whether the first word of the shell command `command` is a program named by
+/// a path relative to where it runs. A bare name is looked up on `PATH`, and
+/// `/` or `~` makes it absolute.
+fn is_relative_program(command: &str) -> bool {
+    command
+        .split_whitespace()
+        .next()
+        .is_some_and(|program| program.contains('/') && !program.starts_with(['/', '~']))
 }
 
 /// A remote this run has already fetched and reported on, handed to the steps

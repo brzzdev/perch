@@ -2172,18 +2172,27 @@ fn wt_still_fetches_a_worktree_whose_fetch_config_differs() {
 /// against the directory it runs in, so `../origin.git` names a different
 /// repository from each. A transport helper can read its address the same way,
 /// as `ext::` does, and `remote.<name>.vcs` hands the fetch to a helper
-/// whatever the URL says, or with no URL at all. Config and URL can both match
-/// while the fetches do not.
+/// whatever the URL says, or with no URL at all. A transport program named by
+/// a relative path is found from where it runs too. Config and URL can both
+/// match while the fetches do not.
 #[test]
 fn wt_still_fetches_a_worktree_whose_origin_resolves_from_where_it_runs() {
-    for (url, vcs) in [
-        (Some("../origin.git"), None),
-        (Some("ext::git %s ../origin.git"), None),
-        (Some("file://../origin.git"), Some("relative")),
-        (Some("relative://../origin.git"), None),
-        (None, Some("relative")),
+    for settings in [
+        &[("remote.origin.url", "../origin.git")][..],
+        &[("remote.origin.url", "ext::git %s ../origin.git")],
+        &[
+            ("remote.origin.url", "file://../origin.git"),
+            ("remote.origin.vcs", "relative"),
+        ],
+        &[("remote.origin.url", "relative://../origin.git")],
+        &[("remote.origin.vcs", "relative")],
+        &[
+            ("core.sshCommand", "./ssh-wrapper"),
+            ("remote.origin.url", "ssh://example.invalid/repo.git"),
+            ("ssh.variant", "simple"),
+        ],
     ] {
-        let case = format!("url {url:?}, vcs {vcs:?}");
+        let case = format!("{settings:?}");
         let (bare, parent, work) = setup_with_parent();
         let worktree = add_worktree(&work, &parent, "feature");
         git(&work, &["push", "origin", "feature"]);
@@ -2206,14 +2215,20 @@ fn wt_still_fetches_a_worktree_whose_origin_resolves_from_where_it_runs() {
         commit_in(pusher.path(), "ahead.txt", "ahead");
         git(pusher.path(), &["push", "origin", "feature"]);
         let tip = stdout_str(&git(&far, &["rev-parse", "feature"]));
-        match url {
-            Some(url) => git(&work, &["remote", "set-url", "origin", url]),
-            None => git(&work, &["config", "--unset", "remote.origin.url"]),
-        };
-        if let Some(vcs) = vcs {
-            git(&work, &["config", "remote.origin.vcs", vcs]);
+        git(&work, &["config", "--unset", "remote.origin.url"]);
+        for (key, value) in settings {
+            git(&work, &["config", key, value]);
         }
         git(&work, &["config", "protocol.ext.allow", "always"]);
+        // An ssh of the user's own in each worktree, serving the repository
+        // its relative path reaches from there. Ignored, so the worktrees stay
+        // clean.
+        fs::write(work.join(".git/info/exclude"), "ssh-wrapper\n").unwrap();
+        for dir in [&work, &worktree] {
+            let wrapper = dir.join("ssh-wrapper");
+            fs::write(&wrapper, "#!/bin/sh\nexec git upload-pack ../origin.git\n").unwrap();
+            fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+        }
         // A helper of the user's own, reading its address as a path from where
         // it runs, as the `ext::` URL above does. Where the remote has no URL,
         // git passes its name instead, and the helper falls back to the path.

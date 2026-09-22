@@ -72,6 +72,22 @@ impl FetchContext {
             url: git::remote_url(dir, remote),
         }
     }
+
+    /// Whether `remote` fetches one repository here whichever directory git
+    /// runs in. Never where `remote.<name>.vcs` picks a helper, which gets the
+    /// URL, if any, only as an argument to read as it likes, nor where there
+    /// is no URL to judge. Otherwise it is down to the URL.
+    fn names_one_repository(&self, remote: &str) -> bool {
+        let vcs = format!("remote.{remote}.vcs");
+        // Each entry is the key, then a newline and the value where it has one.
+        let picks_a_helper = self.config.iter().any(|entry| {
+            entry
+                .split_once('\n')
+                .map_or(entry.as_str(), |(key, _)| key)
+                == vcs
+        });
+        !picks_a_helper && self.url.as_deref().is_some_and(names_one_repository)
+    }
 }
 
 /// A remote this run has already fetched and reported on, handed to the steps
@@ -87,8 +103,8 @@ impl FetchedRemote {
     /// Whether the fetch already done stands in for a fetch of `remote` from
     /// `dir`. A fetch from the directory this one ran in is covered by name;
     /// one from a worktree is covered only where that worktree resolves the
-    /// name to the same [`FetchContext`], and only where the URL names one
-    /// repository whichever directory git runs in.
+    /// name to the same [`FetchContext`], and only where that context names
+    /// one repository whichever directory git runs in.
     fn covers(&self, dir: Option<&Path>, remote: &str) -> bool {
         if self.name != remote {
             return false;
@@ -96,7 +112,7 @@ impl FetchedRemote {
         let Some(dir) = dir else {
             return true;
         };
-        self.context.url.as_deref().is_none_or(names_one_repository)
+        self.context.names_one_repository(remote)
             && FetchContext::read(Some(dir), remote) == self.context
     }
 }

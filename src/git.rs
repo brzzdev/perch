@@ -292,6 +292,22 @@ fn fetch_args(remote: &str) -> [&str; 4] {
     ["fetch", "--quiet", "--prune", remote]
 }
 
+/// The URL `remote` fetches from, as resolved in `dir`. The same remote name
+/// can point elsewhere from another worktree, through `extensions.worktreeConfig`
+/// or an `includeIf`, so where a fetch runs is part of what it fetches. `None`
+/// where the remote has no URL there.
+#[must_use]
+pub fn remote_url(dir: Option<&Path>, remote: &str) -> Option<String> {
+    let output = git_cmd(dir)
+        .args(["remote", "get-url", remote])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
 /// Rebase the current branch onto `onto` (e.g. `origin/main`). Git's stdout
 /// and stderr stream directly to the terminal so users see progress and
 /// conflict markers in real time. On failure the rebase is aborted, leaving

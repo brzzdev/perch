@@ -4,27 +4,47 @@
 
 use std::path::Path;
 use std::process::Child;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use indicatif::ProgressBar;
 
 use super::{CursorGuard, report_fetch_failure};
 use crate::git;
 
+/// How long git gets to act on SIGTERM before the group is killed outright.
+/// Removing its lock files takes it milliseconds; the rest of the second is
+/// for a loaded machine.
+const TERMINATION_GRACE: Duration = Duration::from_secs(1);
+
 /// A remote this run has already fetched and reported on, handed to the steps
 /// that would otherwise fetch it again. A failed fetch earns the token too:
 /// retrying seconds later from the same environment gains nothing and would
 /// print the same warning twice.
-pub(crate) struct FetchedRemote(String);
+pub(crate) struct FetchedRemote {
+    name: String,
+    /// What the name resolved to where the fetch ran, since another worktree
+    /// may resolve it differently.
+    url: Option<String>,
+}
 
-/// Fetches `remote` unless `fetched` already covers it, in which case there
-/// is nothing left to report and the outcome reads as a success.
+impl FetchedRemote {
+    /// Whether the fetch done stands in for a fetch of `remote` from `dir`.
+    /// The name alone is not enough: per-worktree config can point the same
+    /// name at another URL, so a fetch from a worktree is covered only when
+    /// that worktree resolves the name to the URL that was fetched.
+    fn covers(&self, dir: Option<&Path>, remote: &str) -> bool {
+        self.name == remote && dir.is_none_or(|dir| git::remote_url(Some(dir), remote) == self.url)
+    }
+}
+
+/// Fetches `remote` from `dir` unless `fetched` already covers it, in which
+/// case there is nothing left to report and the outcome reads as a success.
 pub(crate) fn fetch_unless_covered(
     dir: Option<&Path>,
     remote: &str,
     fetched: Option<&FetchedRemote>,
 ) -> git::FetchOutcome {
-    if fetched.is_some_and(|fetched| fetched.0 == remote) {
+    if fetched.is_some_and(|fetched| fetched.covers(dir, remote)) {
         return git::FetchOutcome::Ok;
     }
     git::fetch(dir, remote)
@@ -38,15 +58,20 @@ pub(crate) fn fetch_unless_covered(
 pub(crate) struct Prefetch {
     child: Option<Child>,
     remote: String,
+    url: Option<String>,
 }
 
 impl Prefetch {
     /// Starts the fetch. Failing to spawn it is not worth stopping for: the
     /// join then fetches in the foreground, as every run did before.
     pub(crate) fn start(remote: &str) -> Self {
+        let child = git::fetch_in_background(remote).ok();
+        // Read after the spawn, so the lookup overlaps the fetch.
+        let url = git::remote_url(None, remote);
         Self {
-            child: git::fetch_in_background(remote).ok(),
+            child,
             remote: remote.to_string(),
+            url,
         }
     }
 
@@ -73,7 +98,10 @@ impl Prefetch {
             outcome
         };
         report_fetch_failure(&outcome);
-        FetchedRemote(remote)
+        FetchedRemote {
+            name: remote,
+            url: self.url.take(),
+        }
     }
 }
 
@@ -86,23 +114,48 @@ impl Drop for Prefetch {
     }
 }
 
-/// Ends the fetch and reaps it. SIGTERM rather than SIGKILL, because git
-/// removes its lock files on SIGTERM and SIGKILL would leave a
-/// `refs/remotes/*.lock` behind for the next fetch to trip over; and to the
-/// whole process group rather than git alone, so the `ssh` or remote helper
-/// it spawned goes with it. The child led its own session from the start, so
-/// its pid names the group. Where there is no group to signal, or the signal
-/// misses all the same, git alone is killed rather than waited on forever.
+/// Ends the fetch and reaps it. SIGTERM first, because git removes its lock
+/// files on SIGTERM and SIGKILL would leave a `refs/remotes/*.lock` behind
+/// for the next fetch to trip over; then, once git has had its grace, SIGKILL
+/// regardless. Both go to the whole process group rather than git alone, so
+/// the `ssh` or remote helper git spawned goes with it, and the SIGKILL is
+/// unconditional because git can be gone while a helper that trapped SIGTERM
+/// lives on in the group. The child led its own session from the start, so
+/// its pid names the group; where there is no group to signal, git alone is
+/// killed rather than waited on forever.
 fn terminate(child: &mut Child) {
-    // SAFETY: plain signal delivery to a process group this process created
-    // and has not yet reaped.
-    #[cfg(unix)]
-    let signalled = libc::pid_t::try_from(child.id())
-        .is_ok_and(|pid| unsafe { libc::kill(-pid, libc::SIGTERM) } == 0);
-    #[cfg(not(unix))]
-    let signalled = false;
-    if !signalled {
+    if !signal_group(child, Signal::Term) {
+        let _ = child.kill();
+    }
+    let deadline = Instant::now() + TERMINATION_GRACE;
+    while matches!(child.try_wait(), Ok(None)) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if !signal_group(child, Signal::Kill) {
         let _ = child.kill();
     }
     let _ = child.wait();
+}
+
+#[derive(Clone, Copy)]
+enum Signal {
+    Kill,
+    Term,
+}
+
+/// Sends `signal` to the child's process group, reporting whether it was
+/// delivered.
+#[cfg(unix)]
+fn signal_group(child: &Child, signal: Signal) -> bool {
+    let signal = match signal {
+        Signal::Kill => libc::SIGKILL,
+        Signal::Term => libc::SIGTERM,
+    };
+    // SAFETY: plain signal delivery to a process group this process created.
+    libc::pid_t::try_from(child.id()).is_ok_and(|pid| unsafe { libc::kill(-pid, signal) } == 0)
+}
+
+#[cfg(not(unix))]
+fn signal_group(_child: &Child, _signal: Signal) -> bool {
+    false
 }

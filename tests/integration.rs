@@ -2087,6 +2087,55 @@ fn wt_fetches_the_branch_remote_too_when_it_is_not_the_one_prefetched() {
     assert!(fetches[1].ends_with("upstream"), "fetches: {fetches:?}");
 }
 
+/// The prefetch covers a remote *name* as the invoking worktree resolves it.
+/// With `extensions.worktreeConfig` the same name can point elsewhere from
+/// another worktree, and that worktree's update must still fetch from where
+/// its own `origin` goes, as it did before the prefetch existed.
+#[test]
+fn wt_still_fetches_a_worktree_whose_origin_points_elsewhere() {
+    let (bare, parent, work) = setup_with_parent();
+    let elsewhere = TempDir::new().unwrap();
+    git(elsewhere.path(), &["init", "--bare"]);
+    let worktree = add_worktree(&work, &parent, "feature");
+    // Each worktree carries its own `origin` URL and the shared config none.
+    git(&work, &["config", "core.repositoryFormatVersion", "1"]);
+    git(&work, &["config", "extensions.worktreeConfig", "true"]);
+    git(&work, &["config", "--unset", "remote.origin.url"]);
+    git(
+        &work,
+        &[
+            "config",
+            "--worktree",
+            "remote.origin.url",
+            bare.path().to_str().unwrap(),
+        ],
+    );
+    git(
+        &worktree,
+        &[
+            "config",
+            "--worktree",
+            "remote.origin.url",
+            elsewhere.path().to_str().unwrap(),
+        ],
+    );
+    commit_in(&worktree, "b.txt", "only elsewhere");
+    git(&worktree, &["push", "origin", "feature"]);
+    git(&worktree, &["reset", "--hard", "HEAD~1"]);
+    let tip = remote_branch_tip(&worktree, "origin", "feature").unwrap();
+
+    let (output, fetches) = perch_traced(&parent, &work, &["wt", "feature", "--no-switch"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert_eq!(fetches.len(), 2, "fetches: {fetches:?}");
+    let head = git(&worktree, &["rev-parse", "HEAD"]);
+    assert_eq!(
+        stdout_str(&head).trim(),
+        tip,
+        "the worktree was not updated from its own origin"
+    );
+}
+
 /// A remote that cannot be reached is worth one warning, not one per attempt,
 /// and no reason to refuse a new branch: making one offline is legitimate.
 #[test]
@@ -3821,25 +3870,35 @@ fn helper_is_running(helper: &Path) -> bool {
 
 /// The fetch starts before the picker and must not outlive it: Esc and Ctrl-C
 /// (a key in raw mode, not a signal, so nothing reaches the child on its own)
-/// each leave no transport running once `perch` has exited. And while the
-/// picker is open the fetch has no terminal, so a transport that wants a
-/// passphrase has nowhere to ask for one.
+/// each leave no transport running once `perch` has exited, whether the
+/// transport goes quietly on SIGTERM or has to be killed. And while the picker
+/// is open the fetch has no terminal, so a transport that wants a passphrase
+/// has nowhere to ask for one.
 #[test]
 fn dismissing_the_wt_picker_ends_a_background_fetch_that_never_reached_the_terminal() {
     use portable_pty::{CommandBuilder, PtySize, native_pty_system};
     use std::io::{Read, Write};
     use std::sync::Arc;
 
-    for key in [&b"\x1b"[..], &b"\x03"[..]] {
+    // A transport that tries the terminal, says so, then hangs: the remote
+    // helper protocol reads nothing back from it, so the fetch waits. The
+    // second one also shrugs off SIGTERM, as a helper is free to.
+    const HANGS: &str = "sleep 60";
+    const HANGS_AND_TRAPS_TERM: &str = "trap '' TERM\nwhile :; do sleep 1; done";
+
+    for (key, hang) in [
+        (&b"\x1b"[..], HANGS),
+        (&b"\x03"[..], HANGS),
+        (&b"\x1b"[..], HANGS_AND_TRAPS_TERM),
+        (&b"\x03"[..], HANGS_AND_TRAPS_TERM),
+    ] {
         let (_bare, parent, work) = setup_with_parent();
-        // A transport that tries the terminal, says so, then hangs: the remote
-        // helper protocol reads nothing back from it, so the fetch waits.
         let tried = parent.path().join("tried-the-terminal");
         let helper = parent.path().join("hang.sh");
         fs::write(
             &helper,
             format!(
-                "#!/bin/sh\nprintf 'PASSPHRASE?' > /dev/tty\ntouch '{}'\nsleep 60\n",
+                "#!/bin/sh\nprintf 'PASSPHRASE?' > /dev/tty\ntouch '{}'\n{hang}\n",
                 tried.display()
             ),
         )
@@ -3897,7 +3956,7 @@ fn dismissing_the_wt_picker_ends_a_background_fetch_that_never_reached_the_termi
         );
         assert!(
             poll_until(|| !helper_is_running(&helper)),
-            "the fetch outlived perch after {key:?}"
+            "the fetch outlived perch after {key:?} with a helper that does `{hang}`"
         );
     }
 }

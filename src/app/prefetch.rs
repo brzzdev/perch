@@ -138,10 +138,7 @@ impl Prefetch {
     /// Starts the fetch. Failing to spawn it is not worth stopping for: the
     /// join then fetches in the foreground, as every run did before.
     pub(crate) fn start(remote: &str) -> Self {
-        let child = git::fetch_in_background(remote).ok();
-        if let Some(group) = child.as_ref().and_then(group_of) {
-            ACTIVE_GROUP.store(group, Ordering::SeqCst);
-        }
+        let child = spawn_unless_interrupted(remote);
         // Read after the spawn, so the lookups overlap the fetch.
         let context = FetchContext::read(None, remote);
         Self {
@@ -218,6 +215,23 @@ impl Drop for Prefetch {
         ACTIVE_GROUP.store(0, Ordering::SeqCst);
         let _ = child.wait();
     }
+}
+
+/// Spawns the fetch and publishes its group under the lock [`terminate_active`]
+/// takes, so an interrupt either finds the group to end or lands first and
+/// nothing is spawned. Were the two apart, an interrupt between them would find
+/// no group while the fetch was already running, and leave it behind when the
+/// process exits.
+fn spawn_unless_interrupted(remote: &str) -> Option<Child> {
+    let _signalling = signalling();
+    if INTERRUPTED.load(Ordering::SeqCst) {
+        return None;
+    }
+    let child = git::fetch_in_background(remote).ok()?;
+    if let Some(group) = group_of(&child) {
+        ACTIVE_GROUP.store(group, Ordering::SeqCst);
+    }
+    Some(child)
 }
 
 /// Ends every process in `group`. SIGTERM first, because git removes its lock

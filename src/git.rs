@@ -322,19 +322,45 @@ fn fetch_args(remote: &str) -> [&str; 4] {
     ["fetch", "--quiet", "--prune", remote]
 }
 
+/// Whether the worktree at `dir` declares submodules. The declaration rather
+/// than initialised submodules, because it costs no git process and errs
+/// towards having them.
+#[must_use]
+pub fn has_submodules(dir: &Path) -> bool {
+    dir.join(".gitmodules").exists()
+}
+
 /// Whether the config in force in `dir` switches a fetch's recursion into
-/// submodules off. `fetch.recurseSubmodules` takes precedence over
-/// `submodule.recurse`, and may say `on-demand` where the other is a boolean.
+/// submodules off. `fetch.recurseSubmodules` and `submodule.recurse` set the
+/// same thing, so whichever git reads last wins.
 #[must_use]
 pub fn submodule_fetch_switched_off(dir: &Path) -> bool {
-    let is_false = |key: &str| {
-        run_in(Some(dir), &["config", "--type=bool", "--get", key])
-            .is_ok_and(|value| value.trim() == "false")
+    run_in(
+        Some(dir),
+        &[
+            "config",
+            "--null",
+            "--get-regexp",
+            r"^(fetch\.recursesubmodules|submodule\.recurse)$",
+        ],
+    )
+    .is_ok_and(|entries| last_recursion_is_off(&entries))
+}
+
+/// Reads `--null --get-regexp` output: entries in the order git reads them,
+/// each a key, then a newline and the value where it has one. A key with no
+/// value is true, and `on-demand` is no boolean at all.
+fn last_recursion_is_off(entries: &str) -> bool {
+    let Some(last) = entries.split('\0').rfind(|entry| !entry.is_empty()) else {
+        return false;
     };
-    if run_in(Some(dir), &["config", "--get", "fetch.recurseSubmodules"]).is_ok() {
-        return is_false("fetch.recurseSubmodules");
-    }
-    is_false("submodule.recurse")
+    let Some((_, value)) = last.split_once('\n') else {
+        return false;
+    };
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "" | "0" | "false" | "no" | "off"
+    )
 }
 
 /// The URL `remote` fetches from, as resolved in `dir`. The same remote name
@@ -1684,9 +1710,35 @@ fn run_in(dir: Option<&Path>, args: &[&str]) -> AppResult<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Anchor, Ground, StaleBranch, Unmerged, branch_refs, parse_track, stale_from, unmerged_from,
+        Anchor, Ground, StaleBranch, Unmerged, branch_refs, last_recursion_is_off, parse_track,
+        stale_from, unmerged_from,
     };
     use std::collections::HashMap;
+
+    /// Git reads both keys into one setting, so a later `submodule.recurse`
+    /// overrides an earlier `fetch.recurseSubmodules`, and the reverse.
+    #[test]
+    fn the_last_recursion_setting_decides() {
+        for (entries, off) in [
+            ("", false),
+            (
+                "fetch.recursesubmodules\non-demand\0submodule.recurse\nfalse\0",
+                true,
+            ),
+            (
+                "fetch.recursesubmodules\ntrue\0submodule.recurse\nfalse\0",
+                true,
+            ),
+            (
+                "submodule.recurse\nfalse\0fetch.recursesubmodules\non-demand\0",
+                false,
+            ),
+            ("submodule.recurse\nNo\0", true),
+            ("submodule.recurse\0", false),
+        ] {
+            assert_eq!(last_recursion_is_off(entries), off, "{entries:?}");
+        }
+    }
 
     /// One `for-each-ref` line per row: name, tip, upstream branch, track.
     fn head_refs(rows: &[(&str, &str, &str, &str)]) -> String {

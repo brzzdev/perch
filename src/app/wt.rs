@@ -58,12 +58,10 @@ pub(crate) fn run(
     // where it runs, for gitlinks moved by the commits it fetched. Once the
     // prefetch has moved the shared remote refs, a worktree's own fetch finds
     // nothing new and never reaches its submodules. Without the prefetch each
-    // fetch runs from the worktree it updates. `.gitmodules` rather than
-    // initialised submodules, because it costs no git process per worktree
-    // and errs towards skipping.
+    // fetch runs from the worktree it updates.
     let has_submodules = listed
         .iter()
-        .any(|worktree| worktree.path.join(".gitmodules").exists());
+        .any(|worktree| git::has_submodules(&worktree.path));
     let prefetch = ((target.is_some() || super::is_interactive()) && !has_submodules)
         .then(|| Prefetch::start(&remote));
 

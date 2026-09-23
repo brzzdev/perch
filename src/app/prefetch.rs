@@ -178,7 +178,8 @@ impl FetchedRemote {
     /// with submodules, whose own fetch recurses into submodule repositories
     /// that only it has. `wt` skips the prefetch where any worktree has them,
     /// so this is for one that gained them while the picker was open, and
-    /// [`fetch_unless_covered`] forces that fetch's recursion.
+    /// [`fetch_unless_covered`] forces that fetch's recursion unless its
+    /// config switches recursion off.
     fn covers(&self, dir: Option<&Path>, remote: &str) -> bool {
         if self.name != remote {
             return false;
@@ -187,7 +188,7 @@ impl FetchedRemote {
             return true;
         };
         self.failure.is_none()
-            && !dir.join(".gitmodules").exists()
+            && !git::has_submodules(dir)
             && self.context.names_one_repository(remote)
             && FetchContext::read(Some(dir), remote) == self.context
     }
@@ -247,10 +248,9 @@ pub(crate) fn fetch_unless_covered(
     // unless its config switches recursion off.
     let moved_the_refs =
         fetched.is_some_and(|fetched| fetched.name == remote && fetched.failure.is_none());
-    let submodules = if moved_the_refs
-        && dir.is_some_and(|dir| {
-            dir.join(".gitmodules").exists() && !git::submodule_fetch_switched_off(dir)
-        }) {
+    let wants_every_submodule =
+        dir.is_some_and(|dir| git::has_submodules(dir) && !git::submodule_fetch_switched_off(dir));
+    let submodules = if moved_the_refs && wants_every_submodule {
         git::SubmoduleFetch::All
     } else {
         git::SubmoduleFetch::Configured

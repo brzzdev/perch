@@ -322,12 +322,57 @@ fn fetch_args(remote: &str) -> [&str; 4] {
     ["fetch", "--quiet", "--prune", remote]
 }
 
-/// Whether the worktree at `dir` declares submodules. The declaration rather
-/// than initialised submodules, because it costs no git process and errs
-/// towards having them.
+/// Whether the worktree at `dir` has a `.gitmodules`. It costs no git process,
+/// but a checkout can leave the file out, sparsely or by deleting it, with
+/// its submodules still populated.
+#[must_use]
+pub fn declares_submodules(dir: &Path) -> bool {
+    dir.join(".gitmodules").exists()
+}
+
+/// Whether the worktree at `dir` has submodules: declared, or populated from
+/// gitlinks in its index where the declaration is missing. One it cannot
+/// inspect counts as having them.
 #[must_use]
 pub fn has_submodules(dir: &Path) -> bool {
-    dir.join(".gitmodules").exists()
+    declares_submodules(dir) || worktree_has_initialized_submodules(dir) != Some(false)
+}
+
+/// Whether the repository keeps submodule repositories for any worktree: the
+/// main worktree's under `<common>/modules`, and each linked one's under
+/// `<common>/worktrees/<name>/modules`. Filesystem reads beyond finding the
+/// common directory, so the cost stays flat however many worktrees there are.
+/// One it cannot inspect counts as keeping them.
+#[must_use]
+pub fn holds_submodule_repositories() -> bool {
+    let Ok(common) = common_dir() else {
+        return true;
+    };
+    if common.join("modules").is_dir() {
+        return true;
+    }
+    let Ok(worktrees) = std::fs::read_dir(common.join("worktrees")) else {
+        return false;
+    };
+    worktrees
+        .flatten()
+        .any(|worktree| worktree.path().join("modules").is_dir())
+}
+
+/// The repository's common directory, shared by all its worktrees.
+pub fn common_dir() -> AppResult<PathBuf> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .output()?;
+    if !output.status.success() {
+        return Err(Error::Git {
+            command: "rev-parse --git-common-dir".to_string(),
+            message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        });
+    }
+    Ok(PathBuf::from(
+        String::from_utf8_lossy(&output.stdout).trim(),
+    ))
 }
 
 /// Whether the config in force in `dir` switches a fetch's recursion into

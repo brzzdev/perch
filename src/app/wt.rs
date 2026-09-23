@@ -61,7 +61,8 @@ pub(crate) fn run(
     // fetch runs from the worktree it updates.
     let has_submodules = listed
         .iter()
-        .any(|worktree| git::has_submodules(&worktree.path));
+        .any(|worktree| git::declares_submodules(&worktree.path))
+        || git::holds_submodule_repositories();
     let prefetch = ((target.is_some() || super::is_interactive()) && !has_submodules)
         .then(|| Prefetch::start(&remote));
 

@@ -216,16 +216,7 @@ fn recover_staged(config: &Path, staged: &Record) -> AppResult<Option<Record>> {
 }
 
 fn repository_config() -> AppResult<PathBuf> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
-        .output()?;
-    if !output.status.success() {
-        return Err(Error::Git {
-            command: "rev-parse --git-common-dir".to_string(),
-            message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
-        });
-    }
-    Ok(PathBuf::from(String::from_utf8_lossy(&output.stdout).trim()).join("config"))
+    Ok(git::common_dir()?.join("config"))
 }
 
 fn repository_lock(config: &Path) -> AppResult<File> {

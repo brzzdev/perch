@@ -1,6 +1,6 @@
 [package]
 name = "perch"
-version = "2.6.1"
+version = "2.6.2"
 edition = "2024"
 categories = ["command-line-utilities", "development-tools"]
 description = "Interactive Git branch and worktree switcher with merged-branch cleanup"

@@ -53,7 +53,8 @@ pub(crate) fn run(
     // local and remote-only halves can reflect slightly different moments;
     // `resolve_target` runs after the join and decides the final action.
     //
-    // Not where any worktree has submodules. Each worktree keeps its own
+    // Not where any worktree has submodules, by its `.gitmodules` or by the
+    // submodule repositories the repository keeps. Each worktree keeps its own
     // submodule repositories, and a fetch recurses on demand only into those
     // where it runs, for gitlinks moved by the commits it fetched. Once the
     // prefetch has moved the shared remote refs, a worktree's own fetch finds

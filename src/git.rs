@@ -331,8 +331,8 @@ pub fn declares_submodules(dir: &Path) -> bool {
 }
 
 /// Whether the worktree at `dir` has submodules: declared, or populated from
-/// gitlinks in its index where the declaration is missing. One it cannot
-/// inspect counts as having them.
+/// gitlinks in its index where the declaration is missing, which costs a git
+/// process. One it cannot inspect counts as having them.
 #[must_use]
 pub fn has_submodules(dir: &Path) -> bool {
     declares_submodules(dir) || worktree_has_initialized_submodules(dir) != Some(false)
@@ -340,9 +340,12 @@ pub fn has_submodules(dir: &Path) -> bool {
 
 /// Whether the repository keeps submodule repositories for any worktree: the
 /// main worktree's under `<common>/modules`, and each linked one's under
-/// `<common>/worktrees/<name>/modules`. Filesystem reads beyond finding the
-/// common directory, so the cost stays flat however many worktrees there are.
-/// One it cannot inspect counts as keeping them.
+/// `<common>/worktrees/<name>/modules`. One git process finds the common
+/// directory and the rest is filesystem reads, so the cost stays flat however
+/// many worktrees there are. One it cannot inspect counts as keeping them, and
+/// so does one whose submodules are gone but whose repositories git leaves
+/// behind: after `git rm` of a submodule, or until a worktree deleted by hand
+/// is pruned.
 #[must_use]
 pub fn holds_submodule_repositories() -> bool {
     let Ok(common) = common_dir() else {

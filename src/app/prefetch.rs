@@ -248,9 +248,10 @@ pub(crate) fn fetch_unless_covered(
     // unless its config switches recursion off.
     let moved_the_refs =
         fetched.is_some_and(|fetched| fetched.name == remote && fetched.failure.is_none());
-    let wants_every_submodule =
-        dir.is_some_and(|dir| git::has_submodules(dir) && !git::submodule_fetch_switched_off(dir));
-    let submodules = if moved_the_refs && wants_every_submodule {
+    let wants_every_submodule = || {
+        dir.is_some_and(|dir| git::has_submodules(dir) && !git::submodule_fetch_switched_off(dir))
+    };
+    let submodules = if moved_the_refs && wants_every_submodule() {
         git::SubmoduleFetch::All
     } else {
         git::SubmoduleFetch::Configured

@@ -2375,6 +2375,7 @@ fn wt_still_fetches_a_worktree_whose_origin_points_elsewhere() {
 enum SubmoduleCase {
     AtStartup,
     GainedMidRun,
+    GainedMidRunLeftOutOfTheCheckout,
     GainedMidRunUnderGitConfig,
     LeftOutOfTheCheckout,
 }
@@ -2385,10 +2386,11 @@ enum SubmoduleCase {
 /// leave the target's own fetch nothing new to recurse for. So a repository
 /// with submodules skips the prefetch, and the target fetches for itself, once,
 /// even where the checkout leaves `.gitmodules` out. A worktree that gains
-/// submodules only once the prefetch is under way has its own fetch recurse
-/// into all of them, which a `GIT_CONFIG` switching recursion off must not
-/// stop, since `git fetch` ignores that file. Either way its submodule gets
-/// the commit its advanced gitlink names.
+/// submodules only once the prefetch is under way, found by its `.gitmodules`
+/// or its index, has its own fetch recurse into all of them, which a
+/// `GIT_CONFIG` switching recursion off must not stop, since `git fetch`
+/// ignores that file. Either way its submodule gets the commit its advanced
+/// gitlink names.
 #[test]
 fn wt_still_fetches_a_worktree_with_submodules() {
     // The mode git records a submodule's commit under in its superproject.
@@ -2396,6 +2398,7 @@ fn wt_still_fetches_a_worktree_with_submodules() {
     for case in [
         SubmoduleCase::AtStartup,
         SubmoduleCase::GainedMidRun,
+        SubmoduleCase::GainedMidRunLeftOutOfTheCheckout,
         SubmoduleCase::GainedMidRunUnderGitConfig,
         SubmoduleCase::LeftOutOfTheCheckout,
     ] {
@@ -2436,28 +2439,30 @@ fn wt_still_fetches_a_worktree_with_submodules() {
         );
         git(pusher.path(), &["commit", "-m", "advance sub"]);
         git(pusher.path(), &["push", "origin", "feature"]);
-        let gained_mid_run = matches!(
+        let left_out = matches!(
             case,
-            SubmoduleCase::GainedMidRun | SubmoduleCase::GainedMidRunUnderGitConfig
+            SubmoduleCase::GainedMidRunLeftOutOfTheCheckout | SubmoduleCase::LeftOutOfTheCheckout
         );
-        if gained_mid_run {
-            restore_as_the_prefetch_commits(
-                &parent,
-                &work,
-                &[
-                    work.join(".gitmodules"),
-                    work.join(".git/modules"),
-                    work.join(".git/worktrees/feature/modules"),
-                    worktree.join(".gitmodules"),
-                ],
-            );
-        }
-        if case == SubmoduleCase::LeftOutOfTheCheckout {
+        if left_out {
             // As a sparse checkout leaves it: absent, yet the tree stays clean.
             for dir in [&work, &worktree] {
                 git(dir, &["update-index", "--skip-worktree", ".gitmodules"]);
                 fs::remove_file(dir.join(".gitmodules")).unwrap();
             }
+        }
+        let gained_mid_run = !matches!(
+            case,
+            SubmoduleCase::AtStartup | SubmoduleCase::LeftOutOfTheCheckout
+        );
+        if gained_mid_run {
+            let mut hidden = vec![
+                work.join(".git/modules"),
+                work.join(".git/worktrees/feature/modules"),
+            ];
+            if !left_out {
+                hidden.extend([work.join(".gitmodules"), worktree.join(".gitmodules")]);
+            }
+            restore_as_the_prefetch_commits(&parent, &work, &hidden);
         }
         let mut command = perch_command(&work, &["wt", "feature", "--no-switch"]);
         // `allow_file` for perch's own git, including the submodule fetches.

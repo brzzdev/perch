@@ -257,9 +257,23 @@ pub fn checkout(branch: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// Which submodules a fetch recurses into.
+#[derive(Clone, Copy, PartialEq)]
+pub enum SubmoduleFetch {
+    /// Every submodule checked out where the fetch runs.
+    All,
+    /// As the config says; git's own default is on demand.
+    Configured,
+}
+
 #[must_use]
-pub fn fetch(dir: Option<&Path>, remote: &str) -> FetchOutcome {
-    let output = match git_cmd(dir).args(fetch_args(remote)).output() {
+pub fn fetch(dir: Option<&Path>, remote: &str, submodules: SubmoduleFetch) -> FetchOutcome {
+    let mut command = git_cmd(dir);
+    command.args(fetch_args(remote));
+    if submodules == SubmoduleFetch::All {
+        command.arg("--recurse-submodules=yes");
+    }
+    let output = match command.output() {
         Ok(output) => output,
         Err(e) => return FetchOutcome::Failed(e.to_string()),
     };
@@ -308,6 +322,92 @@ fn fetch_args(remote: &str) -> [&str; 4] {
     ["fetch", "--quiet", "--prune", remote]
 }
 
+/// Whether the worktree at `dir` has a `.gitmodules`. It costs no git process,
+/// but a checkout can leave the file out, sparsely or by deleting it, with
+/// its submodules still populated.
+#[must_use]
+pub fn declares_submodules(dir: &Path) -> bool {
+    dir.join(".gitmodules").exists()
+}
+
+/// Whether the worktree at `dir` has submodules: declared, or populated from
+/// gitlinks in its index where the declaration is missing, which costs a git
+/// process. One it cannot inspect counts as having them.
+#[must_use]
+pub fn has_submodules(dir: &Path) -> bool {
+    declares_submodules(dir) || worktree_has_initialized_submodules(dir) != Some(false)
+}
+
+/// Whether the repository keeps submodule repositories for any worktree: the
+/// main worktree's under `<common>/modules`, and each linked one's under
+/// `<common>/worktrees/<name>/modules`. One git process finds the common
+/// directory and the rest is filesystem reads, so the cost stays flat however
+/// many worktrees there are. One it cannot inspect counts as keeping them, and
+/// so does one whose submodules are gone but whose repositories git leaves
+/// behind: after `git rm` of a submodule, or until a worktree deleted by hand
+/// is pruned.
+#[must_use]
+pub fn holds_submodule_repositories() -> bool {
+    let Ok(common) = common_dir() else {
+        return true;
+    };
+    if common.join("modules").is_dir() {
+        return true;
+    }
+    let Ok(worktrees) = std::fs::read_dir(common.join("worktrees")) else {
+        return false;
+    };
+    worktrees
+        .flatten()
+        .any(|worktree| worktree.path().join("modules").is_dir())
+}
+
+/// The repository's common directory, shared by all its worktrees.
+pub fn common_dir() -> AppResult<PathBuf> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .output()?;
+    if !output.status.success() {
+        return Err(Error::Git {
+            command: "rev-parse --git-common-dir".to_string(),
+            message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        });
+    }
+    Ok(PathBuf::from(
+        String::from_utf8_lossy(&output.stdout).trim(),
+    ))
+}
+
+/// Whether the config in force in `dir` switches a fetch's recursion into
+/// submodules off. `fetch.recurseSubmodules` and `submodule.recurse` set the
+/// same thing, so whichever git reads last wins. Reads [`config_entries`],
+/// which leaves out `GIT_CONFIG` as `git fetch` does.
+#[must_use]
+pub fn submodule_fetch_switched_off(dir: &Path) -> bool {
+    last_recursion_is_off(&config_entries(Some(dir)))
+}
+
+/// Takes [`config_entries`]: each a key, lowercased by git, then a newline and
+/// the value where it has one. A key with no value is true, and `on-demand` is
+/// no boolean at all.
+fn last_recursion_is_off(entries: &[String]) -> bool {
+    let Some(last) = entries.iter().rfind(|entry| {
+        let key = entry
+            .split_once('\n')
+            .map_or(entry.as_str(), |(key, _)| key);
+        matches!(key, "fetch.recursesubmodules" | "submodule.recurse")
+    }) else {
+        return false;
+    };
+    let Some((_, value)) = last.split_once('\n') else {
+        return false;
+    };
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "" | "0" | "false" | "no" | "off"
+    )
+}
+
 /// The URL `remote` fetches from, as resolved in `dir`. The same remote name
 /// can point elsewhere from another worktree, through `extensions.worktreeConfig`
 /// or an `includeIf`, so where a fetch runs is part of what it fetches. `None`
@@ -327,12 +427,24 @@ pub fn remote_url(dir: Option<&Path>, remote: &str) -> Option<String> {
 /// Entries come back NUL-separated, which keeps a value containing a newline
 /// whole — line-separated output would split it into two entries that no
 /// longer say what the config does.
+///
+/// `GIT_CONFIG` is left out: `git config` would list only that file, while
+/// `git fetch` ignores it and reads the config actually in force.
 #[must_use]
 pub fn config_entries(dir: Option<&Path>) -> Vec<String> {
-    let Ok(output) = run_in(dir, &["config", "--null", "--list"]) else {
+    let Some(output) = git_cmd(dir)
+        .args(["config", "--null", "--list"])
+        .env_remove("GIT_CONFIG")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+    else {
         return Vec::new();
     };
-    output.split('\0').map(str::to_string).collect()
+    String::from_utf8_lossy(&output.stdout)
+        .split('\0')
+        .map(str::to_string)
+        .collect()
 }
 
 /// Rebase the current branch onto `onto` (e.g. `origin/main`). Git's stdout
@@ -1643,9 +1755,43 @@ fn run_in(dir: Option<&Path>, args: &[&str]) -> AppResult<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Anchor, Ground, StaleBranch, Unmerged, branch_refs, parse_track, stale_from, unmerged_from,
+        Anchor, Ground, StaleBranch, Unmerged, branch_refs, last_recursion_is_off, parse_track,
+        stale_from, unmerged_from,
     };
     use std::collections::HashMap;
+
+    /// Git reads both keys into one setting, so a later `submodule.recurse`
+    /// overrides an earlier `fetch.recurseSubmodules`, and the reverse.
+    #[test]
+    fn the_last_recursion_setting_decides() {
+        for (entries, off) in [
+            (&["core.bare\nfalse"][..], false),
+            (
+                &[
+                    "fetch.recursesubmodules\non-demand",
+                    "submodule.recurse\nfalse",
+                ],
+                true,
+            ),
+            (
+                &["fetch.recursesubmodules\ntrue", "submodule.recurse\nfalse"],
+                true,
+            ),
+            (
+                &[
+                    "submodule.recurse\nfalse",
+                    "fetch.recursesubmodules\non-demand",
+                    "core.bare\nfalse",
+                ],
+                false,
+            ),
+            (&["submodule.recurse\nNo"], true),
+            (&["submodule.recurse"], false),
+        ] {
+            let entries: Vec<String> = entries.iter().map(ToString::to_string).collect();
+            assert_eq!(last_recursion_is_off(&entries), off, "{entries:?}");
+        }
+    }
 
     /// One `for-each-ref` line per row: name, tip, upstream branch, track.
     fn head_refs(rows: &[(&str, &str, &str, &str)]) -> String {

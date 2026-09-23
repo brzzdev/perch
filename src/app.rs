@@ -137,10 +137,8 @@ fn run_verb(verb: Verb, target: Option<&str>) -> AppResult<()> {
         return refresh_current(&remote, current);
     }
 
-    // Started before the picker reads anything, as `wt` does, so the round trip
-    // overlaps the wait for a pick. A named target is also checked out only
-    // after the join, so one this clone has never fetched is found on the
-    // remote rather than refused.
+    // Started before the picker, as in `wt`, and joined before the checkout, so
+    // a named target this clone has never fetched is found on the remote.
     let prefetch = (target.is_some() || is_interactive()).then(|| Prefetch::start(&remote));
 
     let target = if let Some(name) = target {
@@ -407,10 +405,12 @@ fn prompt_keep_discard(
     }
 }
 
+/// `stale_remote` judges the stale-branch prompt; the update itself fetches the
+/// remote `target` tracks.
 fn switch_and_update(
     target: &str,
     old_branch: Option<&str>,
-    remote: &str,
+    stale_remote: &str,
     fetched: Option<&FetchedRemote>,
 ) -> AppResult<()> {
     let already_on_target = old_branch.is_some_and(|b| b == target);
@@ -432,7 +432,7 @@ fn switch_and_update(
     prompt_delete_stale_branches(
         if already_on_target { None } else { old_branch },
         None,
-        remote,
+        stale_remote,
     )?;
 
     Ok(())

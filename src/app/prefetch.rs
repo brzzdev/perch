@@ -176,11 +176,8 @@ impl FetchedRemote {
     /// failure covers no worktree: each has a `FETCH_HEAD` of its own, so one
     /// can fetch where another could not. Nor does a fetch cover a worktree
     /// with submodules, whose own fetch recurses into submodule repositories
-    /// that only it has. `wt` skips the prefetch where any worktree has them;
-    /// the go verb's *Held* hand-off does not, and neither does a worktree
-    /// that gained them while `wt`'s picker was open, so
-    /// [`fetch_unless_covered`] forces that fetch's recursion unless its
-    /// config switches recursion off.
+    /// that only it has; [`fetch_unless_covered`] forces that fetch's
+    /// recursion unless its config switches recursion off.
     fn covers(&self, dir: Option<&Path>, remote: &str) -> bool {
         if self.name != remote {
             return false;

@@ -2073,31 +2073,38 @@ fn wt_creates_a_worktree_with_a_single_fetch_when_the_branch_shares_the_remote()
 }
 
 /// The prefetch covers the current branch's remote and no other, so a branch
-/// tracking a second remote is still fetched from there before its worktree is
-/// made, as it was before the prefetch existed.
+/// tracking a second remote is still fetched from there before it is used.
 #[test]
-fn wt_fetches_the_branch_remote_too_when_it_is_not_the_one_prefetched() {
-    let (_bare, parent, work) = setup_with_parent();
-    let upstream = TempDir::new().unwrap();
-    git(upstream.path(), &["init", "--bare"]);
-    git(
-        &work,
-        &[
-            "remote",
-            "add",
-            "upstream",
-            upstream.path().to_str().unwrap(),
-        ],
-    );
-    git(&work, &["branch", "feature"]);
-    git(&work, &["push", "-u", "upstream", "feature"]);
+fn a_branch_on_a_remote_not_prefetched_is_fetched_from_it_too() {
+    for args in [&["br", "feature"][..], &["wt", "feature", "--no-switch"]] {
+        let (_bare, parent, work) = setup_with_parent();
+        let upstream = TempDir::new().unwrap();
+        git(upstream.path(), &["init", "--bare"]);
+        git(
+            &work,
+            &[
+                "remote",
+                "add",
+                "upstream",
+                upstream.path().to_str().unwrap(),
+            ],
+        );
+        git(&work, &["branch", "feature"]);
+        git(&work, &["push", "-u", "upstream", "feature"]);
 
-    let (output, fetches) = perch_traced(&parent, &work, &["wt", "feature", "--no-switch"]);
+        let (output, fetches) = perch_traced(&parent, &work, args);
 
-    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
-    assert_eq!(fetches.len(), 2, "fetches: {fetches:?}");
-    assert!(fetches[0].ends_with("origin"), "fetches: {fetches:?}");
-    assert!(fetches[1].ends_with("upstream"), "fetches: {fetches:?}");
+        assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+        assert_eq!(fetches.len(), 2, "{args:?} fetches: {fetches:?}");
+        assert!(
+            fetches[0].ends_with("origin"),
+            "{args:?} fetches: {fetches:?}"
+        );
+        assert!(
+            fetches[1].ends_with("upstream"),
+            "{args:?} fetches: {fetches:?}"
+        );
+    }
 }
 
 /// `br` and the go verb check out a named target only after the prefetch, so a
@@ -2149,32 +2156,6 @@ fn go_updates_a_held_worktree_with_a_single_fetch() {
         stderr_str(&output)
     );
     assert_eq!(fetches.len(), 1, "fetches: {fetches:?}");
-}
-
-/// As for `wt`, the prefetch covers only the current branch's remote.
-#[test]
-fn br_fetches_the_branch_remote_too_when_it_is_not_the_one_prefetched() {
-    let (_bare, parent, work) = setup_with_parent();
-    let upstream = TempDir::new().unwrap();
-    git(upstream.path(), &["init", "--bare"]);
-    git(
-        &work,
-        &[
-            "remote",
-            "add",
-            "upstream",
-            upstream.path().to_str().unwrap(),
-        ],
-    );
-    git(&work, &["branch", "feature"]);
-    git(&work, &["push", "-u", "upstream", "feature"]);
-
-    let (output, fetches) = perch_traced(&parent, &work, &["br", "feature"]);
-
-    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
-    assert_eq!(fetches.len(), 2, "fetches: {fetches:?}");
-    assert!(fetches[0].ends_with("origin"), "fetches: {fetches:?}");
-    assert!(fetches[1].ends_with("upstream"), "fetches: {fetches:?}");
 }
 
 /// Two worktrees can point one remote name at the same URL and still fetch
@@ -4431,16 +4412,16 @@ fn dismissing_a_picker_ends_a_background_fetch_that_never_reached_the_terminal()
     const HANGS: &str = "sleep 60";
     const HANGS_AND_TRAPS_TERM: &str = "trap '' TERM\nwhile :; do sleep 1; done";
 
-    let cases = [
-        (&b"\x1b"[..], HANGS),
-        (&b"\x03"[..], HANGS),
-        (&b"\x1b"[..], HANGS_AND_TRAPS_TERM),
-        (&b"\x03"[..], HANGS_AND_TRAPS_TERM),
-    ];
-    for (verb, (key, hang)) in [Some("br"), None, Some("wt")]
-        .into_iter()
-        .flat_map(|verb| cases.map(|case| (verb, case)))
-    {
+    // Every verb ends the fetch through the same drop, so `wt` runs the whole
+    // matrix and `br` and the go verb one case each.
+    for (verb, key, hang) in [
+        (Some("wt"), &b"\x1b"[..], HANGS),
+        (Some("wt"), &b"\x03"[..], HANGS),
+        (Some("wt"), &b"\x1b"[..], HANGS_AND_TRAPS_TERM),
+        (Some("wt"), &b"\x03"[..], HANGS_AND_TRAPS_TERM),
+        (Some("br"), &b"\x03"[..], HANGS_AND_TRAPS_TERM),
+        (None, &b"\x03"[..], HANGS_AND_TRAPS_TERM),
+    ] {
         let (_bare, parent, work) = setup_with_parent();
         let tried = parent.path().join("tried-the-terminal");
         let helper = parent.path().join("hang.sh");

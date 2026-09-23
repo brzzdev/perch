@@ -2158,6 +2158,32 @@ fn go_updates_a_held_worktree_with_a_single_fetch() {
     assert_eq!(fetches.len(), 1, "fetches: {fetches:?}");
 }
 
+/// A target with no remote of its own is updated from the one the prefetch
+/// fetched, not whichever remote the repository would guess for it.
+#[test]
+fn br_to_an_untracked_branch_fetches_only_the_current_remote() {
+    let (_bare, parent, work) = setup_with_parent();
+    let upstream = TempDir::new().unwrap();
+    git(upstream.path(), &["init", "--bare"]);
+    git(
+        &work,
+        &[
+            "remote",
+            "add",
+            "upstream",
+            upstream.path().to_str().unwrap(),
+        ],
+    );
+    git(&work, &["push", "-u", "upstream", "main"]);
+    git(&work, &["branch", "--no-track", "local", "main"]);
+
+    let (output, fetches) = perch_traced(&parent, &work, &["br", "local"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert_eq!(fetches.len(), 1, "fetches: {fetches:?}");
+    assert!(fetches[0].ends_with("upstream"), "fetches: {fetches:?}");
+}
+
 /// Two worktrees can point one remote name at the same URL and still fetch
 /// different refs, since the refspec is per-worktree config like any other.
 /// A prefetch that brought back only `main` covers nothing the target worktree
@@ -4419,7 +4445,7 @@ fn dismissing_a_picker_ends_a_background_fetch_that_never_reached_the_terminal()
         (Some("wt"), &b"\x03"[..], HANGS),
         (Some("wt"), &b"\x1b"[..], HANGS_AND_TRAPS_TERM),
         (Some("wt"), &b"\x03"[..], HANGS_AND_TRAPS_TERM),
-        (Some("br"), &b"\x03"[..], HANGS_AND_TRAPS_TERM),
+        (Some("br"), &b"\x1b"[..], HANGS_AND_TRAPS_TERM),
         (None, &b"\x03"[..], HANGS_AND_TRAPS_TERM),
     ] {
         let (_bare, parent, work) = setup_with_parent();

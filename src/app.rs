@@ -138,7 +138,9 @@ fn run_verb(verb: Verb, target: Option<&str>) -> AppResult<()> {
     }
 
     // Started before the picker, as in `wt`, and joined before the checkout, so
-    // a named target this clone has never fetched is found on the remote.
+    // a named target this clone has never fetched is found on the remote. Unlike
+    // `wt`'s, it runs where there are submodules: the in-place update fetches
+    // from this same worktree, and a *Held* one with submodules is never covered.
     let prefetch = (target.is_some() || is_interactive()).then(|| Prefetch::start(&remote));
 
     let target = if let Some(name) = target {
@@ -405,12 +407,12 @@ fn prompt_keep_discard(
     }
 }
 
-/// `stale_remote` judges the stale-branch prompt; the update itself fetches the
-/// remote `target` tracks.
+/// `remote` is the one the run started from: it judges the stale-branch prompt,
+/// and updates a `target` that tracks no remote of its own.
 fn switch_and_update(
     target: &str,
     old_branch: Option<&str>,
-    stale_remote: &str,
+    remote: &str,
     fetched: Option<&FetchedRemote>,
 ) -> AppResult<()> {
     let already_on_target = old_branch.is_some_and(|b| b == target);
@@ -422,7 +424,7 @@ fn switch_and_update(
     // Read after the checkout, which is what sets up tracking for a branch
     // taken from the remote. The target may track a different remote than the
     // branch we left.
-    let target_remote = git::current_remote(Some(target));
+    let target_remote = git::tracked_remote(target).unwrap_or_else(|| remote.to_string());
     match fetch_and_ff(None, target, &target_remote, fetched)? {
         git::FastForwardResult::Diverged => reconcile_diverged(target, &target_remote)?,
         git::FastForwardResult::Merged(report) => report_update(&report),
@@ -432,7 +434,7 @@ fn switch_and_update(
     prompt_delete_stale_branches(
         if already_on_target { None } else { old_branch },
         None,
-        stale_remote,
+        remote,
     )?;
 
     Ok(())

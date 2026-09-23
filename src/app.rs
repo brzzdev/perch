@@ -19,6 +19,7 @@ pub mod wt;
 use picker::{
     Catalogue, MultiItem, PickerOptions, Selection, interactive_keys, multi_select, pick,
 };
+use prefetch::{FetchedRemote, Prefetch};
 
 pub(crate) struct CursorGuard(Option<Term>);
 
@@ -136,6 +137,12 @@ fn run_verb(verb: Verb, target: Option<&str>) -> AppResult<()> {
         return refresh_current(&remote, current);
     }
 
+    // Started before the picker reads anything, as `wt` does, so the round trip
+    // overlaps the wait for a pick. A named target is also checked out only
+    // after the join, so one this clone has never fetched is found on the
+    // remote rather than refused.
+    let prefetch = (target.is_some() || is_interactive()).then(|| Prefetch::start(&remote));
+
     let target = if let Some(name) = target {
         name.to_string()
     } else {
@@ -145,6 +152,10 @@ fn run_verb(verb: Verb, target: Option<&str>) -> AppResult<()> {
         };
         picked
     };
+
+    // Joined before the *Held* check and any stash, so both see the fetched
+    // refs, and an interrupt here leaves before anything is touched.
+    let fetched = prefetch.map(Prefetch::join).transpose()?;
 
     // Read the worktrees again rather than reusing what the picker was drawn
     // from: that snapshot was taken before it opened, and the picker then sat
@@ -168,7 +179,7 @@ fn run_verb(verb: Verb, target: Option<&str>) -> AppResult<()> {
         }
         // The target may track a different remote than the current branch.
         let target_remote = git::current_remote(Some(target.as_str()));
-        if let Err(e) = wt::update_in(&held_by.path, &target, &target_remote, None) {
+        if let Err(e) = wt::update_in(&held_by.path, &target, &target_remote, fetched.as_ref()) {
             eprintln!(
                 "{} update of {} failed: {e}",
                 style("!").yellow().bold(),
@@ -202,7 +213,7 @@ fn run_verb(verb: Verb, target: Option<&str>) -> AppResult<()> {
         false
     };
 
-    let result = switch_and_update(&target, old_branch.as_deref(), &remote);
+    let result = switch_and_update(&target, old_branch.as_deref(), &remote, fetched.as_ref());
 
     if stashed {
         if result.is_err()
@@ -396,15 +407,24 @@ fn prompt_keep_discard(
     }
 }
 
-fn switch_and_update(target: &str, old_branch: Option<&str>, remote: &str) -> AppResult<()> {
+fn switch_and_update(
+    target: &str,
+    old_branch: Option<&str>,
+    remote: &str,
+    fetched: Option<&FetchedRemote>,
+) -> AppResult<()> {
     let already_on_target = old_branch.is_some_and(|b| b == target);
 
     if !already_on_target {
         git::checkout(target)?;
     }
 
-    match fetch_and_ff(None, target, remote, None)? {
-        git::FastForwardResult::Diverged => reconcile_diverged(target, remote)?,
+    // Read after the checkout, which is what sets up tracking for a branch
+    // taken from the remote. The target may track a different remote than the
+    // branch we left.
+    let target_remote = git::current_remote(Some(target));
+    match fetch_and_ff(None, target, &target_remote, fetched)? {
+        git::FastForwardResult::Diverged => reconcile_diverged(target, &target_remote)?,
         git::FastForwardResult::Merged(report) => report_update(&report),
     }
 
@@ -422,13 +442,13 @@ fn switch_and_update(target: &str, old_branch: Option<&str>, remote: &str) -> Ap
 /// worktree at `dir` (via `git -C`). Shows a spinner and surfaces fetch
 /// failures; the caller decides how to handle the [`git::FastForwardResult`]
 /// (the in-place switch offers a rebase on diverge; worktree updates don't).
-/// Without a `fetched` covering `remote` this fetches unconditionally, which is
-/// what every caller but `wt` needs.
+/// Skips the fetch where `fetched`, the run's prefetch, already covers `remote`
+/// from `dir`.
 pub(crate) fn fetch_and_ff(
     dir: Option<&std::path::Path>,
     branch: &str,
     remote: &str,
-    fetched: Option<&prefetch::FetchedRemote>,
+    fetched: Option<&FetchedRemote>,
 ) -> AppResult<git::FastForwardResult> {
     let (fetch_outcome, merge_result) = {
         let spinner = ProgressBar::new_spinner().with_message(format!("Updating {branch}…"));

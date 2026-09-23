@@ -2073,10 +2073,95 @@ fn wt_creates_a_worktree_with_a_single_fetch_when_the_branch_shares_the_remote()
 }
 
 /// The prefetch covers the current branch's remote and no other, so a branch
-/// tracking a second remote is still fetched from there before its worktree is
-/// made, as it was before the prefetch existed.
+/// tracking a second remote is still fetched from there before it is used.
 #[test]
-fn wt_fetches_the_branch_remote_too_when_it_is_not_the_one_prefetched() {
+fn a_branch_on_a_remote_not_prefetched_is_fetched_from_it_too() {
+    for args in [&["br", "feature"][..], &["wt", "feature", "--no-switch"]] {
+        let (_bare, parent, work) = setup_with_parent();
+        let upstream = TempDir::new().unwrap();
+        git(upstream.path(), &["init", "--bare"]);
+        git(
+            &work,
+            &[
+                "remote",
+                "add",
+                "upstream",
+                upstream.path().to_str().unwrap(),
+            ],
+        );
+        git(&work, &["branch", "feature"]);
+        git(&work, &["push", "-u", "upstream", "feature"]);
+
+        let (output, fetches) = perch_traced(&parent, &work, args);
+
+        assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+        assert_eq!(fetches.len(), 2, "{args:?} fetches: {fetches:?}");
+        assert!(
+            fetches[0].ends_with("origin"),
+            "{args:?} fetches: {fetches:?}"
+        );
+        assert!(
+            fetches[1].ends_with("upstream"),
+            "{args:?} fetches: {fetches:?}"
+        );
+    }
+}
+
+/// `br` and the go verb check out a named target only after the prefetch, so a
+/// branch this clone has never fetched is found on the remote, not refused.
+#[test]
+fn br_and_go_check_out_a_remote_branch_this_clone_has_never_fetched() {
+    for verb in [&["br"][..], &[]] {
+        let (bare, _parent, work) = setup_with_parent();
+        let other = clone_bare(bare.path());
+        git(other.path(), &["switch", "-c", "feat/x"]);
+        commit_in(other.path(), "x.txt", "on feat/x");
+        git(other.path(), &["push", "origin", "feat/x"]);
+        let tip = remote_branch_tip(&work, "origin", "feat/x").unwrap();
+
+        let output = perch_args(&work, &[verb, &["feat/x"]].concat());
+
+        assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+        let head = git(&work, &["rev-parse", "HEAD"]);
+        assert_eq!(stdout_str(&head).trim(), tip, "{verb:?} is not at the tip");
+        let upstream = git(&work, &["rev-parse", "--abbrev-ref", "@{upstream}"]);
+        assert_eq!(stdout_str(&upstream).trim(), "origin/feat/x");
+    }
+}
+
+#[test]
+fn br_switches_with_a_single_fetch() {
+    let (_bare, parent, work) = setup_with_parent();
+    git(&work, &["switch", "-c", "feature"]);
+    git(&work, &["push", "-u", "origin", "feature"]);
+    git(&work, &["switch", "main"]);
+
+    let (output, fetches) = perch_traced(&parent, &work, &["br", "feature"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert_eq!(fetches.len(), 1, "fetches: {fetches:?}");
+}
+
+#[test]
+fn go_updates_a_held_worktree_with_a_single_fetch() {
+    let (_bare, parent, work) = setup_with_parent();
+    add_worktree_branch(&work, parent.path(), "feature");
+
+    let (output, fetches) = perch_traced(&parent, &work, &["feature"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(
+        stderr_str(&output).contains("is checked out at"),
+        "stderr: {}",
+        stderr_str(&output)
+    );
+    assert_eq!(fetches.len(), 1, "fetches: {fetches:?}");
+}
+
+/// A target with no remote of its own is updated from the one the prefetch
+/// fetched, not whichever remote the repository would guess for it.
+#[test]
+fn br_to_an_untracked_branch_fetches_only_the_current_remote() {
     let (_bare, parent, work) = setup_with_parent();
     let upstream = TempDir::new().unwrap();
     git(upstream.path(), &["init", "--bare"]);
@@ -2089,15 +2174,14 @@ fn wt_fetches_the_branch_remote_too_when_it_is_not_the_one_prefetched() {
             upstream.path().to_str().unwrap(),
         ],
     );
-    git(&work, &["branch", "feature"]);
-    git(&work, &["push", "-u", "upstream", "feature"]);
+    git(&work, &["push", "-u", "upstream", "main"]);
+    git(&work, &["branch", "--no-track", "local", "main"]);
 
-    let (output, fetches) = perch_traced(&parent, &work, &["wt", "feature", "--no-switch"]);
+    let (output, fetches) = perch_traced(&parent, &work, &["br", "local"]);
 
     assert!(output.status.success(), "stderr: {}", stderr_str(&output));
-    assert_eq!(fetches.len(), 2, "fetches: {fetches:?}");
-    assert!(fetches[0].ends_with("origin"), "fetches: {fetches:?}");
-    assert!(fetches[1].ends_with("upstream"), "fetches: {fetches:?}");
+    assert_eq!(fetches.len(), 1, "fetches: {fetches:?}");
+    assert!(fetches[0].ends_with("upstream"), "fetches: {fetches:?}");
 }
 
 /// Two worktrees can point one remote name at the same URL and still fetch
@@ -4343,7 +4427,7 @@ fn helper_is_running(helper: &Path) -> bool {
 /// is open the fetch has no terminal, so a transport that wants a passphrase
 /// has nowhere to ask for one.
 #[test]
-fn dismissing_the_wt_picker_ends_a_background_fetch_that_never_reached_the_terminal() {
+fn dismissing_a_picker_ends_a_background_fetch_that_never_reached_the_terminal() {
     use portable_pty::{CommandBuilder, PtySize, native_pty_system};
     use std::io::{Read, Write};
     use std::sync::Arc;
@@ -4354,11 +4438,15 @@ fn dismissing_the_wt_picker_ends_a_background_fetch_that_never_reached_the_termi
     const HANGS: &str = "sleep 60";
     const HANGS_AND_TRAPS_TERM: &str = "trap '' TERM\nwhile :; do sleep 1; done";
 
-    for (key, hang) in [
-        (&b"\x1b"[..], HANGS),
-        (&b"\x03"[..], HANGS),
-        (&b"\x1b"[..], HANGS_AND_TRAPS_TERM),
-        (&b"\x03"[..], HANGS_AND_TRAPS_TERM),
+    // Every verb ends the fetch through the same drop, so `wt` runs the whole
+    // matrix and `br` and the go verb one case each.
+    for (verb, key, hang) in [
+        (Some("wt"), &b"\x1b"[..], HANGS),
+        (Some("wt"), &b"\x03"[..], HANGS),
+        (Some("wt"), &b"\x1b"[..], HANGS_AND_TRAPS_TERM),
+        (Some("wt"), &b"\x03"[..], HANGS_AND_TRAPS_TERM),
+        (Some("br"), &b"\x1b"[..], HANGS_AND_TRAPS_TERM),
+        (None, &b"\x03"[..], HANGS_AND_TRAPS_TERM),
     ] {
         let (_bare, parent, work) = setup_with_parent();
         let tried = parent.path().join("tried-the-terminal");
@@ -4387,7 +4475,7 @@ fn dismissing_the_wt_picker_ends_a_background_fetch_that_never_reached_the_termi
             .openpty(PtySize::default())
             .expect("failed to open pty");
         let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_perch"));
-        cmd.arg("wt");
+        cmd.args(verb);
         cmd.cwd(&work);
         cmd.env("PERCH_NO_HOOKS", "1");
         let mut child = ChildGuard(pty.slave.spawn_command(cmd).expect("failed to spawn"));
@@ -4424,7 +4512,8 @@ fn dismissing_the_wt_picker_ends_a_background_fetch_that_never_reached_the_termi
         );
         assert!(
             poll_until(|| !helper_is_running(&helper)),
-            "the fetch outlived perch after {key:?} with a helper that does `{hang}`"
+            "the fetch outlived `perch {}` after {key:?} with a helper that does `{hang}`",
+            verb.unwrap_or_default()
         );
     }
 }

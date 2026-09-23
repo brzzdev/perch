@@ -48,14 +48,8 @@ pub fn current_branch() -> AppResult<Option<String>> {
 /// remote, falling back to `origin`.
 #[must_use]
 pub fn current_remote(current: Option<&str>) -> String {
-    if let Some(branch) = current
-        && let Ok(output) = run(&["config", "--get", &format!("branch.{branch}.remote")])
-        && let Some(name) = output.lines().next().map(str::trim)
-        && !name.is_empty()
-        // `.` means push to the local repo — useless for fetch/merge.
-        && name != "."
-    {
-        return name.to_string();
+    if let Some(name) = current.and_then(tracked_remote) {
+        return name;
     }
 
     if let Ok(output) = run(&["remote"]) {
@@ -68,6 +62,15 @@ pub fn current_remote(current: Option<&str>) -> String {
     }
 
     "origin".to_string()
+}
+
+/// The remote `branch.<branch>.remote` names, if any.
+#[must_use]
+pub fn tracked_remote(branch: &str) -> Option<String> {
+    let output = run(&["config", "--get", &format!("branch.{branch}.remote")]).ok()?;
+    let name = output.lines().next()?.trim();
+    // `.` means push to the local repo — useless for fetch/merge.
+    (!name.is_empty() && name != ".").then(|| name.to_string())
 }
 
 pub fn local_branches() -> AppResult<Vec<String>> {

@@ -257,9 +257,23 @@ pub fn checkout(branch: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// Which submodules a fetch recurses into.
+#[derive(Clone, Copy, PartialEq)]
+pub enum SubmoduleFetch {
+    /// Every submodule checked out where the fetch runs.
+    All,
+    /// As the config says; git's own default is on demand.
+    Configured,
+}
+
 #[must_use]
-pub fn fetch(dir: Option<&Path>, remote: &str) -> FetchOutcome {
-    let output = match git_cmd(dir).args(fetch_args(remote)).output() {
+pub fn fetch(dir: Option<&Path>, remote: &str, submodules: SubmoduleFetch) -> FetchOutcome {
+    let mut command = git_cmd(dir);
+    command.args(fetch_args(remote));
+    if submodules == SubmoduleFetch::All {
+        command.arg("--recurse-submodules=yes");
+    }
+    let output = match command.output() {
         Ok(output) => output,
         Err(e) => return FetchOutcome::Failed(e.to_string()),
     };
@@ -306,6 +320,21 @@ pub fn fetch_in_background(remote: &str) -> std::io::Result<Child> {
 
 fn fetch_args(remote: &str) -> [&str; 4] {
     ["fetch", "--quiet", "--prune", remote]
+}
+
+/// Whether the config in force in `dir` switches a fetch's recursion into
+/// submodules off. `fetch.recurseSubmodules` takes precedence over
+/// `submodule.recurse`, and may say `on-demand` where the other is a boolean.
+#[must_use]
+pub fn submodule_fetch_switched_off(dir: &Path) -> bool {
+    let is_false = |key: &str| {
+        run_in(Some(dir), &["config", "--type=bool", "--get", key])
+            .is_ok_and(|value| value.trim() == "false")
+    };
+    if run_in(Some(dir), &["config", "--get", "fetch.recurseSubmodules"]).is_ok() {
+        return is_false("fetch.recurseSubmodules");
+    }
+    is_false("submodule.recurse")
 }
 
 /// The URL `remote` fetches from, as resolved in `dir`. The same remote name

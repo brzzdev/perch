@@ -260,7 +260,7 @@ fn refresh_current(remote: &str, current: &str) -> AppResult<()> {
         let _cursor_guard = CursorGuard::hide();
         spinner.enable_steady_tick(std::time::Duration::from_millis(80));
 
-        let fetch_outcome = git::fetch(None, remote);
+        let fetch_outcome = git::fetch(None, remote, git::SubmoduleFetch::Configured);
         let has_remote = git::remote_branch_exists(remote, current);
 
         spinner.finish_and_clear();

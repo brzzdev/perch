@@ -177,11 +177,8 @@ impl FetchedRemote {
     /// can fetch where another could not. Nor does a fetch cover a worktree
     /// with submodules, whose own fetch recurses into submodule repositories
     /// that only it has. `wt` skips the prefetch where any worktree has them,
-    /// so this is for one that gained them while the picker was open. Such a
-    /// fetch reaches its submodules only where recursion is forced: on demand,
-    /// it finds no superproject commit the prefetch has not already fetched.
-    /// That is an accepted limit, since closing it would mean forcing
-    /// recursion over the user's `fetch.recurseSubmodules`.
+    /// so this is for one that gained them while the picker was open, and
+    /// [`fetch_unless_covered`] forces that fetch's recursion.
     fn covers(&self, dir: Option<&Path>, remote: &str) -> bool {
         if self.name != remote {
             return false;
@@ -244,7 +241,21 @@ pub(crate) fn fetch_unless_covered(
     if fetched.is_some_and(|fetched| fetched.covers(dir, remote)) {
         return git::FetchOutcome::Ok;
     }
-    match git::fetch(dir, remote) {
+    // On demand, a worktree's fetch recurses only for gitlinks moved by the
+    // commits it fetched, and a prefetch that has already moved the shared
+    // refs leaves it none. So a worktree with submodules has them all fetched,
+    // unless its config switches recursion off.
+    let moved_the_refs =
+        fetched.is_some_and(|fetched| fetched.name == remote && fetched.failure.is_none());
+    let submodules = if moved_the_refs
+        && dir.is_some_and(|dir| {
+            dir.join(".gitmodules").exists() && !git::submodule_fetch_switched_off(dir)
+        }) {
+        git::SubmoduleFetch::All
+    } else {
+        git::SubmoduleFetch::Configured
+    };
+    match git::fetch(dir, remote, submodules) {
         git::FetchOutcome::Failed(detail)
             if fetched.is_some_and(|fetched| {
                 fetched.name == remote && fetched.failure.as_ref() == Some(&detail)
@@ -329,7 +340,7 @@ impl Prefetch {
                 // this process's own group, where nothing would clean it up.
                 git::FetchOutcome::Ok
             } else {
-                git::fetch(None, &remote)
+                git::fetch(None, &remote, git::SubmoduleFetch::Configured)
             };
             spinner.finish_and_clear();
             outcome

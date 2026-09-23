@@ -332,15 +332,16 @@ pub fn has_submodules(dir: &Path) -> bool {
 
 /// Whether the config in force in `dir` switches a fetch's recursion into
 /// submodules off. `fetch.recurseSubmodules` and `submodule.recurse` set the
-/// same thing, so whichever git reads last wins. Read through
-/// [`config_entries`], so as the fetch reads it.
+/// same thing, so whichever git reads last wins. Reads [`config_entries`],
+/// which leaves out `GIT_CONFIG` as `git fetch` does.
 #[must_use]
 pub fn submodule_fetch_switched_off(dir: &Path) -> bool {
     last_recursion_is_off(&config_entries(Some(dir)))
 }
 
-/// Takes [`config_entries`]: each a key, then a newline and the value where it
-/// has one. A key with no value is true, and `on-demand` is no boolean at all.
+/// Takes [`config_entries`]: each a key, lowercased by git, then a newline and
+/// the value where it has one. A key with no value is true, and `on-demand` is
+/// no boolean at all.
 fn last_recursion_is_off(entries: &[String]) -> bool {
     let Some(last) = entries.iter().rfind(|entry| {
         let key = entry

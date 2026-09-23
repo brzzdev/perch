@@ -332,26 +332,22 @@ pub fn has_submodules(dir: &Path) -> bool {
 
 /// Whether the config in force in `dir` switches a fetch's recursion into
 /// submodules off. `fetch.recurseSubmodules` and `submodule.recurse` set the
-/// same thing, so whichever git reads last wins.
+/// same thing, so whichever git reads last wins. Read through
+/// [`config_entries`], so as the fetch reads it.
 #[must_use]
 pub fn submodule_fetch_switched_off(dir: &Path) -> bool {
-    run_in(
-        Some(dir),
-        &[
-            "config",
-            "--null",
-            "--get-regexp",
-            r"^(fetch\.recursesubmodules|submodule\.recurse)$",
-        ],
-    )
-    .is_ok_and(|entries| last_recursion_is_off(&entries))
+    last_recursion_is_off(&config_entries(Some(dir)))
 }
 
-/// Reads `--null --get-regexp` output: entries in the order git reads them,
-/// each a key, then a newline and the value where it has one. A key with no
-/// value is true, and `on-demand` is no boolean at all.
-fn last_recursion_is_off(entries: &str) -> bool {
-    let Some(last) = entries.split('\0').rfind(|entry| !entry.is_empty()) else {
+/// Takes [`config_entries`]: each a key, then a newline and the value where it
+/// has one. A key with no value is true, and `on-demand` is no boolean at all.
+fn last_recursion_is_off(entries: &[String]) -> bool {
+    let Some(last) = entries.iter().rfind(|entry| {
+        let key = entry
+            .split_once('\n')
+            .map_or(entry.as_str(), |(key, _)| key);
+        matches!(key, "fetch.recursesubmodules" | "submodule.recurse")
+    }) else {
         return false;
     };
     let Some((_, value)) = last.split_once('\n') else {
@@ -1720,23 +1716,31 @@ mod tests {
     #[test]
     fn the_last_recursion_setting_decides() {
         for (entries, off) in [
-            ("", false),
+            (&["core.bare\nfalse"][..], false),
             (
-                "fetch.recursesubmodules\non-demand\0submodule.recurse\nfalse\0",
+                &[
+                    "fetch.recursesubmodules\non-demand",
+                    "submodule.recurse\nfalse",
+                ],
                 true,
             ),
             (
-                "fetch.recursesubmodules\ntrue\0submodule.recurse\nfalse\0",
+                &["fetch.recursesubmodules\ntrue", "submodule.recurse\nfalse"],
                 true,
             ),
             (
-                "submodule.recurse\nfalse\0fetch.recursesubmodules\non-demand\0",
+                &[
+                    "submodule.recurse\nfalse",
+                    "fetch.recursesubmodules\non-demand",
+                    "core.bare\nfalse",
+                ],
                 false,
             ),
-            ("submodule.recurse\nNo\0", true),
-            ("submodule.recurse\0", false),
+            (&["submodule.recurse\nNo"], true),
+            (&["submodule.recurse"], false),
         ] {
-            assert_eq!(last_recursion_is_off(entries), off, "{entries:?}");
+            let entries: Vec<String> = entries.iter().map(ToString::to_string).collect();
+            assert_eq!(last_recursion_is_off(&entries), off, "{entries:?}");
         }
     }
 

@@ -2376,14 +2376,15 @@ fn wt_still_fetches_a_worktree_whose_origin_points_elsewhere() {
 /// leave the target's own fetch nothing new to recurse for. So a repository
 /// with submodules skips the prefetch, and the target fetches for itself, once.
 /// A worktree that gains submodules only once the prefetch is under way has
-/// its own fetch recurse into all of them. Either way its submodule gets the
-/// commit its advanced gitlink names.
+/// its own fetch recurse into all of them, which a `GIT_CONFIG` switching
+/// recursion off must not stop, since `git fetch` ignores that file. Either way
+/// its submodule gets the commit its advanced gitlink names.
 #[test]
 fn wt_still_fetches_a_worktree_with_submodules() {
     // The mode git records a submodule's commit under in its superproject.
     const GITLINK_MODE: &str = "160000";
-    for gained_mid_run in [false, true] {
-        let case = format!("gained mid-run {gained_mid_run}");
+    for (gained_mid_run, git_config_off) in [(false, false), (true, false), (true, true)] {
+        let case = format!("gained mid-run {gained_mid_run}, GIT_CONFIG off {git_config_off}");
         let (bare, parent, work) = setup_with_parent();
         let submodule = TempDir::new().unwrap();
         git(submodule.path(), &["init", "--initial-branch=main"]);
@@ -2453,6 +2454,12 @@ fn wt_still_fetches_a_worktree_with_submodules() {
             .env("GIT_CONFIG_COUNT", "1")
             .env("GIT_CONFIG_KEY_0", "protocol.file.allow")
             .env("GIT_CONFIG_VALUE_0", "always");
+        if git_config_off {
+            let file = parent.path().join("git-config");
+            let config = fs::read_to_string(work.join(".git/config")).unwrap();
+            fs::write(&file, format!("{config}[submodule]\n\trecurse = false\n")).unwrap();
+            command.env("GIT_CONFIG", file);
+        }
 
         let (output, fetches) = perch_traced_with(&parent, command);
 

@@ -1501,7 +1501,13 @@ impl Steps for GitSteps {
         path: &Path,
         force: bool,
     ) -> AppResult<git::WorktreeRemoveOutcome> {
-        git::worktree_remove(path, force)
+        let outcome = git::worktree_remove(path, force)?;
+        // A staged worktree's trash still fills its parent, so this prunes
+        // nothing until the reclamation worker has deleted it.
+        if let (git::WorktreeRemoveOutcome::Removed, Some(main)) = (&outcome, &self.main) {
+            super::wt::prune_empty_parents(path, main);
+        }
+        Ok(outcome)
     }
 
     fn worktree_state(&mut self, path: &Path) -> FreshWorktree {

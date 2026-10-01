@@ -2825,6 +2825,25 @@ fn wt_refuses_when_target_path_is_stale_non_worktree_directory() {
     );
 }
 
+/// What a `git worktree remove` that deregistered but could not finish deleting
+/// leaves behind: an empty directory, with nothing in it to lose.
+#[test]
+fn wt_creates_over_an_empty_leftover_directory() {
+    let (_bare, parent, work) = setup_with_parent();
+
+    git(&work, &["branch", "feature"]);
+    let stale = parent.path().join("worktrees").join("repo").join("feature");
+    fs::create_dir_all(&stale).unwrap();
+
+    let output = perch_args(&work, &["wt", "feature"]);
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(
+        stale.join(".git").is_file(),
+        "worktree should be created at {}",
+        stale.display()
+    );
+}
+
 #[test]
 fn wt_recreates_worktree_whose_directory_was_deleted_by_hand() {
     let (_bare, parent, work) = setup_with_parent();
@@ -2902,6 +2921,30 @@ fn wt_rm_removes_worktree_and_deletes_branch() {
         "branch should be deleted; got: {}",
         stdout_str(&branches)
     );
+}
+
+/// The background worker deletes the files, so the directory a slash-named
+/// branch nests in only empties once it has finished.
+#[test]
+fn wt_rm_prunes_the_directories_a_nested_branch_leaves_empty() {
+    let (_bare, parent, work) = setup_with_parent();
+
+    git(&work, &["branch", "fix/login"]);
+    let root = parent.path().join("worktrees").join("repo");
+    let path = root.join("fix").join("login");
+    git(
+        &work,
+        &["worktree", "add", path.to_str().unwrap(), "fix/login"],
+    );
+
+    let output = perch_args(&work, &["wt", "rm", "fix/login"]);
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+
+    assert!(
+        poll_until(|| !root.join("fix").exists()),
+        "fix/ should be pruned once empty"
+    );
+    assert!(root.is_dir(), "the worktrees root should stay");
 }
 
 #[test]
@@ -5872,6 +5915,38 @@ fn a_chatty_wt_hook_cannot_corrupt_the_handoff() {
         "hook stdout should be re-emitted on stderr; got: {}",
         stderr_str(&output)
     );
+}
+
+/// Cleanup removes a stale branch's worktree synchronously rather than through
+/// the reclamation worker, so this is the other path that has to prune.
+#[test]
+fn a_stale_branch_taking_its_worktree_prunes_the_directories_it_leaves_empty() {
+    let (_bare, parent, work) = setup_with_parent();
+
+    git(&work, &["checkout", "-b", "fix/wip"]);
+    fs::write(work.join("wip.txt"), "x\n").unwrap();
+    git(&work, &["add", "wip.txt"]);
+    git(&work, &["commit", "-m", "wip"]);
+    git(&work, &["push", "-u", "origin", "fix/wip"]);
+    git(&work, &["push", "origin", "--delete", "fix/wip"]);
+    git(&work, &["checkout", "main"]);
+    git(&work, &["fetch", "--prune", "origin"]);
+    git(&work, &["branch", "dest", "main"]);
+
+    let root = parent.path().join("worktrees").join("repo");
+    let worktree = root.join("fix").join("wip");
+    git(
+        &work,
+        &["worktree", "add", worktree.to_str().unwrap(), "fix/wip"],
+    );
+
+    drive_cleanup_prompt(&work, "dest", "fix/wip", true, || {});
+
+    assert!(
+        !root.join("fix").exists(),
+        "fix/ should be pruned once empty"
+    );
+    assert!(root.is_dir(), "the worktrees root should stay");
 }
 
 /// A stale branch held by a worktree takes that worktree with it, which is as

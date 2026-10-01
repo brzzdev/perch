@@ -190,7 +190,9 @@ fn reclaim(requested: &Record) -> AppResult<()> {
         .status()?;
     if status.success() {
         let _ = forget_config(&config, &ready);
-        if let Some(main) = git::worktree_list()?.into_iter().find(|w| w.is_main) {
+        // Best-effort: the directory is already gone, which is what was asked.
+        let worktrees = git::worktree_list().unwrap_or_default();
+        if let Some(main) = worktrees.iter().find(|w| w.is_main) {
             super::wt::prune_empty_parents(&ready.trash, &main.path);
         }
     }

@@ -483,19 +483,18 @@ fn worktrees_root(main_path: &Path) -> AppResult<PathBuf> {
 }
 
 /// Deletes the directories a removed worktree leaves empty, such as the `fix/`
-/// that held `fix/login`. `remove_dir` refuses a directory with anything in it,
-/// so the walk stops at the first one still in use. It never climbs to the root
-/// or out of it, so a worktree added elsewhere by hand leaves its surroundings
-/// alone.
+/// that held `fix/login`, stopping at the first one still in use. It stays below
+/// the worktrees root, so a worktree added elsewhere by hand leaves its
+/// surroundings alone.
 pub(super) fn prune_empty_parents(removed: &Path, main_path: &Path) {
     let Ok(root) = worktrees_root(main_path) else {
         return;
     };
-    for dir in removed.ancestors().skip(1) {
-        if dir == root || !dir.starts_with(&root) || std::fs::remove_dir(dir).is_err() {
-            return;
-        }
-    }
+    let _ = removed
+        .ancestors()
+        .skip(1)
+        .take_while(|dir| dir.starts_with(&root) && *dir != root)
+        .try_for_each(std::fs::remove_dir);
 }
 
 fn ensure_path_clear(path: &Path) -> AppResult<()> {

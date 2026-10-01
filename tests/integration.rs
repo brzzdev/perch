@@ -2825,6 +2825,25 @@ fn wt_refuses_when_target_path_is_stale_non_worktree_directory() {
     );
 }
 
+/// What a `git worktree remove` that deregistered but could not finish deleting
+/// leaves behind: an empty directory, with nothing in it to lose.
+#[test]
+fn wt_creates_over_an_empty_leftover_directory() {
+    let (_bare, parent, work) = setup_with_parent();
+
+    git(&work, &["branch", "feature"]);
+    let stale = parent.path().join("worktrees").join("repo").join("feature");
+    fs::create_dir_all(&stale).unwrap();
+
+    let output = perch_args(&work, &["wt", "feature"]);
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(
+        stale.join(".git").is_file(),
+        "worktree should be created at {}",
+        stale.display()
+    );
+}
+
 #[test]
 fn wt_recreates_worktree_whose_directory_was_deleted_by_hand() {
     let (_bare, parent, work) = setup_with_parent();
@@ -2902,6 +2921,30 @@ fn wt_rm_removes_worktree_and_deletes_branch() {
         "branch should be deleted; got: {}",
         stdout_str(&branches)
     );
+}
+
+/// The background worker deletes the files, so the directory a slash-named
+/// branch nests in only empties once it has finished.
+#[test]
+fn wt_rm_prunes_the_directories_a_nested_branch_leaves_empty() {
+    let (_bare, parent, work) = setup_with_parent();
+
+    git(&work, &["branch", "fix/login"]);
+    let root = parent.path().join("worktrees").join("repo");
+    let path = root.join("fix").join("login");
+    git(
+        &work,
+        &["worktree", "add", path.to_str().unwrap(), "fix/login"],
+    );
+
+    let output = perch_args(&work, &["wt", "rm", "fix/login"]);
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+
+    assert!(
+        poll_until(|| !root.join("fix").exists()),
+        "fix/ should be pruned once empty"
+    );
+    assert!(root.is_dir(), "the worktrees root should stay");
 }
 
 #[test]

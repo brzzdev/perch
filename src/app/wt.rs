@@ -351,7 +351,7 @@ fn create_worktree(
     remote: &str,
     fetched: Option<&FetchedRemote>,
 ) -> AppResult<PathBuf> {
-    let path = worktree_path_for(main_path, worktree_name)?;
+    let path = worktrees_root(main_path)?.join(worktree_name);
     ensure_path_clear(&path)?;
     ensure_parent(&path);
 
@@ -468,7 +468,9 @@ fn main_of(worktrees: &[git::Worktree]) -> AppResult<&git::Worktree> {
         })
 }
 
-fn worktree_path_for(main_path: &Path, worktree_name: &str) -> AppResult<PathBuf> {
+/// Where perch puts a repository's worktrees: `worktrees/<repo>` beside its main
+/// worktree.
+fn worktrees_root(main_path: &Path) -> AppResult<PathBuf> {
     let parent = main_path.parent().ok_or_else(|| Error::Git {
         command: "worktree".into(),
         message: format!("main worktree has no parent: {}", main_path.display()),
@@ -477,11 +479,30 @@ fn worktree_path_for(main_path: &Path, worktree_name: &str) -> AppResult<PathBuf
         command: "worktree".into(),
         message: format!("cannot determine repo name from {}", main_path.display()),
     })?;
-    Ok(parent.join("worktrees").join(repo_name).join(worktree_name))
+    Ok(parent.join("worktrees").join(repo_name))
+}
+
+/// Deletes the directories a removed worktree leaves empty, such as the `fix/`
+/// that held `fix/login`. `remove_dir` refuses a directory with anything in it,
+/// so the walk stops at the first one still in use. It never climbs to the root
+/// or out of it, so a worktree added elsewhere by hand leaves its surroundings
+/// alone.
+pub(super) fn prune_empty_parents(removed: &Path, main_path: &Path) {
+    let Ok(root) = worktrees_root(main_path) else {
+        return;
+    };
+    for dir in removed.ancestors().skip(1) {
+        if dir == root || !dir.starts_with(&root) || std::fs::remove_dir(dir).is_err() {
+            return;
+        }
+    }
 }
 
 fn ensure_path_clear(path: &Path) -> AppResult<()> {
-    if path.exists() {
+    // An empty directory has nothing to lose, such as the one a `git worktree
+    // remove` leaves when it deregisters but cannot finish deleting.
+    // `remove_dir` refuses anything that isn't empty.
+    if path.exists() && std::fs::remove_dir(path).is_err() {
         return Err(Error::Git {
             command: "worktree add".into(),
             message: format!(

@@ -500,7 +500,6 @@ pub(super) fn prune_empty_parents(removed: &Path, main_path: &Path) {
 fn ensure_path_clear(path: &Path) -> AppResult<()> {
     // An empty directory has nothing to lose, such as the one a `git worktree
     // remove` leaves when it deregisters but cannot finish deleting.
-    // `remove_dir` refuses anything that isn't empty.
     if path.exists() && std::fs::remove_dir(path).is_err() {
         return Err(Error::Git {
             command: "worktree add".into(),

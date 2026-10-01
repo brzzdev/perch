@@ -5917,6 +5917,38 @@ fn a_chatty_wt_hook_cannot_corrupt_the_handoff() {
     );
 }
 
+/// Cleanup removes a stale branch's worktree synchronously rather than through
+/// the reclamation worker, so this is the other path that has to prune.
+#[test]
+fn a_stale_branch_taking_its_worktree_prunes_the_directories_it_leaves_empty() {
+    let (_bare, parent, work) = setup_with_parent();
+
+    git(&work, &["checkout", "-b", "fix/wip"]);
+    fs::write(work.join("wip.txt"), "x\n").unwrap();
+    git(&work, &["add", "wip.txt"]);
+    git(&work, &["commit", "-m", "wip"]);
+    git(&work, &["push", "-u", "origin", "fix/wip"]);
+    git(&work, &["push", "origin", "--delete", "fix/wip"]);
+    git(&work, &["checkout", "main"]);
+    git(&work, &["fetch", "--prune", "origin"]);
+    git(&work, &["branch", "dest", "main"]);
+
+    let root = parent.path().join("worktrees").join("repo");
+    let worktree = root.join("fix").join("wip");
+    git(
+        &work,
+        &["worktree", "add", worktree.to_str().unwrap(), "fix/wip"],
+    );
+
+    drive_cleanup_prompt(&work, "dest", "fix/wip", true, || {});
+
+    assert!(
+        !root.join("fix").exists(),
+        "fix/ should be pruned once empty"
+    );
+    assert!(root.is_dir(), "the worktrees root should stay");
+}
+
 /// A stale branch held by a worktree takes that worktree with it, which is as
 /// much a removal as `wt rm` is — so the hook fires there too. Without it,
 /// `perch wt <branch>` could announce a creation and then silently destroy

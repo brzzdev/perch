@@ -4818,7 +4818,7 @@ impl ChildGuard {
     }
 }
 
-/// [`perch_command`] for a pty run, with hooks off as [`perch_args`] has them.
+/// The pty counterpart of [`perch_args`]: `perch` in `dir` with hooks off.
 fn perch_pty_command(dir: &Path, args: &[&str]) -> portable_pty::CommandBuilder {
     let mut cmd = portable_pty::CommandBuilder::new(env!("CARGO_BIN_EXE_perch"));
     cmd.args(args);
@@ -4833,8 +4833,8 @@ fn perch_pty_command(dir: &Path, args: &[&str]) -> portable_pty::CommandBuilder 
 /// ends of the pty drop before that thread is joined, or it never sees EOF.
 struct PtySession {
     child: ChildGuard,
-    master: Box<dyn portable_pty::MasterPty + Send>,
     drain: std::thread::JoinHandle<()>,
+    master: Box<dyn portable_pty::MasterPty + Send>,
     seen: Arc<Mutex<Vec<u8>>>,
     writer: Box<dyn std::io::Write + Send>,
 }

@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use console::style;
 
-use super::{display_path, hook, marker, picker, reclamation, shell_quote};
+use super::{display_path, hook, marker, picker, reclamation, shell_quote, warn};
 use crate::{AppResult, Error, git};
 
 mod reporting;
@@ -588,7 +588,7 @@ fn prepare_upstream(
         Err(error) => {
             return Ok(UpstreamPreparation::Notice(format!(
                 "{} could not read the upstream of {branch}: {error}; offering local removal only",
-                super::warn(),
+                warn(),
             )));
         }
     };
@@ -609,7 +609,7 @@ fn prepare_upstream(
         Ok(git::UpstreamInspection::Absent(upstream)) if named => {
             Ok(UpstreamPreparation::Notice(format!(
                 "{} upstream {}/{} is already absent",
-                super::warn(),
+                warn(),
                 upstream.remote,
                 upstream.branch,
             )))
@@ -642,7 +642,7 @@ fn prepare_upstream(
             } else {
                 Ok(UpstreamPreparation::Notice(format!(
                     "{} {reason}; offering local removal only",
-                    super::warn()
+                    warn()
                 )))
             }
         }
@@ -650,7 +650,7 @@ fn prepare_upstream(
         Err(error) if requested => Ok(UpstreamPreparation::Failure(error.to_string())),
         Err(error) => Ok(UpstreamPreparation::Notice(format!(
             "{} could not inspect the upstream of {branch}: {error}; offering local removal only",
-            super::warn(),
+            warn(),
         ))),
     }
 }
@@ -737,7 +737,7 @@ impl Pending {
             if let Some(error) = local.preparation_failure {
                 reporter.emit(format!(
                     "{} could not prepare upstream removal for {display_name}: {error}; kept the local branch",
-                    super::warn(),
+                    warn(),
                 ));
                 outcome.failed = true;
                 continue;
@@ -754,7 +754,7 @@ impl Pending {
                 Err(error) => {
                     reporter.emit(format!(
                         "{} could not remove {display_name}: {error}",
-                        super::warn(),
+                        warn(),
                     ));
                     outcome.failed = true;
                     continue;
@@ -797,7 +797,7 @@ impl Pending {
                 Err(error) => {
                     reporter.emit(format!(
                         "{} could not delete upstream {}/{}: {error}",
-                        super::warn(),
+                        warn(),
                         upstream.remote,
                         upstream.branch,
                     ));

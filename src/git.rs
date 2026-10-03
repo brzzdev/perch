@@ -121,6 +121,7 @@ pub fn same_named_upstream(branch: &str) -> AppResult<Option<UpstreamRef>> {
         let name = parts.next()?;
         let remote = parts.next()?;
         let upstream_ref = parts.next()?;
+        // Same-named: the upstream's ref on the remote spells the local one.
         let tracks_same_name =
             name == branch && !remote.is_empty() && remote != "." && upstream_ref == local_ref;
         tracks_same_name.then(|| UpstreamRef {

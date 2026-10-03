@@ -10,7 +10,7 @@ use super::prefetch::{FetchedRemote, Prefetch, fetch_unless_covered};
 use super::{
     build_catalogue, display_path, fetch_and_ff, handoff_cd, hook, marker, picker,
     prompt_delete_stale_branches, removal, report_fetch_failure, report_update,
-    select_removal_locals,
+    select_removal_locals, spinner, warn,
 };
 use crate::grammar::{ShellHandoff, Verb, WorktreeRemoval};
 use crate::{AppResult, Error, git};
@@ -97,7 +97,7 @@ pub(crate) fn run(
             // The worktree's branch may track a different remote than ours.
             let branch_remote = git::current_remote(Some(branch.as_str()));
             if let Err(e) = update_in(&wt.path, &branch, &branch_remote, fetched.as_ref()) {
-                eprintln!("{} update of {branch} failed: {e}", super::warn());
+                eprintln!("{} update of {branch} failed: {e}", warn());
             }
             if shell_handoff == ShellHandoff::Emit {
                 eprintln!(
@@ -152,7 +152,7 @@ pub(crate) fn run(
         if e.is_interrupt() {
             return Err(e);
         }
-        eprintln!("{} stale-branch check failed: {e}", super::warn());
+        eprintln!("{} stale-branch check failed: {e}", warn());
     }
     if shell_handoff == ShellHandoff::Emit {
         handoff_cd(&target_path);
@@ -235,7 +235,7 @@ pub(crate) fn run_rm(options: &WorktreeRemoval) -> AppResult<()> {
     let choice = selection.into_choice();
     let pending = assessment.choose(choice)?;
     let result = {
-        let (spinner, _cursor) = super::spinner(progress_message);
+        let (spinner, _cursor) = spinner(progress_message);
         let result = pending.finish(
             removal::UpstreamChoice::keep(),
             RemovalProgress { spinner: &spinner },
@@ -313,7 +313,7 @@ pub(crate) fn update_in(
     match fetch_and_ff(Some(path), branch, remote, fetched)? {
         git::FastForwardResult::Diverged => eprintln!(
             "{} {} has diverged from {}/{}; not updating.",
-            super::warn(),
+            warn(),
             branch,
             remote,
             branch,
@@ -347,7 +347,7 @@ fn create_worktree(
     ensure_parent(&path);
 
     let (fetch_outcome, result) = {
-        let (spinner, _cursor) = super::spinner(format!("Fetching {remote}…"));
+        let (spinner, _cursor) = spinner(format!("Fetching {remote}…"));
         let fetch_outcome = fetch_unless_covered(None, remote, fetched);
         spinner.set_message(format!("Creating worktree for {branch}…"));
         let outcome = git::worktree_add(&path, branch, base);

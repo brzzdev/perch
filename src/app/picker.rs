@@ -72,9 +72,11 @@ mod raw {
             Ok(Self)
         }
 
-        // `&self` is a capability token: holding the guard proves raw mode is
-        // active, even though reading uses crossterm's global event source.
-        #[expect(clippy::unused_self)]
+        #[expect(
+            clippy::unused_self,
+            reason = "`&self` is a capability token: holding the guard proves raw mode is \
+                      active, even though reading uses crossterm's global event source"
+        )]
         pub(crate) fn read_key(&self) -> io::Result<Key> {
             loop {
                 let Event::Key(event) = read()? else {

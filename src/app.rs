@@ -37,6 +37,14 @@ impl CursorGuard {
     }
 }
 
+impl Drop for CursorGuard {
+    fn drop(&mut self) {
+        if let Some(term) = &self.0 {
+            let _ = term.show_cursor();
+        }
+    }
+}
+
 /// The glyph fronting a line that reports something going wrong, or a risk about
 /// to be taken.
 pub(crate) fn warn() -> StyledObject<&'static str> {
@@ -50,14 +58,6 @@ pub(crate) fn spinner(message: impl Into<Cow<'static, str>>) -> (ProgressBar, Cu
     let cursor = CursorGuard::hide();
     spinner.enable_steady_tick(Duration::from_millis(80));
     (spinner, cursor)
-}
-
-impl Drop for CursorGuard {
-    fn drop(&mut self) {
-        if let Some(term) = &self.0 {
-            let _ = term.show_cursor();
-        }
-    }
 }
 
 /// The stderr terminal, but only when it's interactive. Returns `None` in

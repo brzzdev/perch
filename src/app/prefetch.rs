@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use super::report_fetch_failure;
+use super::{report_fetch_failure, spinner};
 use crate::{AppResult, git};
 
 /// How long git gets to act on SIGTERM before the group is killed outright.
@@ -314,7 +314,7 @@ impl Prefetch {
     pub(crate) fn join(mut self) -> AppResult<FetchedRemote> {
         let remote = std::mem::take(&mut self.remote);
         let outcome = {
-            let (spinner, _cursor) = super::spinner(format!("Fetching {remote}…"));
+            let (spinner, _cursor) = spinner(format!("Fetching {remote}…"));
             let succeeded = self.child.take().is_some_and(|mut child| {
                 wait_for_exit(&child);
                 let _signalling = signalling();

@@ -1,3 +1,4 @@
+use std::assert_matches;
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs;
@@ -209,11 +210,16 @@ fn push_upstream_change_to(work: &Path, remote: &str, file: &str, content: &str,
 
 fn clone_bare(bare: &Path) -> TempDir {
     let dir = TempDir::new().unwrap();
-    Command::new("git")
+    let output = Command::new("git")
         .args(["clone", bare.to_str().unwrap(), "."])
         .current_dir(dir.path())
         .output()
         .expect("failed to clone");
+    assert!(
+        output.status.success(),
+        "clone failed: {}",
+        stderr_str(&output)
+    );
     dir
 }
 
@@ -1029,8 +1035,9 @@ fn force_delete_branch_removes_branch() {
     for name in ["feat-a", "feat-b"] {
         let outcome = perch::git::force_delete_branch(None, name)
             .expect("force_delete_branch should not error");
-        assert!(
-            matches!(outcome, perch::git::BranchDeleteOutcome::Deleted),
+        assert_matches!(
+            outcome,
+            perch::git::BranchDeleteOutcome::Deleted,
             "{name} should report as deleted"
         );
     }
@@ -1501,29 +1508,6 @@ fn complete_offers_a_branch_that_exists_only_on_the_remote() {
 }
 
 #[test]
-fn help_flag_prints_usage() {
-    let dir = TempDir::new().unwrap();
-    let output = perch(dir.path(), "--help");
-
-    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
-    let out = stdout_str(&output);
-    assert!(
-        out.contains("Usage: perch"),
-        "expected usage line, got: {out}"
-    );
-    assert!(
-        out.contains("perch wt"),
-        "expected worktree usage in help, got: {out}"
-    );
-    // The footer is the only place the shell shortcuts are advertised, so it is
-    // how anyone learns `br`/`wt` exist and that they can be turned off.
-    assert!(
-        out.contains("PERCH_NO_SHORTCUTS"),
-        "expected the shell shortcut footer in help, got: {out}"
-    );
-}
-
-#[test]
 fn help_pages_remain_exact_static_text() {
     let dir = TempDir::new().unwrap();
     for (args, expected) in [
@@ -1541,31 +1525,6 @@ fn help_pages_remain_exact_static_text() {
         assert!(output.status.success(), "stderr: {}", stderr_str(&output));
         assert_eq!(stdout_str(&output), expected);
     }
-}
-
-#[test]
-fn wt_help_documents_no_switch() {
-    let dir = TempDir::new().unwrap();
-    let output = perch_args(dir.path(), &["wt", "--help"]);
-
-    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
-    assert!(
-        stdout_str(&output).contains("--no-switch"),
-        "expected worktree help to document the flag, got: {}",
-        stdout_str(&output)
-    );
-}
-
-#[test]
-fn br_help_documents_removal_without_a_short_force_flag() {
-    let dir = TempDir::new().unwrap();
-    let output = perch_args(dir.path(), &["br", "--help"]);
-
-    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
-    let help = stdout_str(&output);
-    assert!(help.contains("perch br rm [<branch>] [--upstream] [--force]"));
-    assert!(help.contains("perch br -- <branch>"));
-    assert!(!help.contains("-f, --force"));
 }
 
 #[test]
@@ -1672,10 +1631,7 @@ fn rebase_replays_local_commits_onto_remote() {
     let _cwd = cwd_at(work.path());
     let outcome = perch::git::rebase("origin/feature").expect("rebase call failed");
 
-    assert!(
-        matches!(outcome, perch::git::RebaseOutcome::Clean),
-        "expected Clean rebase outcome"
-    );
+    assert_matches!(outcome, perch::git::RebaseOutcome::Clean);
     assert!(
         work.path().join("local.txt").exists(),
         "local.txt should survive the rebase"
@@ -1714,10 +1670,7 @@ fn rebase_aborts_on_conflict_and_leaves_clean_tree() {
     let _cwd = cwd_at(work.path());
     let outcome = perch::git::rebase("origin/feature").expect("rebase call failed");
 
-    assert!(
-        matches!(outcome, perch::git::RebaseOutcome::Aborted),
-        "expected Aborted rebase outcome"
-    );
+    assert_matches!(outcome, perch::git::RebaseOutcome::Aborted);
 
     let git_dir = work.path().join(".git");
     assert!(
@@ -1883,7 +1836,11 @@ fn wt_rejects_an_unknown_option_before_the_directory_name() {
     let output = perch_args(&work, &["wt", "--noswitch", "feature"]);
 
     assert!(!output.status.success());
-    assert!(stderr_str(&output).contains("unknown option '--noswitch'"));
+    assert!(
+        stderr_str(&output).contains("unknown option '--noswitch'"),
+        "stderr: {}",
+        stderr_str(&output)
+    );
     assert!(!parent.path().join("worktrees/repo/--noswitch").exists());
 }
 
@@ -1894,7 +1851,11 @@ fn wt_rejects_an_unknown_option_in_the_branch_position() {
     let output = perch_args(&work, &["wt", "short", "--typo"]);
 
     assert!(!output.status.success());
-    assert!(stderr_str(&output).contains("unknown option '--typo'"));
+    assert!(
+        stderr_str(&output).contains("unknown option '--typo'"),
+        "stderr: {}",
+        stderr_str(&output)
+    );
     assert!(!parent.path().join("worktrees/repo/short").exists());
 }
 
@@ -1906,12 +1867,20 @@ fn wt_rejects_invalid_directory_names_and_a_third_argument() {
     for name in [".", "..", "nested/name", r"nested\name"] {
         let output = perch_args(&work, &["wt", name, "feature"]);
         assert!(!output.status.success(), "{name:?} should be rejected");
-        assert!(stderr_str(&output).contains("invalid worktree directory name"));
+        assert!(
+            stderr_str(&output).contains("invalid worktree directory name"),
+            "stderr: {}",
+            stderr_str(&output)
+        );
     }
 
     let output = perch_args(&work, &["wt", "short", "feature", "extra"]);
     assert!(!output.status.success());
-    assert!(stderr_str(&output).contains("unexpected extra argument 'extra'"));
+    assert!(
+        stderr_str(&output).contains("unexpected extra argument 'extra'"),
+        "stderr: {}",
+        stderr_str(&output)
+    );
     assert!(!parent.path().join("worktrees/repo/short").exists());
 }
 
@@ -3315,15 +3284,27 @@ fn br_rm_rejects_unknown_options_and_extra_targets() {
 
     let unknown = perch_args(work.path(), &["br", "rm", "--remote", "feature"]);
     assert!(!unknown.status.success());
-    assert!(stderr_str(&unknown).contains("unknown option '--remote'"));
+    assert!(
+        stderr_str(&unknown).contains("unknown option '--remote'"),
+        "stderr: {}",
+        stderr_str(&unknown)
+    );
 
     let extra = perch_args(work.path(), &["br", "rm", "one", "two"]);
     assert!(!extra.status.success());
-    assert!(stderr_str(&extra).contains("unexpected extra target 'two'"));
+    assert!(
+        stderr_str(&extra).contains("unexpected extra target 'two'"),
+        "stderr: {}",
+        stderr_str(&extra)
+    );
 
     let short_force = perch_args(work.path(), &["br", "rm", "feature", "-f"]);
     assert!(!short_force.status.success());
-    assert!(stderr_str(&short_force).contains("unknown option '-f'"));
+    assert!(
+        stderr_str(&short_force).contains("unknown option '-f'"),
+        "stderr: {}",
+        stderr_str(&short_force)
+    );
 }
 
 #[test]
@@ -3338,14 +3319,13 @@ fn br_rm_picker_shows_but_does_not_select_disabled_branches() {
         &["worktree", "add", held_path.to_str().unwrap(), "held"],
     );
 
-    let output = String::from_utf8_lossy(&drive_multi_select_prompt(
+    let output = String::from_utf8_lossy_owned(drive_multi_select_prompt(
         &work,
         &["br", "rm", "--force"],
         "free",
         false,
         || {},
-    ))
-    .into_owned();
+    ));
 
     assert!(!local_branch_exists(&work, "free"));
     for branch in ["current", "held"] {
@@ -3370,14 +3350,13 @@ fn br_rm_picker_offers_a_kept_branch_and_the_default_branch() {
     git(work.path(), &["config", "--add", "perch.keep", "kept"]);
     git(work.path(), &["switch", "-c", "topic"]);
 
-    let output = String::from_utf8_lossy(&drive_multi_select_prompt(
+    let output = String::from_utf8_lossy_owned(drive_multi_select_prompt(
         work.path(),
         &["br", "rm", "--force"],
         "kept",
         false,
         || {},
-    ))
-    .into_owned();
+    ));
 
     assert!(
         !local_branch_exists(work.path(), "kept"),
@@ -3488,7 +3467,11 @@ fn br_rm_upstream_refuses_an_untracked_branch_before_local_deletion() {
 
     assert!(!output.status.success());
     assert!(local_branch_exists(work.path(), "feature"));
-    assert!(stderr_str(&output).contains("no explicit same-named upstream"));
+    assert!(
+        stderr_str(&output).contains("no explicit same-named upstream"),
+        "stderr: {}",
+        stderr_str(&output)
+    );
 }
 
 #[test]
@@ -3556,7 +3539,10 @@ fn br_rm_named_upstream_confirmation_defaults_off() {
 
     assert!(!local_branch_exists(work.path(), "feature"));
     assert!(remote_branch_tip(work.path(), "origin", "feature").is_some());
-    assert!(output.contains("deleting origin/feature removes a shared upstream ref"));
+    assert!(
+        output.contains("deleting origin/feature removes a shared upstream ref"),
+        "output: {output}"
+    );
 }
 
 #[test]
@@ -3573,7 +3559,10 @@ fn br_rm_upstream_flag_preselects_the_named_confirmation() {
 
     assert!(!local_branch_exists(work.path(), "feature"));
     assert_eq!(remote_branch_tip(work.path(), "origin", "feature"), None);
-    assert!(output.contains("deleted upstream origin/feature"));
+    assert!(
+        output.contains("deleted upstream origin/feature"),
+        "output: {output}"
+    );
 }
 
 #[test]
@@ -3651,7 +3640,7 @@ fn br_rm_batch_keeps_a_failed_local_and_its_upstream_then_continues() {
     git(&work, &["push", "-u", "origin", "a"]);
     let held = parent.path().join("held-a");
 
-    let output = String::from_utf8_lossy(&drive_multi_select_prompt(
+    let output = String::from_utf8_lossy_owned(drive_multi_select_prompt(
         &work,
         &["br", "rm", "--upstream", "--force"],
         "a",
@@ -3659,8 +3648,7 @@ fn br_rm_batch_keeps_a_failed_local_and_its_upstream_then_continues() {
         || {
             git(&work, &["worktree", "add", held.to_str().unwrap(), "a"]);
         },
-    ))
-    .into_owned();
+    ));
 
     assert!(local_branch_exists(&work, "a"));
     assert!(!local_branch_exists(&work, "b"));
@@ -3695,14 +3683,13 @@ fn br_rm_batch_continues_after_explicit_upstream_inspection_failure() {
     git(work.path(), &["config", "branch.a.remote", "broken"]);
     git(work.path(), &["config", "branch.a.merge", "refs/heads/a"]);
 
-    let output = String::from_utf8_lossy(&drive_multi_select_prompt(
+    let output = String::from_utf8_lossy_owned(drive_multi_select_prompt(
         work.path(),
         &["br", "rm", "--upstream", "--force"],
         "a",
         false,
         || {},
-    ))
-    .into_owned();
+    ));
 
     assert!(local_branch_exists(work.path(), "a"));
     assert!(!local_branch_exists(work.path(), "b"));
@@ -3710,7 +3697,10 @@ fn br_rm_batch_continues_after_explicit_upstream_inspection_failure() {
         output.contains("could not prepare upstream removal for a"),
         "the failed pair should be reported in row order: {output}"
     );
-    assert!(output.contains("one or more requested removals failed"));
+    assert!(
+        output.contains("one or more requested removals failed"),
+        "output: {output}"
+    );
     assert!(
         output
             .find("could not prepare upstream removal for a")
@@ -3784,11 +3774,10 @@ fn upstream_deletion_lease_refuses_a_ref_that_moved_after_inspection() {
     })
     .unwrap();
 
-    assert!(matches!(
+    assert_matches!(
         outcome,
-        perch::git::RemoteBranchDeleteOutcome::Moved { expected, .. }
-            if expected == shown_tip
-    ));
+        perch::git::RemoteBranchDeleteOutcome::Moved { expected, .. } if expected == shown_tip
+    );
     assert!(remote_branch_tip(work.path(), "origin", "feature").is_some());
 }
 
@@ -4808,11 +4797,13 @@ fn a_staged_record_never_reclaims_an_existing_original() {
     let output = perch_args(&work, &["wt", "ls"]);
 
     assert!(output.status.success(), "stderr: {}", stderr_str(&output));
-    assert!(original.join("keep").exists());
+    // The worker is detached: wait for it to finish before checking it spared
+    // the original, or the check races a worker that would delete it.
     assert!(
         poll_until(|| reclamation_record_is_cleared(&work)),
         "a restored staged record should be cleared"
     );
+    assert!(original.join("keep").exists());
 }
 
 /// How long the pty test is willing to wait on its child. Generous enough that
@@ -5039,13 +5030,13 @@ fn drive_confirmation(work: &Path, args: &[&str], prompt: &str, key: &[u8]) -> S
     drop(writer);
     drop(pty.master);
     output.join().unwrap();
-    String::from_utf8_lossy(&Arc::try_unwrap(seen).unwrap().into_inner().unwrap()).into_owned()
+    String::from_utf8_lossy_owned(Arc::try_unwrap(seen).unwrap().into_inner().unwrap())
 }
 
 /// [`drive_cleanup_prompt`] with hooks off and nothing to do between ticking and
 /// confirming, read back as text — what most callers want.
 fn cleanup_prompt(work: &Path, target: &str, row: &str) -> String {
-    String::from_utf8_lossy(&drive_cleanup_prompt(work, target, row, false, || {})).into_owned()
+    String::from_utf8_lossy_owned(drive_cleanup_prompt(work, target, row, false, || {}))
 }
 
 /// Drives the branch picker over a real pty: filters to `branch`, waits for the

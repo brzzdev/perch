@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use console::style;
 
-use super::{display_path, hook, marker, picker, reclamation, shell_quote};
+use super::{display_path, hook, marker, picker, reclamation, shell_quote, warn};
 use crate::{AppResult, Error, git};
 
 mod reporting;
@@ -308,11 +308,7 @@ impl Assessment {
 
     pub(crate) fn named(&self, name: &str) -> AppResult<NamedOffer> {
         let id = match self.kind {
-            RequestKind::Branches => self
-                .locals
-                .iter()
-                .position(|local| local.target.name() == Some(name)),
-            RequestKind::Stale => self
+            RequestKind::Branches | RequestKind::Stale => self
                 .locals
                 .iter()
                 .position(|local| local.target.name() == Some(name)),
@@ -592,7 +588,7 @@ fn prepare_upstream(
         Err(error) => {
             return Ok(UpstreamPreparation::Notice(format!(
                 "{} could not read the upstream of {branch}: {error}; offering local removal only",
-                style("!").yellow().bold(),
+                warn(),
             )));
         }
     };
@@ -613,7 +609,7 @@ fn prepare_upstream(
         Ok(git::UpstreamInspection::Absent(upstream)) if named => {
             Ok(UpstreamPreparation::Notice(format!(
                 "{} upstream {}/{} is already absent",
-                style("!").yellow().bold(),
+                warn(),
                 upstream.remote,
                 upstream.branch,
             )))
@@ -646,7 +642,7 @@ fn prepare_upstream(
             } else {
                 Ok(UpstreamPreparation::Notice(format!(
                     "{} {reason}; offering local removal only",
-                    style("!").yellow().bold()
+                    warn()
                 )))
             }
         }
@@ -654,7 +650,7 @@ fn prepare_upstream(
         Err(error) if requested => Ok(UpstreamPreparation::Failure(error.to_string())),
         Err(error) => Ok(UpstreamPreparation::Notice(format!(
             "{} could not inspect the upstream of {branch}: {error}; offering local removal only",
-            style("!").yellow().bold(),
+            warn(),
         ))),
     }
 }
@@ -737,11 +733,11 @@ impl Pending {
             Reclamation::Synchronous
         };
         for local in self.locals {
-            let display_name = local.target.name().unwrap_or("this worktree").to_string();
+            let display_name = local.target.name().unwrap_or("this worktree");
             if let Some(error) = local.preparation_failure {
                 reporter.emit(format!(
                     "{} could not prepare upstream removal for {display_name}: {error}; kept the local branch",
-                    style("!").yellow().bold(),
+                    warn(),
                 ));
                 outcome.failed = true;
                 continue;
@@ -758,7 +754,7 @@ impl Pending {
                 Err(error) => {
                     reporter.emit(format!(
                         "{} could not remove {display_name}: {error}",
-                        style("!").yellow().bold(),
+                        warn(),
                     ));
                     outcome.failed = true;
                     continue;
@@ -801,7 +797,7 @@ impl Pending {
                 Err(error) => {
                     reporter.emit(format!(
                         "{} could not delete upstream {}/{}: {error}",
-                        style("!").yellow().bold(),
+                        warn(),
                         upstream.remote,
                         upstream.branch,
                     ));
@@ -1196,7 +1192,8 @@ fn build_worktree_assessment(
     for (index, (worktree, contains_cwd)) in removable.into_iter().enumerate() {
         let assess_dirtiness = request.target.is_none()
             || (request.forcing == Forcing::Unforced
-                && worktree_target.as_ref().and_then(|request| request.id) == Some(LocalId(index)));
+                && worktree_target.as_ref().and_then(|resolved| resolved.id)
+                    == Some(LocalId(index)));
         let risk = Risk {
             // INVARIANT: Named assessments never render unassessed dirtiness.
             // Non-target rows are unreachable, and --force consumes no warnings.
@@ -1590,10 +1587,9 @@ fn remove<'a>(
             BranchLicense::Proven(proof)
                 if steps.resolve(&proof.anchor_ref).as_ref() == Some(&proof.anchor_tip) =>
             {
-                match steps.delete_branch_at(branch, &proof.tip) {
-                    Ok(Some(outcome)) => Ok(outcome),
-                    Ok(None) => steps.delete_branch(branch, false),
-                    Err(error) => Err(error),
+                match steps.delete_branch_at(branch, &proof.tip)? {
+                    Some(outcome) => Ok(outcome),
+                    None => steps.delete_branch(branch, false),
                 }
             }
             BranchLicense::None | BranchLicense::Proven(_) => steps.delete_branch(branch, false),
@@ -1654,11 +1650,12 @@ fn remove_worktree_in_background(
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
     use std::collections::HashMap;
     use std::env;
     use std::fs;
     use std::process::Command;
-    use std::sync::Mutex;
+    use std::sync::{Mutex, PoisonError};
 
     use super::*;
     use tempfile::TempDir;
@@ -1746,7 +1743,7 @@ mod tests {
             }),
             "↑"
         );
-        assert!(Risk::default().markers().is_empty());
+        assert_eq!(Risk::default().markers(), "");
     }
 
     #[test]
@@ -1839,7 +1836,7 @@ mod tests {
             .choose(LocalChoice::forced(named.id()))
             .expect("forced Removal");
 
-        assert!(dirty_paths.is_empty());
+        assert_eq!(dirty_paths, Vec::<PathBuf>::new());
     }
 
     #[test]
@@ -2445,7 +2442,7 @@ mod tests {
 
     #[test]
     fn branch_removal_crosses_the_staged_interface() {
-        let _lock = REPO_LOCK.lock().expect("repository lock");
+        let _lock = REPO_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         let repo = Repo::new();
         repo.add_feature();
         let worktrees = git::worktree_list().expect("worktrees");
@@ -2478,7 +2475,7 @@ mod tests {
 
     #[test]
     fn forced_picker_worktree_removal_returns_one_complete_outcome() {
-        let _lock = REPO_LOCK.lock().expect("repository lock");
+        let _lock = REPO_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         let repo = Repo::new();
         repo.add_feature();
         let worktree_path = repo.path().join("feature-worktree");
@@ -2526,7 +2523,7 @@ mod tests {
 
     #[test]
     fn worktree_removal_emits_its_outcome_before_firing_the_hook() {
-        let _lock = REPO_LOCK.lock().expect("repository lock");
+        let _lock = REPO_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         let repo = Repo::new();
         let pending = pending_with_local(
             RequestKind::Worktrees,
@@ -2905,7 +2902,7 @@ mod tests {
 
     #[test]
     fn a_fatal_error_after_removing_the_cwd_worktree_preserves_the_handoff() {
-        let _lock = REPO_LOCK.lock().expect("repository lock");
+        let _lock = REPO_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
         let repo = Repo::new();
         let main = repo.path().to_path_buf();
         let pending = pending_with_local(
@@ -2953,10 +2950,7 @@ mod tests {
                 Call::RemoveWorktree { force: true },
             ]
         );
-        assert!(matches!(
-            report.worktree,
-            Some(git::WorktreeRemoveOutcome::Failed(_))
-        ));
+        assert_matches!(report.worktree, Some(git::WorktreeRemoveOutcome::Failed(_)));
         assert!(
             report.branch.is_none(),
             "no branch step ran, got: {:?}",

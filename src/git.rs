@@ -32,6 +32,7 @@ pub enum FetchOutcome {
     Failed(String),
 }
 
+#[derive(Debug)]
 pub enum RebaseOutcome {
     Clean,
     Aborted,
@@ -69,7 +70,7 @@ pub fn current_remote(current: Option<&str>) -> String {
 pub fn tracked_remote(branch: &str) -> Option<String> {
     let output = run(&["config", "--get", &format!("branch.{branch}.remote")]).ok()?;
     let name = output.lines().next()?.trim();
-    // `.` means push to the local repo — useless for fetch/merge.
+    // `.` means the upstream is a local branch: there is no remote to fetch from.
     (!name.is_empty() && name != ".").then(|| name.to_string())
 }
 
@@ -114,21 +115,19 @@ pub fn same_named_upstream(branch: &str) -> AppResult<Option<UpstreamRef>> {
         "--format=%(refname:short)%09%(upstream:remotename)%09%(upstream:remoteref)",
         &local_ref,
     ])?;
-    let expected_remote_ref = format!("refs/heads/{branch}");
 
     Ok(output.lines().find_map(|line| {
         let mut parts = line.split('\t');
         let name = parts.next()?;
         let remote = parts.next()?;
         let upstream_ref = parts.next()?;
-        (name == branch
-            && !remote.is_empty()
-            && remote != "."
-            && upstream_ref == expected_remote_ref)
-            .then(|| UpstreamRef {
-                remote: remote.to_string(),
-                branch: branch.to_string(),
-            })
+        // Same-named: the upstream's ref on the remote spells the local one.
+        let tracks_same_name =
+            name == branch && !remote.is_empty() && remote != "." && upstream_ref == local_ref;
+        tracks_same_name.then(|| UpstreamRef {
+            remote: remote.to_string(),
+            branch: branch.to_string(),
+        })
     }))
 }
 
@@ -252,8 +251,8 @@ pub fn checkout(branch: &str) -> AppResult<()> {
     // each submodule and retry once.
     let _ = Command::new("git")
         .args(["submodule", "foreach", "--recursive", "git", "fetch"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status();
 
     run(&["checkout", branch, "--quiet"])?;
@@ -463,8 +462,8 @@ pub fn rebase(onto: &str) -> AppResult<RebaseOutcome> {
     }
     let _ = Command::new("git")
         .args(["rebase", "--abort"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status();
     Ok(RebaseOutcome::Aborted)
 }
@@ -478,8 +477,8 @@ pub fn fast_forward_merge(
 
     let has_remote = git_cmd(dir)
         .args(["rev-parse", "--verify", &remote_ref])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()?
         .success();
 
@@ -523,8 +522,8 @@ pub fn remote_branch_exists(remote: &str, branch: &str) -> bool {
     let remote_ref = format!("{remote}/{branch}");
     git_cmd(None)
         .args(["rev-parse", "--verify", &remote_ref])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .is_ok_and(|s| s.success())
 }
@@ -653,8 +652,8 @@ fn merged_anchor(remote: &str) -> Option<(String, String)> {
     }
     let remote_ref = format!("refs/remotes/{remote}/{default}");
     rev_parse(None, &remote_ref)
-        .ok()
-        .map(|_| (remote_ref, default))
+        .is_ok()
+        .then_some((remote_ref, default))
 }
 
 /// Which ref fact put a branch on the cleanup prompt. The facts cannot overlap:
@@ -802,13 +801,8 @@ pub fn hook_command(event: &str) -> Option<String> {
 pub(crate) fn default_branch(remote: &str) -> Option<String> {
     let head_ref = format!("refs/remotes/{remote}/HEAD");
     let prefix = format!("refs/remotes/{remote}/");
-    if let Ok(output) = run(&["symbolic-ref", &head_ref]) {
-        let trimmed = output.trim();
-        if let Some(name) = trimmed.strip_prefix(prefix.as_str()) {
-            return Some(name.to_string());
-        }
-    }
-    None
+    let output = run(&["symbolic-ref", &head_ref]).ok()?;
+    output.trim().strip_prefix(&prefix).map(str::to_string)
 }
 
 /// Branches held back from the cleanup sweep: `perch.keep` entries, plus the
@@ -1157,7 +1151,7 @@ fn patch_landed(dir: Option<&Path>, anchor: &str, tip: &str, base: &str) -> bool
             .lines()
             .filter_map(|l| l.strip_prefix("- "))
             .any(|sha| verbatim_patch_id(dir, "show", &[sha]).is_some_and(|id| id == wanted));
-        exact.then_some(true)
+        Some(exact)
     };
     landed().unwrap_or(false)
 }
@@ -1177,8 +1171,7 @@ fn verbatim_patch_id(dir: Option<&Path>, command: &str, rest: &[&str]) -> Option
     args.extend(rest);
     let diff = run_in(dir, &args).ok()?;
     let output = run_with_stdin(dir, &["patch-id", "--verbatim"], diff.as_bytes()).ok()?;
-    let id = output.split_whitespace().next()?.to_string();
-    (!id.is_empty()).then_some(id)
+    output.split_whitespace().next().map(str::to_string)
 }
 
 /// Diff options that stop repository configuration from shrinking a comparison
@@ -1650,8 +1643,7 @@ pub fn delete_remote_branch(upstream: &RemoteBranch) -> AppResult<RemoteBranchDe
     }
 
     let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    let read = run(&["ls-remote", "--heads", "--", &upstream.remote, &refname]);
-    let Ok(read) = read else {
+    let Ok(read) = run(&["ls-remote", "--heads", "--", &upstream.remote, &refname]) else {
         return Ok(RemoteBranchDeleteOutcome::Failed(detail));
     };
     let now = read
@@ -1678,7 +1670,7 @@ pub enum Holder {
 }
 
 /// Delete `branch` only if git considers it fully merged (`git branch -d`).
-/// Unlike [`delete_branches`] this never force-deletes, so unmerged work is
+/// Unlike [`force_delete_branch`] this never force-deletes, so unmerged work is
 /// preserved rather than silently discarded.
 ///
 /// `-d` judges merged-ness against the HEAD it runs under, so `dir` must be the
@@ -1725,9 +1717,9 @@ fn run_with_stdin(dir: Option<&Path>, args: &[&str], input: &[u8]) -> AppResult<
 
     let mut child = git_cmd(dir)
         .args(args)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()?;
     // Dropping the handle closes stdin, which is what tells git the diff ended.
     if let Some(mut stdin) = child.stdin.take() {
@@ -1740,7 +1732,7 @@ fn run_with_stdin(dir: Option<&Path>, args: &[&str], input: &[u8]) -> AppResult<
             message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
         });
     }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    Ok(String::from_utf8_lossy_owned(output.stdout))
 }
 
 fn run_in(dir: Option<&Path>, args: &[&str]) -> AppResult<String> {
@@ -1752,7 +1744,7 @@ fn run_in(dir: Option<&Path>, args: &[&str]) -> AppResult<String> {
             message: stderr.trim().to_string(),
         });
     }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    Ok(String::from_utf8_lossy_owned(output.stdout))
 }
 
 #[cfg(test)]

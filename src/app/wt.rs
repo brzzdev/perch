@@ -8,9 +8,9 @@ use indicatif::ProgressBar;
 use super::picker::{PickerOptions, Selection, interactive_keys, pick};
 use super::prefetch::{FetchedRemote, Prefetch, fetch_unless_covered};
 use super::{
-    CursorGuard, build_catalogue, display_path, fetch_and_ff, handoff_cd, hook, marker, picker,
+    build_catalogue, display_path, fetch_and_ff, handoff_cd, hook, marker, picker,
     prompt_delete_stale_branches, removal, report_fetch_failure, report_update,
-    select_removal_locals,
+    select_removal_locals, spinner, warn,
 };
 use crate::grammar::{ShellHandoff, Verb, WorktreeRemoval};
 use crate::{AppResult, Error, git};
@@ -93,15 +93,11 @@ pub(crate) fn run(
     // targeted worktree alone.
     let (target_path, target_branch) = match action {
         Action::UseExisting(wt) => {
-            let branch = wt.branch.clone().unwrap_or_default();
+            let branch = wt.branch.unwrap_or_default();
             // The worktree's branch may track a different remote than ours.
             let branch_remote = git::current_remote(Some(branch.as_str()));
             if let Err(e) = update_in(&wt.path, &branch, &branch_remote, fetched.as_ref()) {
-                eprintln!(
-                    "{} update of {} failed: {e}",
-                    style("!").yellow().bold(),
-                    branch,
-                );
+                eprintln!("{} update of {branch} failed: {e}", warn());
             }
             if shell_handoff == ShellHandoff::Emit {
                 eprintln!(
@@ -156,10 +152,7 @@ pub(crate) fn run(
         if e.is_interrupt() {
             return Err(e);
         }
-        eprintln!(
-            "{} stale-branch check failed: {e}",
-            style("!").yellow().bold()
-        );
+        eprintln!("{} stale-branch check failed: {e}", warn());
     }
     if shell_handoff == ShellHandoff::Emit {
         handoff_cd(&target_path);
@@ -242,9 +235,7 @@ pub(crate) fn run_rm(options: &WorktreeRemoval) -> AppResult<()> {
     let choice = selection.into_choice();
     let pending = assessment.choose(choice)?;
     let result = {
-        let spinner = ProgressBar::new_spinner().with_message(progress_message);
-        let _cursor_guard = CursorGuard::hide();
-        spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+        let (spinner, _cursor) = spinner(progress_message);
         let result = pending.finish(
             removal::UpstreamChoice::keep(),
             RemovalProgress { spinner: &spinner },
@@ -322,7 +313,7 @@ pub(crate) fn update_in(
     match fetch_and_ff(Some(path), branch, remote, fetched)? {
         git::FastForwardResult::Diverged => eprintln!(
             "{} {} has diverged from {}/{}; not updating.",
-            style("!").yellow().bold(),
+            warn(),
             branch,
             remote,
             branch,
@@ -356,10 +347,7 @@ fn create_worktree(
     ensure_parent(&path);
 
     let (fetch_outcome, result) = {
-        let spinner = ProgressBar::new_spinner();
-        let _g = CursorGuard::hide();
-        spinner.enable_steady_tick(std::time::Duration::from_millis(80));
-        spinner.set_message(format!("Fetching {remote}…"));
+        let (spinner, _cursor) = spinner(format!("Fetching {remote}…"));
         let fetch_outcome = fetch_unless_covered(None, remote, fetched);
         spinner.set_message(format!("Creating worktree for {branch}…"));
         let outcome = git::worktree_add(&path, branch, base);

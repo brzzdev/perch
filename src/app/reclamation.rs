@@ -10,6 +10,10 @@ use crate::session;
 use crate::{AppResult, Error, git};
 
 const CONFIG_KEY: &str = "perch.reclamation.worktree";
+/// `git config --get-all` exits 1 when the key is absent.
+const CONFIG_KEY_ABSENT: i32 = 1;
+/// `git config --unset-all` exits 5 when no value matched.
+const CONFIG_NOTHING_TO_UNSET: i32 = 5;
 const LOCK_FILE: &str = "perch-reclamation.lock";
 const TRASH_PREFIX: &str = ".perch-trash.";
 const WORKER_ENV: &str = "PERCH_INTERNAL_RECLAMATION";
@@ -253,7 +257,7 @@ fn configured_records(config: &Path) -> AppResult<Vec<Record>> {
             .filter_map(Record::decode)
             .collect());
     }
-    if output.status.code() == Some(1) {
+    if output.status.code() == Some(CONFIG_KEY_ABSENT) {
         return Ok(Vec::new());
     }
     Err(Error::Git {
@@ -289,7 +293,7 @@ fn forget_config(config: &Path, record: &Record) -> AppResult<()> {
         .args(["--fixed-value", "--unset-all", CONFIG_KEY])
         .arg(value)
         .output()?;
-    if output.status.success() || output.status.code() == Some(5) {
+    if output.status.success() || output.status.code() == Some(CONFIG_NOTHING_TO_UNSET) {
         return Ok(());
     }
     Err(Error::Git {

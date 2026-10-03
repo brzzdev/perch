@@ -14,8 +14,7 @@ use std::process::{Command, ExitStatus, Stdio};
 #[cfg(not(test))]
 use std::env;
 
-use console::style;
-
+use super::warn;
 use crate::git;
 
 /// The moment being reported. The variant's name is both the `PERCH_EVENT`
@@ -73,10 +72,10 @@ pub(crate) fn fire(event: Event, worktree: &Path, branch: Option<&str>, main: &P
         Ok(output) => {
             let _ = io::stderr().write_all(&output.stdout);
             if !output.status.success() {
-                warn(event, &describe(output.status));
+                warn_failure(event, &describe(output.status));
             }
         }
-        Err(e) => warn(event, &format!("could not be run: {e}")),
+        Err(e) => warn_failure(event, &format!("could not be run: {e}")),
     }
 }
 
@@ -103,10 +102,6 @@ fn describe(status: ExitStatus) -> String {
 
 /// Says a hook went wrong and that nothing follows from it — the whole of what
 /// `perch` does about a hook it isn't happy with.
-fn warn(event: Event, what: &str) {
-    eprintln!(
-        "{} the {} hook {what}; continuing.",
-        style("!").yellow().bold(),
-        event.name(),
-    );
+fn warn_failure(event: Event, what: &str) {
+    eprintln!("{} the {} hook {what}; continuing.", warn(), event.name());
 }

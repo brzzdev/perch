@@ -1,3 +1,5 @@
+use std::env;
+use std::ffi::OsString;
 use std::process;
 
 fn main() {
@@ -16,7 +18,14 @@ fn main() {
         process::exit(130);
     });
 
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    // `env::args` panics on a non-UTF-8 argument; refs and paths can be one.
+    let args: Vec<String> = match env::args_os().skip(1).map(OsString::into_string).collect() {
+        Ok(args) => args,
+        Err(arg) => {
+            eprintln!("error: argument is not valid UTF-8: {}", arg.display());
+            process::exit(1);
+        }
+    };
     let result = perch::run(&args);
 
     if let Err(e) = result {

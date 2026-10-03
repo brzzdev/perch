@@ -215,7 +215,7 @@ fn recover_staged(config: &Path, staged: &Record) -> AppResult<Option<Record>> {
         return Ok(None);
     }
 
-    match git::worktree_remove(&staged.original, false)? {
+    match git::worktree_remove(&staged.original, git::Forcing::Unforced)? {
         git::WorktreeRemoveOutcome::Removed => {
             let ready = Record::ready(&staged.original, &staged.trash);
             record_config(config, &ready)?;

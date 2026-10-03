@@ -1343,14 +1343,28 @@ pub enum WorktreeRemoveOutcome {
     Failed(String),
 }
 
-/// Remove the worktree at `path`. With `force`, uncommitted and untracked
-/// changes in it are discarded; without it, git refuses a dirty tree. A *locked*
-/// worktree survives either way (git wants `--force --force`) and is reported as
-/// a failure rather than escalated.
-pub fn worktree_remove(path: &Path, force: bool) -> AppResult<WorktreeRemoveOutcome> {
+/// Whether a destructive operation goes past its guard: git's own, via
+/// `--force`, and in removal perch's confirmations too.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Forcing {
+    Forced,
+    Unforced,
+}
+
+impl From<bool> for Forcing {
+    fn from(force: bool) -> Self {
+        if force { Self::Forced } else { Self::Unforced }
+    }
+}
+
+/// Remove the worktree at `path`. When forced, uncommitted and untracked changes
+/// in it are discarded; unforced, git refuses a dirty tree. A *locked* worktree
+/// survives either way (git wants `--force --force`) and is reported as a
+/// failure rather than escalated.
+pub fn worktree_remove(path: &Path, forcing: Forcing) -> AppResult<WorktreeRemoveOutcome> {
     let path_str = path_to_str(path)?;
     let mut args = vec!["worktree", "remove"];
-    if force {
+    if forcing == Forcing::Forced {
         args.push("--force");
     }
     args.push(path_str);

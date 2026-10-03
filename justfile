@@ -11,7 +11,9 @@ format:
 # Install the release binary locally.
 install: build-release
   mkdir -p ~/.local/bin
-  cp target/release/perch ~/.local/bin/perch
+  @# `install` writes a fresh file where `cp` would overwrite in place, leaving
+  @# macOS a stale code signature that kills the new binary on launch.
+  install target/release/perch ~/.local/bin/perch
 
 # Install shell completions for perch, br, and wt.
 install-completions:

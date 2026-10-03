@@ -5,7 +5,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
@@ -4460,8 +4460,6 @@ fn helper_is_running(helper: &Path) -> bool {
 /// has nowhere to ask for one.
 #[test]
 fn dismissing_a_picker_ends_a_background_fetch_that_never_reached_the_terminal() {
-    use portable_pty::CommandBuilder;
-
     // A transport that tries the terminal, says so, then hangs: the remote
     // helper protocol reads nothing back from it, so the fetch waits. The
     // second one also shrugs off SIGTERM, as a helper is free to.
@@ -4501,11 +4499,7 @@ fn dismissing_a_picker_ends_a_background_fetch_that_never_reached_the_terminal()
         );
         git(&work, &["config", "protocol.ext.allow", "always"]);
 
-        let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_perch"));
-        cmd.args(verb);
-        cmd.cwd(&work);
-        cmd.env("PERCH_NO_HOOKS", "1");
-        let mut session = PtySession::spawn(cmd);
+        let mut session = PtySession::spawn(perch_pty_command(&work, verb.as_slice()));
 
         assert!(poll_until(|| tried.exists()), "the transport never ran");
         session.wait_for("(type to filter):");
@@ -4824,6 +4818,15 @@ impl ChildGuard {
     }
 }
 
+/// [`perch_command`] for a pty run, with hooks off as [`perch_args`] has them.
+fn perch_pty_command(dir: &Path, args: &[&str]) -> portable_pty::CommandBuilder {
+    let mut cmd = portable_pty::CommandBuilder::new(env!("CARGO_BIN_EXE_perch"));
+    cmd.args(args);
+    cmd.cwd(dir);
+    cmd.env("PERCH_NO_HOOKS", "1");
+    cmd
+}
+
 /// A `perch` run on a real pty, owning the lifecycle each driver would
 /// otherwise get subtly wrong: the output is drained on a thread, or the child
 /// blocks on a full pty buffer while the test waits to send keys, and both
@@ -4831,8 +4834,8 @@ impl ChildGuard {
 struct PtySession {
     child: ChildGuard,
     master: Box<dyn portable_pty::MasterPty + Send>,
-    reader: std::thread::JoinHandle<()>,
-    seen: std::sync::Arc<Mutex<Vec<u8>>>,
+    drain: std::thread::JoinHandle<()>,
+    seen: Arc<Mutex<Vec<u8>>>,
     writer: Box<dyn std::io::Write + Send>,
 }
 
@@ -4840,7 +4843,6 @@ impl PtySession {
     fn spawn(cmd: portable_pty::CommandBuilder) -> Self {
         use portable_pty::{PtySize, native_pty_system};
         use std::io::Read;
-        use std::sync::Arc;
 
         let pty = native_pty_system()
             .openpty(PtySize::default())
@@ -4848,15 +4850,15 @@ impl PtySession {
         let child = ChildGuard(pty.slave.spawn_command(cmd).expect("failed to spawn"));
         drop(pty.slave);
 
-        let mut output = pty.master.try_clone_reader().unwrap();
+        let mut reader = pty.master.try_clone_reader().unwrap();
         let writer = pty.master.take_writer().unwrap();
         let seen = Arc::new(Mutex::new(Vec::new()));
         let collected = Arc::clone(&seen);
-        let reader = std::thread::spawn(move || {
+        let drain = std::thread::spawn(move || {
             // The loop reassembles the stream whatever the chunk size, so 1 KiB
             // is simply enough to swallow a picker redraw in a read or two.
             let mut chunk = [0u8; 1024];
-            while let Ok(n) = output.read(&mut chunk) {
+            while let Ok(n) = reader.read(&mut chunk) {
                 if n == 0 {
                     break;
                 }
@@ -4865,8 +4867,8 @@ impl PtySession {
         });
         Self {
             child,
+            drain,
             master: pty.master,
-            reader,
             seen,
             writer,
         }
@@ -4894,22 +4896,12 @@ impl PtySession {
     }
 
     /// Waits for the child to exit and returns every byte it wrote.
-    fn finish(self) -> Vec<u8> {
-        let Self {
-            mut child,
-            master,
-            reader,
-            seen,
-            writer,
-        } = self;
-        child.wait_bounded();
-        drop(writer);
-        drop(master);
-        reader.join().unwrap();
-        std::sync::Arc::try_unwrap(seen)
-            .unwrap()
-            .into_inner()
-            .unwrap()
+    fn finish(mut self) -> Vec<u8> {
+        self.child.wait_bounded();
+        drop(self.writer);
+        drop(self.master);
+        self.drain.join().unwrap();
+        Arc::try_unwrap(self.seen).unwrap().into_inner().unwrap()
     }
 }
 
@@ -4967,13 +4959,9 @@ fn drive_multi_select_prompt_until(
     before_confirm: impl FnOnce(),
     finish: MultiSelectFinish<'_>,
 ) -> Vec<u8> {
-    use portable_pty::CommandBuilder;
-
-    let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_perch"));
-    cmd.args(args);
-    cmd.cwd(work);
-    if !hooks {
-        cmd.env("PERCH_NO_HOOKS", "1");
+    let mut cmd = perch_pty_command(work, args);
+    if hooks {
+        cmd.env_remove("PERCH_NO_HOOKS");
     }
     let mut session = PtySession::spawn(cmd);
 
@@ -5011,13 +4999,7 @@ fn drive_escape_confirmation(work: &Path, args: &[&str], prompt: &str) -> String
 }
 
 fn drive_confirmation(work: &Path, args: &[&str], prompt: &str, key: &[u8]) -> String {
-    use portable_pty::CommandBuilder;
-
-    let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_perch"));
-    cmd.args(args);
-    cmd.cwd(work);
-    cmd.env("PERCH_NO_HOOKS", "1");
-    let mut session = PtySession::spawn(cmd);
+    let mut session = PtySession::spawn(perch_pty_command(work, args));
 
     session.wait_for(prompt);
     session.send(key);
@@ -5042,15 +5024,7 @@ fn drive_branch_picker(
     branch: &str,
     mid_prompt: impl FnOnce(),
 ) -> Vec<u8> {
-    use portable_pty::CommandBuilder;
-
-    let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_perch"));
-    if let Some(verb) = verb {
-        cmd.arg(verb);
-    }
-    cmd.cwd(work);
-    cmd.env("PERCH_NO_HOOKS", "1");
-    let mut session = PtySession::spawn(cmd);
+    let mut session = PtySession::spawn(perch_pty_command(work, verb.as_slice()));
 
     // Filter to the branch, then wait for the cursor to be drawn on it — that
     // redraw is what proves the keys landed, and it has to happen before the

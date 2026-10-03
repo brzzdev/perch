@@ -14,6 +14,7 @@ license = "MIT"
 publish = false
 readme = "README.md"
 repository = "https://github.com/brzzdev/perch"
+rust-version = "1.99"
 
 [dependencies]
 console = "0.16"

@@ -74,7 +74,7 @@ mod raw {
 
         // `&self` is a capability token: holding the guard proves raw mode is
         // active, even though reading uses crossterm's global event source.
-        #[allow(clippy::unused_self)]
+        #[expect(clippy::unused_self)]
         pub(crate) fn read_key(&self) -> io::Result<Key> {
             loop {
                 let Event::Key(event) = read()? else {
@@ -224,7 +224,7 @@ pub(crate) fn sections(catalogue: &Catalogue, verb: Verb) -> Vec<Section> {
 }
 
 enum RowKind {
-    Heading(String),
+    Heading(&'static str),
     Item(Pick),
     CreateNew(String),
 }
@@ -243,6 +243,7 @@ struct View {
     name_column: usize,
 }
 
+#[derive(Debug)]
 pub(crate) enum Selection {
     Existing(String),
     Create(String),
@@ -287,7 +288,7 @@ fn build_view(sections: &[Section], filter: &str, opts: PickerOptions) -> View {
             continue;
         }
         rows.push(RenderRow {
-            kind: RowKind::Heading(sec.heading.to_string()),
+            kind: RowKind::Heading(sec.heading),
             section_idx: sec_idx,
         });
         for pick in matching {
@@ -616,7 +617,7 @@ fn clip_end(text: &str, width: usize) -> String {
     // The ellipsis has to fit too, so it is spent before anything else.
     let mut used = 1;
     for c in text.chars() {
-        let w = measure_text_width(&c.to_string());
+        let w = measure_text_width(c.encode_utf8(&mut [0; 4]));
         if used + w > width {
             break;
         }
@@ -636,7 +637,7 @@ fn clip_start(text: &str, width: usize) -> String {
     let mut tail = Vec::new();
     let mut used = 1;
     for c in text.chars().rev() {
-        let w = measure_text_width(&c.to_string());
+        let w = measure_text_width(c.encode_utf8(&mut [0; 4]));
         if used + w > width {
             break;
         }
@@ -940,6 +941,8 @@ pub(crate) fn multi_select(
 
 #[cfg(test)]
 mod tests {
+    use std::assert_matches;
+
     use super::*;
 
     /// Drives an event loop from a fixed list of keys. Once exhausted it yields
@@ -1229,10 +1232,7 @@ mod tests {
         let mut keys = typed("xyz");
         keys.push(Key::Enter);
         let sel = run_pick(&sections, CREATE_OPTS, keys);
-        match sel {
-            Some(Selection::Create(name)) => assert_eq!(name, "xyz"),
-            _ => panic!("expected Selection::Create"),
-        }
+        assert_matches!(sel, Some(Selection::Create(name)) if name == "xyz");
     }
 
     #[test]
@@ -1478,7 +1478,7 @@ mod tests {
     /// annotations they had room for.
     #[test]
     fn one_over_wide_name_does_not_cost_the_short_rows_their_annotations() {
-        let column = measure_text_width(&"l".repeat(100));
+        let column = 100;
         let row = item_row("feature", "/Users/someone/worktrees/repo/feature", false);
         let drawn = plain(&format_row(&row, false, column, 80));
         assert!(

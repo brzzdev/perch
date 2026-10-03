@@ -14,8 +14,6 @@ use std::process::{Command, ExitStatus, Stdio};
 #[cfg(not(test))]
 use std::env;
 
-use console::style;
-
 use crate::git;
 
 /// The moment being reported. The variant's name is both the `PERCH_EVENT`
@@ -106,7 +104,7 @@ fn describe(status: ExitStatus) -> String {
 fn warn(event: Event, what: &str) {
     eprintln!(
         "{} the {} hook {what}; continuing.",
-        style("!").yellow().bold(),
+        super::warn(),
         event.name(),
     );
 }

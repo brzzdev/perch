@@ -1,7 +1,7 @@
 //! Every outcome line the destruction flows print, and the warnings they print
 //! on the way there.
 //!
-//! [`removal`](super::removal) decides what happens; this decides how it reads.
+//! [`removal`](super) decides what happens; this decides how it reads.
 //! All local destruction flows — the stale-branch prompt that follows a switch,
 //! `perch br rm`, and `perch wt rm` — hand their [`removal::Report`] to [`removal_outcome`]
 //! and print what comes back, so the answer never depends on which command you
@@ -17,14 +17,8 @@ use std::path::Path;
 use console::{StyledObject, style};
 
 use crate::app::removal::Risk;
-use crate::app::{display_path, removal, shell_quote};
+use crate::app::{display_path, removal, shell_quote, warn};
 use crate::git;
-
-/// The glyph fronting a line that reports something going wrong, or a risk about
-/// to be taken.
-fn warn() -> StyledObject<&'static str> {
-    style("!").yellow().bold()
-}
 
 /// The glyph fronting a line that reports something done.
 fn done() -> StyledObject<&'static str> {

@@ -8,9 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use indicatif::ProgressBar;
-
-use super::{CursorGuard, report_fetch_failure};
+use super::report_fetch_failure;
 use crate::{AppResult, git};
 
 /// How long git gets to act on SIGTERM before the group is killed outright.
@@ -316,9 +314,7 @@ impl Prefetch {
     pub(crate) fn join(mut self) -> AppResult<FetchedRemote> {
         let remote = std::mem::take(&mut self.remote);
         let outcome = {
-            let spinner = ProgressBar::new_spinner().with_message(format!("Fetching {remote}…"));
-            let _cursor_guard = CursorGuard::hide();
-            spinner.enable_steady_tick(Duration::from_millis(80));
+            let (spinner, _cursor) = super::spinner(format!("Fetching {remote}…"));
             let succeeded = self.child.take().is_some_and(|mut child| {
                 wait_for_exit(&child);
                 let _signalling = signalling();

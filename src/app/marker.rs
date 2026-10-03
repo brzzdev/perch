@@ -90,7 +90,7 @@ mod tests {
     fn worktree_status_shares_the_picker_glyphs_and_adds_behind() {
         assert_eq!(plain(&worktree_status(true, 2, 3)), "● ↑2 ↓3");
         assert_eq!(plain(&worktree_status(false, 0, 1)), "↓1");
-        assert!(worktree_status(false, 0, 0).is_empty());
+        assert_eq!(worktree_status(false, 0, 0), "");
     }
 
     /// The two facts `↑` stands for are different judgements, so they are

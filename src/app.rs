@@ -1,6 +1,8 @@
-use std::path::{Path, PathBuf};
+use std::borrow::Cow;
+use std::path::Path;
+use std::time::Duration;
 
-use console::{Key, Term, style};
+use console::{Key, StyledObject, Term, style};
 use indicatif::ProgressBar;
 
 use crate::grammar::{Invocation, Navigation, Verb, WorktreeDirectoryName};
@@ -33,6 +35,21 @@ impl CursorGuard {
             Self(None)
         }
     }
+}
+
+/// The glyph fronting a line that reports something going wrong, or a risk about
+/// to be taken.
+pub(crate) fn warn() -> StyledObject<&'static str> {
+    style("!").yellow().bold()
+}
+
+/// Starts an activity spinner, hiding the cursor until both are dropped. Bind
+/// the pair as `let (spinner, _cursor) = …` so the cursor is restored first.
+pub(crate) fn spinner(message: impl Into<Cow<'static, str>>) -> (ProgressBar, CursorGuard) {
+    let spinner = ProgressBar::new_spinner().with_message(message);
+    let cursor = CursorGuard::hide();
+    spinner.enable_steady_tick(Duration::from_millis(80));
+    (spinner, cursor)
 }
 
 impl Drop for CursorGuard {
@@ -180,11 +197,7 @@ fn run_verb(verb: Verb, target: Option<&str>) -> AppResult<()> {
         // The target may track a different remote than the current branch.
         let target_remote = git::current_remote(Some(target.as_str()));
         if let Err(e) = wt::update_in(&held_by.path, &target, &target_remote, fetched.as_ref()) {
-            eprintln!(
-                "{} update of {} failed: {e}",
-                style("!").yellow().bold(),
-                target,
-            );
+            eprintln!("{} update of {target} failed: {e}", warn());
         }
         eprintln!(
             "{} {} is checked out at {}",
@@ -197,21 +210,16 @@ fn run_verb(verb: Verb, target: Option<&str>) -> AppResult<()> {
             if e.is_interrupt() {
                 return Err(e);
             }
-            eprintln!(
-                "{} stale-branch check failed: {e}",
-                style("!").yellow().bold()
-            );
+            eprintln!("{} stale-branch check failed: {e}", warn());
         }
         handoff_cd(&held_by.path);
         return Ok(());
     }
 
-    let stashed = if git::has_tracked_changes()? {
+    let stashed = git::has_tracked_changes()?;
+    if stashed {
         git::stash_push()?;
-        true
-    } else {
-        false
-    };
+    }
 
     let result = switch_and_update(&target, old_branch.as_deref(), &remote, fetched.as_ref());
 
@@ -267,9 +275,7 @@ fn refresh_current(remote: &str, current: &str) -> AppResult<()> {
     let remote_ref = format!("{remote}/{current}");
 
     let has_remote = {
-        let spinner = ProgressBar::new_spinner().with_message(format!("Fetching {remote}…"));
-        let _cursor_guard = CursorGuard::hide();
-        spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+        let (spinner, _cursor) = spinner(format!("Fetching {remote}…"));
 
         let fetch_outcome = git::fetch(None, remote, git::SubmoduleFetch::Configured);
         let has_remote = git::remote_branch_exists(remote, current);
@@ -323,7 +329,7 @@ fn refresh_current(remote: &str, current: &str) -> AppResult<()> {
             // file is in the way (`has_tracked_changes` ignores those).
             git::FastForwardResult::Diverged => eprintln!(
                 "{} couldn't fast-forward {current} to {remote_ref}; an untracked file is likely blocking it",
-                style("!").yellow().bold()
+                warn()
             ),
         }
     } else {
@@ -415,7 +421,7 @@ fn switch_and_update(
     remote: &str,
     fetched: Option<&FetchedRemote>,
 ) -> AppResult<()> {
-    let already_on_target = old_branch.is_some_and(|b| b == target);
+    let already_on_target = old_branch == Some(target);
 
     if !already_on_target {
         git::checkout(target)?;
@@ -447,15 +453,13 @@ fn switch_and_update(
 /// Skips the fetch where `fetched`, the run's prefetch, already covers `remote`
 /// from `dir`.
 pub(crate) fn fetch_and_ff(
-    dir: Option<&std::path::Path>,
+    dir: Option<&Path>,
     branch: &str,
     remote: &str,
     fetched: Option<&FetchedRemote>,
 ) -> AppResult<git::FastForwardResult> {
     let (fetch_outcome, merge_result) = {
-        let spinner = ProgressBar::new_spinner().with_message(format!("Updating {branch}…"));
-        let _cursor_guard = CursorGuard::hide();
-        spinner.enable_steady_tick(std::time::Duration::from_millis(80));
+        let (spinner, _cursor) = spinner(format!("Updating {branch}…"));
 
         let fetch_outcome = prefetch::fetch_unless_covered(dir, remote, fetched);
         let result = git::fast_forward_merge(dir, branch, remote);
@@ -476,10 +480,7 @@ pub(crate) fn report_fetch_failure(outcome: &git::FetchOutcome) {
     let git::FetchOutcome::Failed(detail) = outcome else {
         return;
     };
-    eprintln!(
-        "{} fetch failed; results may be stale",
-        style("!").yellow().bold()
-    );
+    eprintln!("{} fetch failed; results may be stale", warn());
     for line in detail.lines() {
         eprintln!("  {line}");
     }
@@ -795,15 +796,6 @@ fn named_removal_choice(
     Ok(Some(removal::LocalChoice::named(named.id())))
 }
 
-/// Renders `word` so a shell reads it as the single literal it is. Git allows
-/// `$`, backticks, `;` and `&` in a ref name, so a branch called
-/// ``topic$(rm -rf ~)`` would otherwise run its own payload the moment someone
-/// pasted a command we printed. Names needing nothing are returned bare, which
-/// keeps the overwhelmingly common case readable; anything else is single-quoted,
-/// where the only character with meaning is `'` itself.
-///
-/// Quoting alone doesn't cover a name that looks like an option, so the commands
-/// built from this pass `--` before the ref as well.
 /// How to spell `branch` as the argument to a bare `perch`, so that telling
 /// someone to run it actually reaches the branch.
 ///
@@ -820,6 +812,15 @@ pub(crate) fn go_there_argument(branch: &str) -> String {
     }
 }
 
+/// Renders `word` so a shell reads it as the single literal it is. Git allows
+/// `$`, backticks, `;` and `&` in a ref name, so a branch called
+/// ``topic$(rm -rf ~)`` would otherwise run its own payload the moment someone
+/// pasted a command we printed. Names needing nothing are returned bare, which
+/// keeps the overwhelmingly common case readable; anything else is single-quoted,
+/// where the only character with meaning is `'` itself.
+///
+/// Quoting alone doesn't cover a name that looks like an option, so the commands
+/// built from this pass `--` before the ref as well.
 pub(crate) fn shell_quote(word: &str) -> String {
     let safe = |c: char| c.is_ascii_alphanumeric() || "._/@+-".contains(c);
     if !word.is_empty() && word.chars().all(safe) {
@@ -830,8 +831,8 @@ pub(crate) fn shell_quote(word: &str) -> String {
 
 /// Contracts a leading home directory to `~` so paths stay readable in prompts.
 pub(crate) fn display_path(path: &Path) -> String {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    match home.and_then(|home| path.strip_prefix(home).ok().map(Path::to_path_buf)) {
+    let home = std::env::var_os("HOME");
+    match home.and_then(|home| path.strip_prefix(home).ok()) {
         Some(rest) => format!("~/{}", rest.display()),
         None => path.display().to_string(),
     }
@@ -846,12 +847,12 @@ pub(crate) fn is_interactive() -> bool {
 /// runs `cd`. When stdout is a terminal the wrapper isn't capturing it, so a
 /// bare path would just be dumped to the screen with no `cd` — print an
 /// actionable hint to stderr instead.
-pub(crate) fn handoff_cd(path: &std::path::Path) {
+pub(crate) fn handoff_cd(path: &Path) {
     use std::io::IsTerminal;
     if std::io::stdout().is_terminal() {
         eprintln!(
             "{} shell integration not active — can't cd for you. Run:",
-            style("!").yellow().bold(),
+            warn(),
         );
         eprintln!("  cd {}", path.display());
         eprintln!("  (enable auto-cd: see README \"Shell integration\")");

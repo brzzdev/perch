@@ -212,7 +212,7 @@ pub(crate) fn run_rm(options: &WorktreeRemoval) -> AppResult<()> {
     let cwd = env::current_dir()
         .ok()
         .and_then(|dir| dir.canonicalize().ok());
-    let forcing = removal::Forcing::from(options.force());
+    let forcing = git::Forcing::from(options.force());
     let assessment = removal::assess(removal::Request::Worktrees(removal::WorktreeRequest::new(
         worktrees,
         cwd,

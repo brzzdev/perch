@@ -560,11 +560,12 @@ pub(crate) enum DefaultAnswer {
 /// `Declined`, Escape returns `Cancelled`, and a non-interactive call resolves
 /// to `default`.
 pub(crate) fn confirm(prompt: &str, default: DefaultAnswer) -> AppResult<Confirmation> {
+    let fallback = match default {
+        DefaultAnswer::No => Confirmation::Declined,
+        DefaultAnswer::Yes => Confirmation::Accepted,
+    };
     let Some(term) = interactive_term() else {
-        return Ok(match default {
-            DefaultAnswer::No => Confirmation::Declined,
-            DefaultAnswer::Yes => Confirmation::Accepted,
-        });
+        return Ok(fallback);
     };
     let hint = match default {
         DefaultAnswer::No => "[y/N] / esc",
@@ -581,8 +582,8 @@ pub(crate) fn confirm(prompt: &str, default: DefaultAnswer) -> AppResult<Confirm
         let answer = match term.read_key()? {
             Key::Char('y' | 'Y') => Confirmation::Accepted,
             Key::Escape => Confirmation::Cancelled,
-            Key::Enter if default == DefaultAnswer::Yes => Confirmation::Accepted,
-            Key::Char('n' | 'N') | Key::Enter => Confirmation::Declined,
+            Key::Char('n' | 'N') => Confirmation::Declined,
+            Key::Enter => fallback,
             _ => continue,
         };
         eprintln!(
@@ -704,7 +705,7 @@ pub(crate) fn prompt_delete_stale_branches(
     let Some(selection) = select_removal_locals(
         &assessment,
         None,
-        removal::Forcing::Unforced,
+        git::Forcing::Unforced,
         "Delete stale branches (space to toggle, →/← all/none)",
     )?
     else {
@@ -740,7 +741,7 @@ impl<'a> RemovalSelection<'a> {
 pub(crate) fn select_removal_locals<'a>(
     assessment: &'a removal::Assessment,
     target: Option<&str>,
-    forcing: removal::Forcing,
+    forcing: git::Forcing,
     prompt: &str,
 ) -> AppResult<Option<RemovalSelection<'a>>> {
     if let Some(name) = target {
@@ -774,17 +775,17 @@ pub(crate) fn select_removal_locals<'a>(
         .collect();
     let ids = offers.iter().map(|offer| offer.id()).collect();
     let choice = match forcing {
-        removal::Forcing::Forced => removal::LocalChoice::forced_picked(ids),
-        removal::Forcing::Unforced => removal::LocalChoice::picked(ids),
+        git::Forcing::Forced => removal::LocalChoice::forced_picked(ids),
+        git::Forcing::Unforced => removal::LocalChoice::picked(ids),
     };
     Ok(Some(RemovalSelection { choice, offers }))
 }
 
 fn named_removal_choice(
     named: &removal::NamedOffer,
-    forcing: removal::Forcing,
+    forcing: git::Forcing,
 ) -> AppResult<Option<removal::LocalChoice>> {
-    if forcing == removal::Forcing::Forced {
+    if forcing == git::Forcing::Forced {
         return Ok(Some(removal::LocalChoice::forced(named.id())));
     }
     if named.warnings().is_empty() {

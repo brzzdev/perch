@@ -33,7 +33,7 @@ pub(crate) fn run_rm(options: &BranchRemoval) -> AppResult<()> {
     let Some(selection) = select_removal_locals(
         &assessment,
         options.target(),
-        removal::Forcing::from(options.force()),
+        git::Forcing::from(options.force()),
         "Remove local branches (space to toggle, →/← all/none)",
     )?
     else {

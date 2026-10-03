@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use console::style;
 
 use super::{display_path, hook, marker, picker, reclamation, shell_quote, warn};
-pub(crate) use crate::git::Forcing;
+use crate::git::Forcing;
 use crate::{AppResult, Error, git};
 
 mod reporting;
@@ -1555,7 +1555,7 @@ fn remove<'a>(
         let worktree = match reclamation {
             Reclamation::Synchronous => {
                 let state = steps.worktree_state(path);
-                steps.remove_worktree(path, worktree_force(state, license.worktree))?
+                steps.remove_worktree(path, worktree_forcing(state, license.worktree))?
             }
             Reclamation::Background => remove_worktree_in_background(path, license, steps)?,
         };
@@ -1598,13 +1598,17 @@ fn remove<'a>(
     Ok(report)
 }
 
-fn worktree_force(state: FreshWorktree, license: WorktreeLicense) -> Forcing {
-    let forced = license.permits_guard_override()
+fn worktree_forcing(state: FreshWorktree, license: WorktreeLicense) -> Forcing {
+    if license.permits_guard_override()
         || matches!(
             state,
             FreshWorktree::Dirty | FreshWorktree::DirtinessUnreadable
-        ) && license.permits_file_discard();
-    Forcing::from(forced)
+        ) && license.permits_file_discard()
+    {
+        Forcing::Forced
+    } else {
+        Forcing::Unforced
+    }
 }
 
 fn remove_worktree_in_background(
@@ -1613,7 +1617,7 @@ fn remove_worktree_in_background(
     steps: &mut impl Steps,
 ) -> AppResult<git::WorktreeRemoveOutcome> {
     let state = steps.worktree_state(path);
-    let fallback_force = worktree_force(state, license.worktree);
+    let fallback_forcing = worktree_forcing(state, license.worktree);
     let may_stage = match state {
         FreshWorktree::Clean => true,
         FreshWorktree::Dirty | FreshWorktree::DirtinessUnreadable => {
@@ -1624,7 +1628,7 @@ fn remove_worktree_in_background(
         }
     };
     if !may_stage {
-        return steps.remove_worktree(path, fallback_force);
+        return steps.remove_worktree(path, fallback_forcing);
     }
 
     let staged = steps.stage_worktree(path)?;
@@ -2233,16 +2237,12 @@ mod tests {
     /// was forced.
     #[derive(Debug, PartialEq, Eq)]
     enum Call {
-        DeleteBranch {
-            forcing: Forcing,
-        },
+        DeleteBranch(Forcing),
         /// The pinned delete, and whether the branch was still there to take it.
         DeleteBranchAt {
             hit: bool,
         },
-        RemoveWorktree {
-            forcing: Forcing,
-        },
+        RemoveWorktree(Forcing),
         ReadWorktree(FreshWorktree),
         StageWorktree,
         RestoreWorktree,
@@ -2313,7 +2313,7 @@ mod tests {
             _branch: &str,
             forcing: Forcing,
         ) -> AppResult<git::BranchDeleteOutcome> {
-            self.calls.push(Call::DeleteBranch { forcing });
+            self.calls.push(Call::DeleteBranch(forcing));
             if self.branch_error {
                 return Err(Error::Git {
                     command: "branch delete".to_string(),
@@ -2340,7 +2340,7 @@ mod tests {
             _path: &Path,
             forcing: Forcing,
         ) -> AppResult<git::WorktreeRemoveOutcome> {
-            self.calls.push(Call::RemoveWorktree { forcing });
+            self.calls.push(Call::RemoveWorktree(forcing));
             if self.worktree_error {
                 return Err(Error::Git {
                     command: "worktree remove".to_string(),
@@ -2559,12 +2559,8 @@ mod tests {
             steps.calls,
             vec![
                 Call::ReadWorktree(FreshWorktree::Clean),
-                Call::RemoveWorktree {
-                    forcing: Forcing::Unforced
-                },
-                Call::DeleteBranch {
-                    forcing: Forcing::Unforced
-                },
+                Call::RemoveWorktree(Forcing::Unforced),
+                Call::DeleteBranch(Forcing::Unforced),
             ]
         );
     }
@@ -2586,13 +2582,9 @@ mod tests {
             vec![
                 Call::ReadWorktree(FreshWorktree::Clean),
                 Call::StageWorktree,
-                Call::RemoveWorktree {
-                    forcing: Forcing::Unforced
-                },
+                Call::RemoveWorktree(Forcing::Unforced),
                 Call::StartReclamation,
-                Call::DeleteBranch {
-                    forcing: Forcing::Unforced
-                },
+                Call::DeleteBranch(Forcing::Unforced),
             ]
         );
     }
@@ -2619,13 +2611,9 @@ mod tests {
             vec![
                 Call::ReadWorktree(FreshWorktree::Dirty),
                 Call::StageWorktree,
-                Call::RemoveWorktree {
-                    forcing: Forcing::Unforced
-                },
+                Call::RemoveWorktree(Forcing::Unforced),
                 Call::StartReclamation,
-                Call::DeleteBranch {
-                    forcing: Forcing::Unforced
-                },
+                Call::DeleteBranch(Forcing::Unforced),
             ]
         );
     }
@@ -2648,9 +2636,7 @@ mod tests {
             steps.calls,
             vec![
                 Call::ReadWorktree(FreshWorktree::Dirty),
-                Call::RemoveWorktree {
-                    forcing: Forcing::Unforced
-                },
+                Call::RemoveWorktree(Forcing::Unforced),
             ]
         );
         assert!(report.branch.is_none());
@@ -2674,9 +2660,7 @@ mod tests {
             steps.calls,
             vec![
                 Call::ReadWorktree(FreshWorktree::DirtinessUnreadable),
-                Call::RemoveWorktree {
-                    forcing: Forcing::Unforced
-                },
+                Call::RemoveWorktree(Forcing::Unforced),
             ]
         );
     }
@@ -2703,9 +2687,7 @@ mod tests {
             steps.calls,
             vec![
                 Call::ReadWorktree(FreshWorktree::SubmodulesUnreadable),
-                Call::RemoveWorktree {
-                    forcing: Forcing::Unforced
-                },
+                Call::RemoveWorktree(Forcing::Unforced),
             ]
         );
     }
@@ -2728,13 +2710,9 @@ mod tests {
             vec![
                 Call::ReadWorktree(FreshWorktree::DirtinessUnreadable),
                 Call::StageWorktree,
-                Call::RemoveWorktree {
-                    forcing: Forcing::Unforced
-                },
+                Call::RemoveWorktree(Forcing::Unforced),
                 Call::StartReclamation,
-                Call::DeleteBranch {
-                    forcing: Forcing::Forced
-                },
+                Call::DeleteBranch(Forcing::Forced),
             ]
         );
     }
@@ -2761,9 +2739,7 @@ mod tests {
             steps.calls,
             vec![
                 Call::ReadWorktree(FreshWorktree::Guarded),
-                Call::RemoveWorktree {
-                    forcing: Forcing::Unforced
-                },
+                Call::RemoveWorktree(Forcing::Unforced),
             ]
         );
         assert!(report.branch.is_none());
@@ -2791,9 +2767,7 @@ mod tests {
             steps.calls,
             vec![
                 Call::ReadWorktree(FreshWorktree::Guarded),
-                Call::RemoveWorktree {
-                    forcing: Forcing::Unforced
-                },
+                Call::RemoveWorktree(Forcing::Unforced),
             ]
         );
         assert!(report.branch.is_none());
@@ -2816,12 +2790,8 @@ mod tests {
             steps.calls,
             vec![
                 Call::ReadWorktree(FreshWorktree::Guarded),
-                Call::RemoveWorktree {
-                    forcing: Forcing::Forced
-                },
-                Call::DeleteBranch {
-                    forcing: Forcing::Forced
-                },
+                Call::RemoveWorktree(Forcing::Forced),
+                Call::DeleteBranch(Forcing::Forced),
             ]
         );
     }
@@ -2844,9 +2814,7 @@ mod tests {
             vec![
                 Call::ReadWorktree(FreshWorktree::Clean),
                 Call::StageWorktree,
-                Call::RemoveWorktree {
-                    forcing: Forcing::Unforced
-                },
+                Call::RemoveWorktree(Forcing::Unforced),
                 Call::RestoreWorktree,
             ]
         );
@@ -2871,13 +2839,9 @@ mod tests {
             vec![
                 Call::ReadWorktree(FreshWorktree::Clean),
                 Call::StageWorktree,
-                Call::RemoveWorktree {
-                    forcing: Forcing::Unforced
-                },
+                Call::RemoveWorktree(Forcing::Unforced),
                 Call::StartReclamation,
-                Call::DeleteBranch {
-                    forcing: Forcing::Forced
-                },
+                Call::DeleteBranch(Forcing::Forced),
             ]
         );
         assert!(report.worktree_removed());
@@ -2982,9 +2946,7 @@ mod tests {
             steps.calls,
             vec![
                 Call::ReadWorktree(FreshWorktree::Clean),
-                Call::RemoveWorktree {
-                    forcing: Forcing::Forced
-                },
+                Call::RemoveWorktree(Forcing::Forced),
             ]
         );
         assert_matches!(report.worktree, Some(git::WorktreeRemoveOutcome::Failed(_)));
@@ -3016,12 +2978,8 @@ mod tests {
             dirty_only.calls,
             vec![
                 Call::ReadWorktree(FreshWorktree::Dirty),
-                Call::RemoveWorktree {
-                    forcing: Forcing::Forced
-                },
-                Call::DeleteBranch {
-                    forcing: Forcing::Unforced
-                },
+                Call::RemoveWorktree(Forcing::Forced),
+                Call::DeleteBranch(Forcing::Unforced),
             ]
         );
 
@@ -3041,12 +2999,8 @@ mod tests {
             unmerged_only.calls,
             vec![
                 Call::ReadWorktree(FreshWorktree::Clean),
-                Call::RemoveWorktree {
-                    forcing: Forcing::Unforced
-                },
-                Call::DeleteBranch {
-                    forcing: Forcing::Forced
-                },
+                Call::RemoveWorktree(Forcing::Unforced),
+                Call::DeleteBranch(Forcing::Forced),
             ]
         );
     }
@@ -3066,12 +3020,8 @@ mod tests {
             steps.calls,
             vec![
                 Call::ReadWorktree(FreshWorktree::Clean),
-                Call::RemoveWorktree {
-                    forcing: Forcing::Forced
-                },
-                Call::DeleteBranch {
-                    forcing: Forcing::Forced
-                },
+                Call::RemoveWorktree(Forcing::Forced),
+                Call::DeleteBranch(Forcing::Forced),
             ]
         );
     }
@@ -3094,9 +3044,7 @@ mod tests {
             steps.calls,
             vec![
                 Call::ReadWorktree(FreshWorktree::Clean),
-                Call::RemoveWorktree {
-                    forcing: Forcing::Unforced
-                },
+                Call::RemoveWorktree(Forcing::Unforced),
                 Call::DeleteBranchAt { hit: true },
             ]
         );
@@ -3126,13 +3074,9 @@ mod tests {
             branch_moved.calls,
             vec![
                 Call::ReadWorktree(FreshWorktree::Clean),
-                Call::RemoveWorktree {
-                    forcing: Forcing::Unforced
-                },
+                Call::RemoveWorktree(Forcing::Unforced),
                 Call::DeleteBranchAt { hit: false },
-                Call::DeleteBranch {
-                    forcing: Forcing::Unforced
-                },
+                Call::DeleteBranch(Forcing::Unforced),
             ],
             "the pinned delete declines, and git's own guard decides instead"
         );
@@ -3149,12 +3093,8 @@ mod tests {
             anchor_moved.calls,
             vec![
                 Call::ReadWorktree(FreshWorktree::Clean),
-                Call::RemoveWorktree {
-                    forcing: Forcing::Unforced
-                },
-                Call::DeleteBranch {
-                    forcing: Forcing::Unforced
-                },
+                Call::RemoveWorktree(Forcing::Unforced),
+                Call::DeleteBranch(Forcing::Unforced),
             ],
             "the content is no longer on the anchor, so nothing is pinned at all"
         );

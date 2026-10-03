@@ -1343,7 +1343,8 @@ pub enum WorktreeRemoveOutcome {
     Failed(String),
 }
 
-/// Whether a destructive git operation passes `--force` past git's own guard.
+/// Whether a destructive operation goes past its guard: git's own, via
+/// `--force`, and in removal perch's confirmations too.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Forcing {
     Forced,
@@ -1356,8 +1357,8 @@ impl From<bool> for Forcing {
     }
 }
 
-/// Remove the worktree at `path`. Forced, uncommitted and untracked changes in
-/// it are discarded; unforced, git refuses a dirty tree. A *locked* worktree
+/// Remove the worktree at `path`. When forced, uncommitted and untracked changes
+/// in it are discarded; unforced, git refuses a dirty tree. A *locked* worktree
 /// survives either way (git wants `--force --force`) and is reported as a
 /// failure rather than escalated.
 pub fn worktree_remove(path: &Path, forcing: Forcing) -> AppResult<WorktreeRemoveOutcome> {

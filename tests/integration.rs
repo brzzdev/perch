@@ -5,7 +5,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
@@ -4460,10 +4460,6 @@ fn helper_is_running(helper: &Path) -> bool {
 /// has nowhere to ask for one.
 #[test]
 fn dismissing_a_picker_ends_a_background_fetch_that_never_reached_the_terminal() {
-    use portable_pty::{CommandBuilder, PtySize, native_pty_system};
-    use std::io::{Read, Write};
-    use std::sync::Arc;
-
     // A transport that tries the terminal, says so, then hangs: the remote
     // helper protocol reads nothing back from it, so the fetch waits. The
     // second one also shrugs off SIGTERM, as a helper is free to.
@@ -4503,41 +4499,13 @@ fn dismissing_a_picker_ends_a_background_fetch_that_never_reached_the_terminal()
         );
         git(&work, &["config", "protocol.ext.allow", "always"]);
 
-        let pty = native_pty_system()
-            .openpty(PtySize::default())
-            .expect("failed to open pty");
-        let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_perch"));
-        cmd.args(verb);
-        cmd.cwd(&work);
-        cmd.env("PERCH_NO_HOOKS", "1");
-        let mut child = ChildGuard(pty.slave.spawn_command(cmd).expect("failed to spawn"));
-        drop(pty.slave);
-
-        let mut reader = pty.master.try_clone_reader().unwrap();
-        let mut writer = pty.master.take_writer().unwrap();
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        let collected = Arc::clone(&seen);
-        let output = std::thread::spawn(move || {
-            let mut chunk = [0u8; 1024];
-            while let Ok(n) = reader.read(&mut chunk) {
-                if n == 0 {
-                    break;
-                }
-                collected.lock().unwrap().extend_from_slice(&chunk[..n]);
-            }
-        });
+        let mut session = PtySession::spawn(perch_pty_command(&work, verb.as_slice()));
 
         assert!(poll_until(|| tried.exists()), "the transport never ran");
-        wait_for(&seen, "(type to filter):");
-        writer.write_all(key).unwrap();
-        writer.flush().unwrap();
+        session.wait_for("(type to filter):");
+        session.send(key);
 
-        child.wait_bounded();
-        drop(writer);
-        drop(pty.master);
-        output.join().unwrap();
-
-        let screen = String::from_utf8_lossy(&seen.lock().unwrap()).into_owned();
+        let screen = String::from_utf8_lossy_owned(session.finish());
         assert!(
             !screen.contains("PASSPHRASE?"),
             "the background fetch reached the terminal: {screen}"
@@ -4850,18 +4818,91 @@ impl ChildGuard {
     }
 }
 
-/// Blocks until the child has written `needle` to the pty, so keys are only
-/// sent once the prompt they answer is on screen.
-fn wait_for(seen: &Mutex<Vec<u8>>, needle: &str) {
-    let drawn = poll_until(|| {
-        let buf = seen.lock().unwrap();
-        buf.windows(needle.len()).any(|w| w == needle.as_bytes())
-    });
-    assert!(
-        drawn,
-        "timed out waiting for {needle:?}; got: {}",
-        String::from_utf8_lossy(&seen.lock().unwrap())
-    );
+/// The pty counterpart of [`perch_args`]: `perch` in `dir` with hooks off.
+fn perch_pty_command(dir: &Path, args: &[&str]) -> portable_pty::CommandBuilder {
+    let mut cmd = portable_pty::CommandBuilder::new(env!("CARGO_BIN_EXE_perch"));
+    cmd.args(args);
+    cmd.cwd(dir);
+    cmd.env("PERCH_NO_HOOKS", "1");
+    cmd
+}
+
+/// A `perch` run on a real pty, owning the lifecycle each driver would
+/// otherwise get subtly wrong: the output is drained on a thread, or the child
+/// blocks on a full pty buffer while the test waits to send keys, and both
+/// ends of the pty drop before that thread is joined, or it never sees EOF.
+struct PtySession {
+    child: ChildGuard,
+    drain: std::thread::JoinHandle<()>,
+    master: Box<dyn portable_pty::MasterPty + Send>,
+    seen: Arc<Mutex<Vec<u8>>>,
+    writer: Box<dyn std::io::Write + Send>,
+}
+
+impl PtySession {
+    fn spawn(cmd: portable_pty::CommandBuilder) -> Self {
+        use portable_pty::{PtySize, native_pty_system};
+        use std::io::Read;
+
+        let pty = native_pty_system()
+            .openpty(PtySize::default())
+            .expect("failed to open pty");
+        let child = ChildGuard(pty.slave.spawn_command(cmd).expect("failed to spawn"));
+        drop(pty.slave);
+
+        let mut reader = pty.master.try_clone_reader().unwrap();
+        let writer = pty.master.take_writer().unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let collected = Arc::clone(&seen);
+        let drain = std::thread::spawn(move || {
+            // The loop reassembles the stream whatever the chunk size, so 1 KiB
+            // is simply enough to swallow a picker redraw in a read or two.
+            let mut chunk = [0u8; 1024];
+            while let Ok(n) = reader.read(&mut chunk) {
+                if n == 0 {
+                    break;
+                }
+                collected.lock().unwrap().extend_from_slice(&chunk[..n]);
+            }
+        });
+        Self {
+            child,
+            drain,
+            master: pty.master,
+            seen,
+            writer,
+        }
+    }
+
+    /// Blocks until the child has written `needle` to the pty, so keys are only
+    /// sent once the prompt they answer is on screen.
+    fn wait_for(&self, needle: &str) {
+        let drawn = poll_until(|| {
+            let buf = self.seen.lock().unwrap();
+            buf.windows(needle.len()).any(|w| w == needle.as_bytes())
+        });
+        assert!(
+            drawn,
+            "timed out waiting for {needle:?}; got: {}",
+            String::from_utf8_lossy(&self.seen.lock().unwrap())
+        );
+    }
+
+    fn send(&mut self, keys: &[u8]) {
+        use std::io::Write;
+
+        self.writer.write_all(keys).unwrap();
+        self.writer.flush().unwrap();
+    }
+
+    /// Waits for the child to exit and returns every byte it wrote.
+    fn finish(mut self) -> Vec<u8> {
+        self.child.wait_bounded();
+        drop(self.writer);
+        drop(self.master);
+        self.drain.join().unwrap();
+        Arc::try_unwrap(self.seen).unwrap().into_inner().unwrap()
+    }
 }
 
 /// Drives the post-switch cleanup prompt over a real pty — the only way to see
@@ -4918,61 +4959,25 @@ fn drive_multi_select_prompt_until(
     before_confirm: impl FnOnce(),
     finish: MultiSelectFinish<'_>,
 ) -> Vec<u8> {
-    use portable_pty::{CommandBuilder, PtySize, native_pty_system};
-    use std::io::{Read, Write};
-    use std::sync::Arc;
-
-    let pty = native_pty_system()
-        .openpty(PtySize::default())
-        .expect("failed to open pty");
-    let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_perch"));
-    cmd.args(args);
-    cmd.cwd(work);
-    if !hooks {
-        cmd.env("PERCH_NO_HOOKS", "1");
+    let mut cmd = perch_pty_command(work, args);
+    if hooks {
+        cmd.env_remove("PERCH_NO_HOOKS");
     }
-    let mut child = ChildGuard(pty.slave.spawn_command(cmd).expect("failed to spawn"));
-    drop(pty.slave);
-
-    let mut reader = pty.master.try_clone_reader().unwrap();
-    let mut writer = pty.master.take_writer().unwrap();
-    // Read on a thread into a buffer the test can watch: the pty must keep
-    // draining or the child blocks on a full buffer while we wait to send keys.
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let collected = Arc::clone(&seen);
-    let output = std::thread::spawn(move || {
-        // The loop reassembles the stream whatever the chunk size, so 1 KiB is
-        // simply enough to swallow a picker redraw in a read or two.
-        let mut chunk = [0u8; 1024];
-        while let Ok(n) = reader.read(&mut chunk) {
-            if n == 0 {
-                break;
-            }
-            collected.lock().unwrap().extend_from_slice(&chunk[..n]);
-        }
-    });
+    let mut session = PtySession::spawn(cmd);
 
     // Drive the picker off what it has drawn rather than off a clock: `→` ticks
     // every row, Enter confirms, and each key waits for the redraw that proves
     // the last one landed.
-    wait_for(&seen, &format!("[ ] {row}"));
-    writer.write_all(b"\x1b[C").unwrap();
-    writer.flush().unwrap();
-    wait_for(&seen, &format!("[x] {row}"));
+    session.wait_for(&format!("[ ] {row}"));
+    session.send(b"\x1b[C");
+    session.wait_for(&format!("[x] {row}"));
     before_confirm();
-    writer.write_all(b"\r").unwrap();
-    writer.flush().unwrap();
+    session.send(b"\r");
     if let MultiSelectFinish::EscapeAt(prompt) = finish {
-        wait_for(&seen, prompt);
-        writer.write_all(b"\x1b").unwrap();
-        writer.flush().unwrap();
+        session.wait_for(prompt);
+        session.send(b"\x1b");
     }
-
-    child.wait_bounded();
-    drop(writer);
-    drop(pty.master);
-    output.join().unwrap();
-    Arc::try_unwrap(seen).unwrap().into_inner().unwrap()
+    session.finish()
 }
 
 fn drive_cleanup_prompt(
@@ -4994,43 +4999,11 @@ fn drive_escape_confirmation(work: &Path, args: &[&str], prompt: &str) -> String
 }
 
 fn drive_confirmation(work: &Path, args: &[&str], prompt: &str, key: &[u8]) -> String {
-    use portable_pty::{CommandBuilder, PtySize, native_pty_system};
-    use std::io::{Read, Write};
-    use std::sync::Arc;
+    let mut session = PtySession::spawn(perch_pty_command(work, args));
 
-    let pty = native_pty_system()
-        .openpty(PtySize::default())
-        .expect("failed to open pty");
-    let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_perch"));
-    cmd.args(args);
-    cmd.cwd(work);
-    cmd.env("PERCH_NO_HOOKS", "1");
-    let mut child = ChildGuard(pty.slave.spawn_command(cmd).expect("failed to spawn"));
-    drop(pty.slave);
-
-    let mut reader = pty.master.try_clone_reader().unwrap();
-    let mut writer = pty.master.take_writer().unwrap();
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let collected = Arc::clone(&seen);
-    let output = std::thread::spawn(move || {
-        let mut chunk = [0u8; 1024];
-        while let Ok(n) = reader.read(&mut chunk) {
-            if n == 0 {
-                break;
-            }
-            collected.lock().unwrap().extend_from_slice(&chunk[..n]);
-        }
-    });
-
-    wait_for(&seen, prompt);
-    writer.write_all(key).unwrap();
-    writer.flush().unwrap();
-
-    child.wait_bounded();
-    drop(writer);
-    drop(pty.master);
-    output.join().unwrap();
-    String::from_utf8_lossy_owned(Arc::try_unwrap(seen).unwrap().into_inner().unwrap())
+    session.wait_for(prompt);
+    session.send(key);
+    String::from_utf8_lossy_owned(session.finish())
 }
 
 /// [`drive_cleanup_prompt`] with hooks off and nothing to do between ticking and
@@ -5051,56 +5024,21 @@ fn drive_branch_picker(
     branch: &str,
     mid_prompt: impl FnOnce(),
 ) -> Vec<u8> {
-    use portable_pty::{CommandBuilder, PtySize, native_pty_system};
-    use std::io::{Read, Write};
-    use std::sync::Arc;
-
-    let pty = native_pty_system()
-        .openpty(PtySize::default())
-        .expect("failed to open pty");
-    let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_perch"));
-    if let Some(verb) = verb {
-        cmd.arg(verb);
-    }
-    cmd.cwd(work);
-    cmd.env("PERCH_NO_HOOKS", "1");
-    let mut child = ChildGuard(pty.slave.spawn_command(cmd).expect("failed to spawn"));
-    drop(pty.slave);
-
-    let mut reader = pty.master.try_clone_reader().unwrap();
-    let mut writer = pty.master.take_writer().unwrap();
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let collected = Arc::clone(&seen);
-    let output = std::thread::spawn(move || {
-        let mut chunk = [0u8; 1024];
-        while let Ok(n) = reader.read(&mut chunk) {
-            if n == 0 {
-                break;
-            }
-            collected.lock().unwrap().extend_from_slice(&chunk[..n]);
-        }
-    });
+    let mut session = PtySession::spawn(perch_pty_command(work, verb.as_slice()));
 
     // Filter to the branch, then wait for the cursor to be drawn on it — that
     // redraw is what proves the keys landed, and it has to happen before the
     // repo is disturbed, since the point is to move while the picker waits.
     // Matching the row rather than the echoed filter keeps the needle clear of
     // the styling around the prompt.
-    wait_for(&seen, branch);
-    writer.write_all(branch.as_bytes()).unwrap();
-    writer.flush().unwrap();
-    wait_for(&seen, &format!(">   {branch}"));
+    session.wait_for(branch);
+    session.send(branch.as_bytes());
+    session.wait_for(&format!(">   {branch}"));
 
     mid_prompt();
 
-    writer.write_all(b"\r").unwrap();
-    writer.flush().unwrap();
-
-    child.wait_bounded();
-    drop(writer);
-    drop(pty.master);
-    output.join().unwrap();
-    Arc::try_unwrap(seen).unwrap().into_inner().unwrap()
+    session.send(b"\r");
+    session.finish()
 }
 
 /// The picker's list is a snapshot, but the hand-off decision must not be one:

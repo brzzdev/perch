@@ -499,7 +499,8 @@ fn reconcile_diverged(branch: &str, remote: &str) -> AppResult<()> {
     let remote_ref = format!("{remote}/{branch}");
     eprintln!("Local branch has diverged from {remote_ref}.");
 
-    if confirm(&format!("Rebase onto {remote_ref}?"), false)? != Confirmation::Accepted {
+    if confirm(&format!("Rebase onto {remote_ref}?"), DefaultAnswer::No)? != Confirmation::Accepted
+    {
         eprintln!("{}", reconcile_hint(&remote_ref));
         return Err(Error::Diverged);
     }
@@ -547,21 +548,27 @@ pub(crate) enum Confirmation {
     Declined,
 }
 
+/// The answer a yes/no prompt gives for Enter, and for a run with no terminal
+/// to ask.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DefaultAnswer {
+    No,
+    Yes,
+}
+
 /// Reads a yes/no confirmation. An explicit answer returns `Accepted` or
 /// `Declined`, Escape returns `Cancelled`, and a non-interactive call resolves
-/// to the answer selected by `default_yes`.
-pub(crate) fn confirm(prompt: &str, default_yes: bool) -> AppResult<Confirmation> {
+/// to `default`.
+pub(crate) fn confirm(prompt: &str, default: DefaultAnswer) -> AppResult<Confirmation> {
     let Some(term) = interactive_term() else {
-        return Ok(if default_yes {
-            Confirmation::Accepted
-        } else {
-            Confirmation::Declined
+        return Ok(match default {
+            DefaultAnswer::No => Confirmation::Declined,
+            DefaultAnswer::Yes => Confirmation::Accepted,
         });
     };
-    let hint = if default_yes {
-        "[Y/n] / esc"
-    } else {
-        "[y/N] / esc"
+    let hint = match default {
+        DefaultAnswer::No => "[y/N] / esc",
+        DefaultAnswer::Yes => "[Y/n] / esc",
     };
     eprint!(
         "{} {} {} ",
@@ -574,7 +581,7 @@ pub(crate) fn confirm(prompt: &str, default_yes: bool) -> AppResult<Confirmation
         let answer = match term.read_key()? {
             Key::Char('y' | 'Y') => Confirmation::Accepted,
             Key::Escape => Confirmation::Cancelled,
-            Key::Enter if default_yes => Confirmation::Accepted,
+            Key::Enter if default == DefaultAnswer::Yes => Confirmation::Accepted,
             Key::Char('n' | 'N') | Key::Enter => Confirmation::Declined,
             _ => continue,
         };
@@ -697,7 +704,7 @@ pub(crate) fn prompt_delete_stale_branches(
     let Some(selection) = select_removal_locals(
         &assessment,
         None,
-        false,
+        removal::Forcing::Unforced,
         "Delete stale branches (space to toggle, →/← all/none)",
     )?
     else {
@@ -733,12 +740,12 @@ impl<'a> RemovalSelection<'a> {
 pub(crate) fn select_removal_locals<'a>(
     assessment: &'a removal::Assessment,
     target: Option<&str>,
-    force: bool,
+    forcing: removal::Forcing,
     prompt: &str,
 ) -> AppResult<Option<RemovalSelection<'a>>> {
     if let Some(name) = target {
         let named = assessment.named(name)?;
-        let Some(choice) = named_removal_choice(&named, force)? else {
+        let Some(choice) = named_removal_choice(&named, forcing)? else {
             return Ok(None);
         };
         return Ok(Some(RemovalSelection {
@@ -766,19 +773,18 @@ pub(crate) fn select_removal_locals<'a>(
         .map(|index| &assessment.offers()[index])
         .collect();
     let ids = offers.iter().map(|offer| offer.id()).collect();
-    let choice = if force {
-        removal::LocalChoice::forced_picked(ids)
-    } else {
-        removal::LocalChoice::picked(ids)
+    let choice = match forcing {
+        removal::Forcing::Forced => removal::LocalChoice::forced_picked(ids),
+        removal::Forcing::Unforced => removal::LocalChoice::picked(ids),
     };
     Ok(Some(RemovalSelection { choice, offers }))
 }
 
 fn named_removal_choice(
     named: &removal::NamedOffer,
-    force: bool,
+    forcing: removal::Forcing,
 ) -> AppResult<Option<removal::LocalChoice>> {
-    if force {
+    if forcing == removal::Forcing::Forced {
         return Ok(Some(removal::LocalChoice::forced(named.id())));
     }
     if named.warnings().is_empty() {
@@ -790,7 +796,7 @@ fn named_removal_choice(
     for warning in named.warnings() {
         eprintln!("{warning}");
     }
-    if confirm(named.question(), false)? != Confirmation::Accepted {
+    if confirm(named.question(), DefaultAnswer::No)? != Confirmation::Accepted {
         return Ok(None);
     }
     Ok(Some(removal::LocalChoice::named(named.id())))

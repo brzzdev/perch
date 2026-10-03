@@ -212,11 +212,12 @@ pub(crate) fn run_rm(options: &WorktreeRemoval) -> AppResult<()> {
     let cwd = env::current_dir()
         .ok()
         .and_then(|dir| dir.canonicalize().ok());
+    let forcing = removal::Forcing::from(options.force());
     let assessment = removal::assess(removal::Request::Worktrees(removal::WorktreeRequest::new(
         worktrees,
         cwd,
         options.target(),
-        removal::Forcing::from(options.force()),
+        forcing,
     )))?;
     if assessment.offers().is_empty() {
         eprintln!("No worktrees to remove.");
@@ -225,7 +226,7 @@ pub(crate) fn run_rm(options: &WorktreeRemoval) -> AppResult<()> {
     let Some(selection) = select_removal_locals(
         &assessment,
         options.target(),
-        options.force(),
+        forcing,
         "Remove worktrees (space to toggle, →/← all/none)",
     )?
     else {

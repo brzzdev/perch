@@ -3,7 +3,9 @@
 //! targets have a safety contract of their own.
 
 use super::picker::{MultiItem, interactive_keys, multi_select};
-use super::{Confirmation, confirm, interactive_term, removal, select_removal_locals};
+use super::{
+    Confirmation, DefaultAnswer, confirm, interactive_term, removal, select_removal_locals,
+};
 use crate::grammar::BranchRemoval;
 use crate::{AppResult, Error, git};
 
@@ -31,7 +33,7 @@ pub(crate) fn run_rm(options: &BranchRemoval) -> AppResult<()> {
     let Some(selection) = select_removal_locals(
         &assessment,
         options.target(),
-        options.force(),
+        removal::Forcing::from(options.force()),
         "Remove local branches (space to toggle, →/← all/none)",
     )?
     else {
@@ -73,7 +75,13 @@ fn select_upstream(
                     .into(),
             ));
         }
-        return Ok(match confirm(offer.question(), options.upstream())? {
+        // Asking for `--upstream` already said yes; Enter keeps that answer.
+        let default = if options.upstream() {
+            DefaultAnswer::Yes
+        } else {
+            DefaultAnswer::No
+        };
+        return Ok(match confirm(offer.question(), default)? {
             Confirmation::Accepted => Some(removal::UpstreamChoice::selected(vec![offer.id()])),
             Confirmation::Cancelled => None,
             Confirmation::Declined => Some(removal::UpstreamChoice::keep()),

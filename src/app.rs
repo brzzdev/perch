@@ -560,12 +560,12 @@ pub(crate) enum DefaultAnswer {
 /// `Declined`, Escape returns `Cancelled`, and a non-interactive call resolves
 /// to `default`.
 pub(crate) fn confirm(prompt: &str, default: DefaultAnswer) -> AppResult<Confirmation> {
-    let fallback = match default {
+    let default_confirmation = match default {
         DefaultAnswer::No => Confirmation::Declined,
         DefaultAnswer::Yes => Confirmation::Accepted,
     };
     let Some(term) = interactive_term() else {
-        return Ok(fallback);
+        return Ok(default_confirmation);
     };
     let hint = match default {
         DefaultAnswer::No => "[y/N] / esc",
@@ -583,7 +583,7 @@ pub(crate) fn confirm(prompt: &str, default: DefaultAnswer) -> AppResult<Confirm
             Key::Char('y' | 'Y') => Confirmation::Accepted,
             Key::Escape => Confirmation::Cancelled,
             Key::Char('n' | 'N') => Confirmation::Declined,
-            Key::Enter => fallback,
+            Key::Enter => default_confirmation,
             _ => continue,
         };
         eprintln!(

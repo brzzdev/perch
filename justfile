@@ -11,10 +11,9 @@ format:
 # Install the release binary locally.
 install: build-release
   mkdir -p ~/.local/bin
-  # Copying over the old binary in place leaves macOS holding its stale code
-  # signature, which kills the new one on launch; a fresh file sidesteps that.
-  rm -f ~/.local/bin/perch
-  cp target/release/perch ~/.local/bin/perch
+  @# `install` writes a fresh file where `cp` would overwrite in place, leaving
+  @# macOS a stale code signature that kills the new binary on launch.
+  install target/release/perch ~/.local/bin/perch
 
 # Install shell completions for perch, br, and wt.
 install-completions:

@@ -47,8 +47,8 @@ pub(crate) fn describe(risk: Risk, subject: &str, path: &Path) -> Vec<String> {
     }
     if risk.submodules {
         lines.push(format!(
-            "{} has initialized submodules; their checkouts go with it, with any unpushed \
-             commits or stashes in them perch cannot check",
+            "{} has initialized submodules; their repositories go with it, and any unpushed \
+             commits or stashes in them, which perch cannot check, will be lost",
             display_path(path)
         ));
     }

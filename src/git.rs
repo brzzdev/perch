@@ -889,13 +889,28 @@ pub fn worktree_dirtiness(path: &Path) -> Option<bool> {
         .map(|output| !output.stdout.is_empty())
 }
 
-/// Whether the worktree contains an initialized submodule. Git refuses to
-/// remove such a worktree even when its status is clean, so a destructive fast
-/// path must keep that guard in charge. This reads gitlinks from the index
-/// rather than `.gitmodules`, which may legitimately omit one Git can remove.
-/// `None` means Git or the filesystem could not inspect it.
+/// Whether the worktree contains an initialized submodule, by the same two
+/// tests as the guard that makes Git refuse to remove it even when clean: a
+/// `modules` directory in its admin directory, which keeps submodule
+/// repositories after `submodule deinit` or `git rm` emptied their checkouts,
+/// or a populated gitlink. Gitlinks are read from the index rather than
+/// `.gitmodules`, which may legitimately omit one Git can remove. `None` means
+/// Git or the filesystem could not inspect it.
 #[must_use]
 pub fn worktree_has_initialized_submodules(path: &Path) -> Option<bool> {
+    let modules = git_cmd(Some(path))
+        .args(["rev-parse", "--git-path", "modules"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())?;
+    let modules = String::from_utf8(modules.stdout).ok()?;
+    match std::fs::metadata(path.join(modules.trim_end_matches('\n'))) {
+        Ok(metadata) if metadata.is_dir() => return Some(true),
+        Ok(_) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(_) => return None,
+    }
+
     let output = git_cmd(Some(path))
         .args(["ls-files", "--stage", "-z"])
         .output()

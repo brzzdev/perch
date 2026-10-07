@@ -24,7 +24,7 @@ mod reporting;
 #[derive(Default, Clone, Copy)]
 struct Risk {
     dirty: bool,
-    /// The worktree has initialized submodules, whose checkouts go with it and
+    /// The worktree has initialized submodules, whose repositories go with it and
     /// whose own work perch cannot check.
     submodules: bool,
     unmerged: Option<git::Unmerged>,
@@ -1365,7 +1365,7 @@ impl License {
     /// The risk the user was warned about — as row markers in a picker, or as
     /// the confirmation that stands in for them where a target was named on the
     /// command line. A *dirty* worktree licenses discarding its files, one with
-    /// initialized submodules their checkouts, an *unmerged* branch its commits,
+    /// initialized submodules their repositories, an *unmerged* branch its commits,
     /// and nothing licenses anything else: a risk that arose after the warning
     /// was given is absent here, so git's own guard refuses instead.
     pub(crate) fn shown(risk: Risk) -> Self {
@@ -2076,8 +2076,9 @@ mod tests {
         assert_eq!(
             plain(named.warnings()),
             [
-                "! /tmp/worktrees/feature has initialized submodules; their checkouts go with it, \
-                 with any unpushed commits or stashes in them perch cannot check"
+                "! /tmp/worktrees/feature has initialized submodules; their repositories go with \
+                 it, and any unpushed commits or stashes in them, which perch cannot check, will \
+                 be lost"
             ]
         );
         assert!(
@@ -2829,9 +2830,9 @@ mod tests {
         })
     }
 
-    /// Which forcing the worktree step got, from a fresh state and the risks
-    /// its row warned of.
-    fn worktree_forcing_for(state: FreshWorktree, license: &License) -> Vec<Call> {
+    /// The staging and removal steps the worktree got, from a fresh state and
+    /// the risks its row warned of.
+    fn worktree_steps_for(state: FreshWorktree, license: &License) -> Vec<Call> {
         let mut steps = FakeSteps::new();
         steps.worktree_state = state;
         remove(held(), license, Reclamation::Background, &mut steps).expect("no step to fail");
@@ -2845,7 +2846,7 @@ mod tests {
     #[test]
     fn an_incomplete_safety_read_meets_gits_unforced_guard() {
         assert_eq!(
-            worktree_forcing_for(FreshWorktree::SubmodulesUnreadable, &warned(true, true)),
+            worktree_steps_for(FreshWorktree::SubmodulesUnreadable, &warned(true, true)),
             [Call::RemoveWorktree(Forcing::Unforced)]
         );
     }
@@ -2878,7 +2879,7 @@ mod tests {
     #[test]
     fn a_warned_submodule_risk_forces_past_gits_guard_without_staging() {
         assert_eq!(
-            worktree_forcing_for(
+            worktree_steps_for(
                 FreshWorktree::Guarded { dirty: Some(false) },
                 &warned(false, true)
             ),
@@ -2916,7 +2917,7 @@ mod tests {
     fn a_submodule_marker_does_not_cover_dirtiness_that_arose_after_it() {
         for dirty in [Some(true), None] {
             assert_eq!(
-                worktree_forcing_for(FreshWorktree::Guarded { dirty }, &warned(false, true)),
+                worktree_steps_for(FreshWorktree::Guarded { dirty }, &warned(false, true)),
                 [Call::RemoveWorktree(Forcing::Unforced)],
                 "{dirty:?}"
             );
@@ -2926,7 +2927,7 @@ mod tests {
     #[test]
     fn submodules_and_dirtiness_both_warned_force_past_gits_guard() {
         assert_eq!(
-            worktree_forcing_for(
+            worktree_steps_for(
                 FreshWorktree::Guarded { dirty: Some(true) },
                 &warned(true, true)
             ),

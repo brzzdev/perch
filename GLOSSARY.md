@@ -63,7 +63,7 @@ _Avoid_: Staged, removable
 ### Destruction
 
 **Risk**:
-What removing something would irreversibly destroy: a dirty worktree's files, a worktree's initialized submodule checkouts (with any work in them Perch cannot check), an unmerged branch's commits, or a shared upstream ref. Something with no risk can be removed without asking. An unmerged branch that is *Equivalent* destroys nothing, so it carries no risk and draws no *Marker*; an upstream deletion always carries risk because the local merge judgement assumes that ref survives.
+What removing something would irreversibly destroy: a dirty worktree's files, a worktree's initialized submodule repositories (with any work in them Perch cannot check), an unmerged branch's commits, or a shared upstream ref. Something with no risk can be removed without asking. An unmerged branch that is *Equivalent* destroys nothing, so it carries no risk and draws no *Marker*; an upstream deletion always carries risk because the local merge judgement assumes that ref survives.
 _Avoid_: Danger, safety, hazard
 
 **Marker**:

@@ -32,7 +32,7 @@ pub(crate) enum Marker {
     BehindUpstream(u32),
     /// A *Dirty* worktree: uncommitted or untracked changes.
     Dirty,
-    /// A worktree with initialized submodules, whose checkouts go with it. Git
+    /// A worktree with initialized submodules, whose repositories go with it. Git
     /// refuses to remove one unforced even when it is clean.
     Submodules,
     /// An *Unmerged* branch, holding commits `git branch -d` would refuse to

@@ -3904,6 +3904,30 @@ fn wt_rm_refuses_a_worktree_with_initialized_submodules_non_interactively() {
     assert!(path.exists(), "worktree must survive: {}", path.display());
 }
 
+/// Deinitializing a submodule empties its checkout but leaves its repository,
+/// and any commits in it, in the worktree's admin directory. Git's guard still
+/// refuses that worktree, so perch must warn about it rather than stage it away.
+#[test]
+fn wt_rm_refuses_a_worktree_keeping_a_deinitialized_submodules_repository() {
+    let (_bare, parent, work) = setup_with_parent();
+    let (_submodule, path) = add_worktree_with_initialized_submodule(&work, &parent);
+    git(&path, &["submodule", "deinit", "--force", "module"]);
+
+    let output = perch_args(&work, &["wt", "rm", "feature"]);
+
+    assert!(
+        !output.status.success(),
+        "should exit non-zero; stderr: {}",
+        stderr_str(&output)
+    );
+    assert!(
+        stderr_str(&output).contains("has initialized submodules"),
+        "should name the risk; got: {}",
+        stderr_str(&output)
+    );
+    assert!(path.exists(), "worktree must survive: {}", path.display());
+}
+
 #[test]
 fn wt_rm_force_removes_a_worktree_with_initialized_submodules() {
     let (_bare, parent, work) = setup_with_parent();

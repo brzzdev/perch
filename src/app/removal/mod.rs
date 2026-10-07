@@ -24,6 +24,9 @@ mod reporting;
 #[derive(Default, Clone, Copy)]
 struct Risk {
     dirty: bool,
+    /// The worktree has initialized submodules, whose checkouts go with it and
+    /// whose own work perch cannot check.
+    submodules: bool,
     unmerged: Option<git::Unmerged>,
 }
 
@@ -34,6 +37,9 @@ impl Risk {
         let mut markers = Vec::new();
         if self.dirty {
             markers.push(marker::Marker::Dirty);
+        }
+        if self.submodules {
+            markers.push(marker::Marker::Submodules);
         }
         match self.unmerged {
             Some(git::Unmerged::Ahead(n)) => markers.push(marker::Marker::Unmerged(Some(n))),
@@ -867,18 +873,25 @@ pub(crate) fn assess(request: Request) -> AppResult<Assessment> {
 }
 
 fn risk_legend(risks: impl IntoIterator<Item = Risk>) -> Option<String> {
-    let (has_dirty, has_unmerged) =
-        risks
-            .into_iter()
-            .fold((false, false), |(has_dirty, has_unmerged), risk| {
-                (
-                    has_dirty || risk.dirty,
-                    has_unmerged || risk.unmerged.is_some(),
-                )
-            });
+    let (has_dirty, has_submodules, has_unmerged) = risks.into_iter().fold(
+        (false, false, false),
+        |(has_dirty, has_submodules, has_unmerged), risk| {
+            (
+                has_dirty || risk.dirty,
+                has_submodules || risk.submodules,
+                has_unmerged || risk.unmerged.is_some(),
+            )
+        },
+    );
     let mut parts = Vec::new();
     if has_dirty {
         parts.push(format!("{} uncommitted changes", marker::Marker::Dirty));
+    }
+    if has_submodules {
+        parts.push(format!(
+            "{} initialized submodules",
+            marker::Marker::Submodules
+        ));
     }
     if has_unmerged {
         parts.push(format!(
@@ -905,7 +918,20 @@ fn assess_stale(request: StaleRequest) -> Assessment {
         })
         .collect();
     let equivalent = git::equivalent_branches(main.as_deref(), &request.remote, &candidates);
-    build_stale_assessment(request, main, &unmerged, &equivalent, git::worktree_dirty)
+    build_stale_assessment(
+        request,
+        main,
+        &unmerged,
+        &equivalent,
+        git::worktree_dirty,
+        has_initialized_submodules,
+    )
+}
+
+/// Whether a worktree shows the submodule *Risk*. One whose submodules could
+/// not be inspected shows none, so git's own guard stays in charge of it.
+fn has_initialized_submodules(path: &Path) -> bool {
+    git::worktree_has_initialized_submodules(path) == Some(true)
 }
 
 fn build_stale_assessment(
@@ -914,6 +940,7 @@ fn build_stale_assessment(
     unmerged: &HashMap<String, git::Unmerged>,
     equivalent: &HashMap<String, git::Proof>,
     dirty: impl Fn(&Path) -> bool,
+    submodules: impl Fn(&Path) -> bool,
 ) -> Assessment {
     let mut raw = Vec::new();
     let mut locals = Vec::new();
@@ -927,24 +954,29 @@ fn build_stale_assessment(
     for stale in stale {
         let worktree = git::worktree_for_branch(&request.worktrees, &stale.name);
         let proof = equivalent.get(&stale.name).cloned();
+        let present = worktree.as_ref().filter(|worktree| !worktree.prunable);
         let risk = Risk {
-            dirty: worktree
-                .as_ref()
-                .is_some_and(|worktree| !worktree.prunable && dirty(&worktree.path)),
+            dirty: present.is_some_and(|worktree| dirty(&worktree.path)),
+            submodules: present.is_some_and(|worktree| submodules(&worktree.path)),
             unmerged: proof
                 .is_none()
                 .then(|| unmerged.get(&stale.name).copied())
                 .flatten(),
         };
+        let worktree_risk = Risk {
+            unmerged: None,
+            ..risk
+        }
+        .markers();
         let worktree_label = match &worktree {
             None => String::new(),
             Some(worktree) if worktree.prunable => "(+ worktree, missing)".to_string(),
-            Some(_) if risk.dirty => format!("(+ worktree {})", marker::Marker::Dirty),
-            Some(_) => "(+ worktree)".to_string(),
+            Some(_) if worktree_risk.is_empty() => "(+ worktree)".to_string(),
+            Some(_) => format!("(+ worktree {worktree_risk})"),
         };
         let branch_risk = Risk {
-            dirty: false,
             unmerged: risk.unmerged,
+            ..Risk::default()
         }
         .markers();
         let ground = stale_ground_label(stale.ground);
@@ -1028,8 +1060,8 @@ fn assess_branches(request: BranchRequest) -> AppResult<Assessment> {
         // reading of the same fact.
         let named_error = git::worktree_for_branch(&request.worktrees, &name).map(NamedError::Held);
         let risk = Risk {
-            dirty: false,
             unmerged: unmerged.get(&name).copied(),
+            ..Risk::default()
         };
         let annotation = if request.current.as_deref() == Some(&name) {
             "current".to_string()
@@ -1094,7 +1126,7 @@ fn assess_branches(request: BranchRequest) -> AppResult<Assessment> {
 }
 
 fn assess_worktrees(request: WorktreeRequest) -> AppResult<Assessment> {
-    build_worktree_assessment(request, git::worktree_dirty)
+    build_worktree_assessment(request, git::worktree_dirty, has_initialized_submodules)
 }
 
 /// Every name `wt rm` accepts for one worktree: its branch, and the final
@@ -1139,6 +1171,7 @@ fn resolve_worktree_target(
 fn build_worktree_assessment(
     request: WorktreeRequest,
     mut worktree_dirty: impl FnMut(&Path) -> bool,
+    mut worktree_submodules: impl FnMut(&Path) -> bool,
 ) -> AppResult<Assessment> {
     let main = request
         .worktrees
@@ -1179,30 +1212,26 @@ fn build_worktree_assessment(
     let unmerged = git::unmerged_branches(Some(&main)).unwrap_or_default();
     let (mut raw, mut locals) = (Vec::new(), Vec::new());
     for (index, (worktree, contains_cwd)) in removable.into_iter().enumerate() {
-        let assess_dirtiness = request.target.is_none()
-            || (request.forcing == Forcing::Unforced
-                && worktree_target.as_ref().and_then(|resolved| resolved.id)
-                    == Some(LocalId(index)));
+        let assess_worktree = !worktree.prunable
+            && (request.target.is_none()
+                || (request.forcing == Forcing::Unforced
+                    && worktree_target.as_ref().and_then(|resolved| resolved.id)
+                        == Some(LocalId(index))));
         let risk = Risk {
-            // INVARIANT: Named assessments never render unassessed dirtiness.
-            // Non-target rows are unreachable, and --force consumes no warnings.
-            dirty: assess_dirtiness && !worktree.prunable && worktree_dirty(&worktree.path),
+            // INVARIANT: Named assessments never render an unassessed worktree
+            // risk. Non-target rows are unreachable, and --force consumes no
+            // warnings.
+            dirty: assess_worktree && worktree_dirty(&worktree.path),
+            submodules: assess_worktree && worktree_submodules(&worktree.path),
             unmerged: worktree
                 .branch
                 .as_deref()
                 .and_then(|branch| unmerged.get(branch).copied()),
         };
-        let mut name = worktree
-            .branch
-            .clone()
-            .unwrap_or_else(|| display_path(&worktree.path));
-        if worktree.prunable {
-            name.push_str(" (missing)");
-        }
-        if current == Some(LocalId(index)) {
-            name.push_str(" (current)");
-        }
-        raw.push((name, risk.markers()));
+        raw.push((
+            worktree_row_name(&worktree, current == Some(LocalId(index))),
+            risk.markers(),
+        ));
         let target = match worktree.branch {
             Some(name) => OwnedTarget::Held {
                 name,
@@ -1244,6 +1273,21 @@ fn build_worktree_assessment(
     })
 }
 
+/// A worktree picker row's name: its branch, or its path where it is detached.
+fn worktree_row_name(worktree: &git::Worktree, is_current: bool) -> String {
+    let mut name = worktree
+        .branch
+        .clone()
+        .unwrap_or_else(|| display_path(&worktree.path));
+    if worktree.prunable {
+        name.push_str(" (missing)");
+    }
+    if is_current {
+        name.push_str(" (current)");
+    }
+    name
+}
+
 /// What is being removed. Every case names something real, so "neither a branch
 /// nor a worktree" cannot be asked for. It borrows from the row or worktree the
 /// caller is already holding to render the outcome from, and travels on in the
@@ -1274,24 +1318,23 @@ impl<'a> Target<'a> {
     }
 }
 
-/// The worktree half of a [`License`]: on what authority the delete may discard
-/// files. A shown dirty marker is deliberately distinct from explicit force:
-/// both cover dirty files, but only the latter may override an unrelated git
-/// guard such as an initialized submodule.
+/// The worktree half of a [`License`]: which of git's two worktree guards the
+/// delete may force past. Git has one `--force` for both, so a warning about
+/// one does not cover the other; only explicit force covers whatever is found.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WorktreeLicense {
-    None,
-    Marked,
     Forced,
+    /// The worktree risks the user was warned of: its uncommitted changes, and
+    /// its initialized submodules.
+    Shown {
+        dirty: bool,
+        submodules: bool,
+    },
 }
 
 impl WorktreeLicense {
     fn permits_file_discard(self) -> bool {
-        !matches!(self, Self::None)
-    }
-
-    fn permits_guard_override(self) -> bool {
-        matches!(self, Self::Forced)
+        matches!(self, Self::Forced | Self::Shown { dirty: true, .. })
     }
 }
 
@@ -1326,16 +1369,15 @@ struct License {
 impl License {
     /// The risk the user was warned about — as row markers in a picker, or as
     /// the confirmation that stands in for them where a target was named on the
-    /// command line. A *dirty* worktree licenses discarding its files, an
-    /// *unmerged* branch its commits, and nothing licenses anything else: a risk
-    /// that arose after the warning was given is absent here, so git's own guard
-    /// refuses instead.
+    /// command line. A *dirty* worktree licenses discarding its files, one with
+    /// initialized submodules their checkouts, an *unmerged* branch its commits,
+    /// and nothing licenses anything else: a risk that arose after the warning
+    /// was given is absent here, so git's own guard refuses instead.
     pub(crate) fn shown(risk: Risk) -> Self {
         Self {
-            worktree: if risk.dirty {
-                WorktreeLicense::Marked
-            } else {
-                WorktreeLicense::None
+            worktree: WorktreeLicense::Shown {
+                dirty: risk.dirty,
+                submodules: risk.submodules,
             },
             branch: if risk.unmerged.is_some() {
                 BranchLicense::Outright
@@ -1441,7 +1483,11 @@ enum FreshWorktree {
     Clean,
     Dirty,
     DirtinessUnreadable,
-    Guarded,
+    /// It has initialized submodules, so git refuses it unforced even when
+    /// clean. `dirty` is `None` where its dirtiness could not be read.
+    Guarded {
+        dirty: Option<bool>,
+    },
     Missing,
     SubmodulesUnreadable,
 }
@@ -1504,19 +1550,17 @@ impl Steps for GitSteps {
     }
 
     fn worktree_state(&mut self, path: &Path) -> FreshWorktree {
-        if path.exists() {
-            match git::worktree_has_initialized_submodules(path) {
-                Some(true) => return FreshWorktree::Guarded,
-                Some(false) => {}
-                None => return FreshWorktree::SubmodulesUnreadable,
-            }
-            match git::worktree_dirtiness(path) {
-                Some(true) => FreshWorktree::Dirty,
-                Some(false) => FreshWorktree::Clean,
-                None => FreshWorktree::DirtinessUnreadable,
-            }
-        } else {
-            FreshWorktree::Missing
+        if !path.exists() {
+            return FreshWorktree::Missing;
+        }
+        let Some(guarded) = git::worktree_has_initialized_submodules(path) else {
+            return FreshWorktree::SubmodulesUnreadable;
+        };
+        match (guarded, git::worktree_dirtiness(path)) {
+            (true, dirty) => FreshWorktree::Guarded { dirty },
+            (false, Some(true)) => FreshWorktree::Dirty,
+            (false, Some(false)) => FreshWorktree::Clean,
+            (false, None) => FreshWorktree::DirtinessUnreadable,
         }
     }
 
@@ -1598,13 +1642,26 @@ fn remove<'a>(
     Ok(report)
 }
 
+/// Forces only where every risk the fresh read found was warned of. Dirtiness
+/// that could not be read counts as found, and submodules that could not be
+/// read leave git's guard in charge.
 fn worktree_forcing(state: FreshWorktree, license: WorktreeLicense) -> Forcing {
-    if license.permits_guard_override()
-        || matches!(
-            state,
-            FreshWorktree::Dirty | FreshWorktree::DirtinessUnreadable
-        ) && license.permits_file_discard()
-    {
+    let covered = match (license, state) {
+        (WorktreeLicense::Forced, _) => true,
+        (
+            WorktreeLicense::Shown { dirty, .. },
+            FreshWorktree::Dirty | FreshWorktree::DirtinessUnreadable,
+        ) => dirty,
+        (
+            WorktreeLicense::Shown { dirty, submodules },
+            FreshWorktree::Guarded { dirty: fresh_dirty },
+        ) => submodules && (dirty || fresh_dirty == Some(false)),
+        (
+            WorktreeLicense::Shown { .. },
+            FreshWorktree::Clean | FreshWorktree::Missing | FreshWorktree::SubmodulesUnreadable,
+        ) => false,
+    };
+    if covered {
         Forcing::Forced
     } else {
         Forcing::Unforced
@@ -1623,9 +1680,9 @@ fn remove_worktree_in_background(
         FreshWorktree::Dirty | FreshWorktree::DirtinessUnreadable => {
             license.worktree.permits_file_discard()
         }
-        FreshWorktree::Guarded | FreshWorktree::Missing | FreshWorktree::SubmodulesUnreadable => {
-            false
-        }
+        FreshWorktree::Guarded { .. }
+        | FreshWorktree::Missing
+        | FreshWorktree::SubmodulesUnreadable => false,
     };
     if !may_stage {
         return steps.remove_worktree(path, fallback_forcing);
@@ -1735,6 +1792,7 @@ mod tests {
         assert_eq!(
             plain_marker(Risk {
                 dirty: true,
+                submodules: false,
                 unmerged: Some(git::Unmerged::Ahead(2)),
             }),
             "● ↑2"
@@ -1742,6 +1800,7 @@ mod tests {
         assert_eq!(
             plain_marker(Risk {
                 dirty: false,
+                submodules: false,
                 unmerged: Some(git::Unmerged::NoUpstream),
             }),
             "↑"
@@ -1771,6 +1830,7 @@ mod tests {
             None,
             &HashMap::new(),
             &HashMap::new(),
+            |_| false,
             |_| false,
         );
 
@@ -1819,17 +1879,21 @@ mod tests {
     }
 
     #[test]
-    fn forced_named_assessment_does_not_read_worktree_dirtiness() {
+    fn forced_named_assessment_does_not_read_worktree_risks() {
         let worktrees = with_main_worktree(vec![
             test_worktree("feature", "/tmp/worktrees/feature"),
             test_worktree("other", "/tmp/worktrees/other"),
         ]);
-        let mut dirty_paths = Vec::new();
+        let read_paths = std::cell::RefCell::new(Vec::new());
 
         let assessment = build_worktree_assessment(
             WorktreeRequest::new(worktrees, None, Some("feature"), Forcing::Forced),
             |path| {
-                dirty_paths.push(path.to_path_buf());
+                read_paths.borrow_mut().push(path.to_path_buf());
+                true
+            },
+            |path| {
+                read_paths.borrow_mut().push(path.to_path_buf());
                 true
             },
         )
@@ -1839,7 +1903,7 @@ mod tests {
             .choose(LocalChoice::forced(named.id()))
             .expect("forced Removal");
 
-        assert_eq!(dirty_paths, Vec::<PathBuf>::new());
+        assert_eq!(read_paths.into_inner(), Vec::<PathBuf>::new());
     }
 
     #[test]
@@ -1861,6 +1925,7 @@ mod tests {
                 dirty_paths.push(path.to_path_buf());
                 false
             },
+            |_| false,
         )
         .expect("worktree assessment");
         assessment.named(".").expect("current worktree");
@@ -1898,6 +1963,7 @@ mod tests {
                 dirty_paths.push(path.to_path_buf());
                 true
             },
+            |_| false,
         )
         .expect("worktree assessment");
         let named = assessment.named("login").expect("directory target");
@@ -1926,6 +1992,7 @@ mod tests {
                 dirty_paths.push(path.to_path_buf());
                 false
             },
+            |_| false,
         )
         .expect("worktree assessment");
 
@@ -1949,6 +2016,7 @@ mod tests {
             let assessment = build_worktree_assessment(
                 WorktreeRequest::new(worktrees, None, None, forcing),
                 |path| path.ends_with("feature"),
+                |_| false,
             )
             .expect("worktree assessment");
             let labels: Vec<String> = assessment
@@ -1970,6 +2038,94 @@ mod tests {
                 "{forcing:?}",
             );
         }
+    }
+
+    #[test]
+    fn picker_marks_initialized_submodules_beside_dirtiness_and_explains_them() {
+        let worktrees = with_main_worktree(vec![
+            test_worktree("both", "/tmp/worktrees/both"),
+            test_worktree("modules", "/tmp/worktrees/modules"),
+            test_worktree("plain", "/tmp/worktrees/plain"),
+        ]);
+
+        let assessment = build_worktree_assessment(
+            WorktreeRequest::new(worktrees, None, None, Forcing::Unforced),
+            |path| path.ends_with("both"),
+            |path| !path.ends_with("plain"),
+        )
+        .expect("worktree assessment");
+        let labels: Vec<String> = assessment
+            .offers()
+            .iter()
+            .map(|offer| console::strip_ansi_codes(&offer.label).into_owned())
+            .collect();
+
+        assert_eq!(labels, ["both     ● ◆", "modules  ◆", "plain"]);
+        assert_eq!(
+            assessment
+                .legend()
+                .map(console::strip_ansi_codes)
+                .as_deref(),
+            Some("● uncommitted changes   ◆ initialized submodules")
+        );
+    }
+
+    #[test]
+    fn a_named_worktree_with_submodules_warns_before_removal_and_refuses_without_a_terminal() {
+        let worktrees =
+            with_main_worktree(vec![test_worktree("feature", "/tmp/worktrees/feature")]);
+
+        let assessment = build_worktree_assessment(
+            WorktreeRequest::new(worktrees, None, Some("feature"), Forcing::Unforced),
+            |_| false,
+            |_| true,
+        )
+        .expect("worktree assessment");
+        let named = assessment.named("feature").expect("named worktree");
+
+        assert_eq!(
+            plain(named.warnings()),
+            [
+                "! /tmp/worktrees/feature has initialized submodules; their checkouts go with it, \
+                 with any unpushed commits or stashes in them perch cannot check"
+            ]
+        );
+        assert!(
+            named.refusal().contains("has initialized submodules")
+                && named
+                    .refusal()
+                    .ends_with("not removing. Rerun in a terminal to confirm, or pass --force."),
+            "{}",
+            named.refusal()
+        );
+    }
+
+    #[test]
+    fn confirming_a_named_worktree_licenses_forcing_past_its_submodules() {
+        let worktrees =
+            with_main_worktree(vec![test_worktree("feature", "/tmp/worktrees/feature")]);
+        let assessment = build_worktree_assessment(
+            WorktreeRequest::new(worktrees, None, Some("feature"), Forcing::Unforced),
+            |_| false,
+            |_| true,
+        )
+        .expect("worktree assessment");
+        let named = assessment.named("feature").expect("named worktree");
+        let pending = assessment
+            .choose(LocalChoice::named(named.id()))
+            .expect("pending Removal");
+        let mut steps = FakeSteps::new();
+        steps.worktree_state = FreshWorktree::Guarded { dirty: Some(false) };
+
+        remove(
+            pending.locals[0].target.borrowed(),
+            &pending.locals[0].license,
+            Reclamation::Background,
+            &mut steps,
+        )
+        .expect("no step to fail");
+
+        assert_eq!(steps.calls[1], Call::RemoveWorktree(Forcing::Forced));
     }
 
     #[test]
@@ -2037,6 +2193,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             |_| false,
+            |_| false,
         );
 
         let label = console::strip_ansi_codes(&assessment.offers[0].label).into_owned();
@@ -2065,6 +2222,7 @@ mod tests {
             None,
             &HashMap::new(),
             &HashMap::new(),
+            |_| false,
             |_| false,
         );
 
@@ -2106,6 +2264,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             |_| false,
+            |_| false,
         );
 
         let labels: Vec<String> = assessment
@@ -2138,11 +2297,12 @@ mod tests {
             &HashMap::from([("feature".to_string(), git::Unmerged::Ahead(2))]),
             &HashMap::new(),
             |path| path == Path::new("/tmp/feature"),
+            |path| path == Path::new("/tmp/feature"),
         );
 
         let label = console::strip_ansi_codes(&assessment.offers[0].label).into_owned();
         assert!(
-            label.contains("untracked, tip in anchor (+ worktree ●) ↑2"),
+            label.contains("untracked, tip in anchor (+ worktree ● ◆) ↑2"),
             "ground and risks should keep their established order: {label}"
         );
     }
@@ -2151,10 +2311,12 @@ mod tests {
     fn risk_legend_names_only_the_markers_present() {
         let dirty = Risk {
             dirty: true,
+            submodules: false,
             unmerged: None,
         };
         let unmerged = Risk {
             dirty: false,
+            submodules: false,
             unmerged: Some(git::Unmerged::NoUpstream),
         };
         assert_eq!(
@@ -2203,6 +2365,7 @@ mod tests {
             &HashMap::from([("shipped".to_string(), git::Unmerged::NoUpstream)]),
             &HashMap::from([("shipped".to_string(), proof.clone())]),
             |_| false,
+            |_| false,
         );
 
         let local = &assessment.locals[0];
@@ -2220,6 +2383,7 @@ mod tests {
         )]);
         let assessment = build_worktree_assessment(
             WorktreeRequest::new(worktrees, None, Some("feat"), Forcing::Unforced),
+            |_| false,
             |_| false,
         )
         .expect("worktree assessment");
@@ -2595,6 +2759,7 @@ mod tests {
         steps.worktree_state = FreshWorktree::Dirty;
         let risk = Risk {
             dirty: true,
+            submodules: false,
             unmerged: None,
         };
 
@@ -2665,30 +2830,33 @@ mod tests {
         );
     }
 
+    /// The worktree risks a test row was warned of, and nothing about its branch.
+    fn warned(dirty: bool, submodules: bool) -> License {
+        License::shown(Risk {
+            dirty,
+            submodules,
+            unmerged: None,
+        })
+    }
+
+    /// Which forcing the worktree step got, from a fresh state and the risks
+    /// its row warned of.
+    fn worktree_forcing_for(state: FreshWorktree, license: &License) -> Vec<Call> {
+        let mut steps = FakeSteps::new();
+        steps.worktree_state = state;
+        remove(held(), license, Reclamation::Background, &mut steps).expect("no step to fail");
+        steps
+            .calls
+            .into_iter()
+            .filter(|call| matches!(call, Call::RemoveWorktree(_) | Call::StageWorktree))
+            .collect()
+    }
+
     #[test]
     fn an_incomplete_safety_read_meets_gits_unforced_guard() {
-        let mut steps = FakeSteps::new();
-        steps.worktree_state = FreshWorktree::SubmodulesUnreadable;
-        steps.worktree = git::WorktreeRemoveOutcome::Failed("uninspectable".to_string());
-        let risk = Risk {
-            dirty: true,
-            unmerged: None,
-        };
-
-        remove(
-            held(),
-            &License::shown(risk),
-            Reclamation::Background,
-            &mut steps,
-        )
-        .expect("git refusal is an outcome");
-
         assert_eq!(
-            steps.calls,
-            vec![
-                Call::ReadWorktree(FreshWorktree::SubmodulesUnreadable),
-                Call::RemoveWorktree(Forcing::Unforced),
-            ]
+            worktree_forcing_for(FreshWorktree::SubmodulesUnreadable, &warned(true, true)),
+            [Call::RemoveWorktree(Forcing::Unforced)]
         );
     }
 
@@ -2718,18 +2886,25 @@ mod tests {
     }
 
     #[test]
+    fn a_warned_submodule_risk_forces_past_gits_guard_without_staging() {
+        assert_eq!(
+            worktree_forcing_for(
+                FreshWorktree::Guarded { dirty: Some(false) },
+                &warned(false, true)
+            ),
+            [Call::RemoveWorktree(Forcing::Forced)]
+        );
+    }
+
+    #[test]
     fn a_dirty_marker_does_not_override_an_initialized_submodule_guard() {
         let mut steps = FakeSteps::new();
-        steps.worktree_state = FreshWorktree::Guarded;
+        steps.worktree_state = FreshWorktree::Guarded { dirty: Some(true) };
         steps.worktree = git::WorktreeRemoveOutcome::Failed("submodule".to_string());
-        let risk = Risk {
-            dirty: true,
-            unmerged: None,
-        };
 
         let report = remove(
             held(),
-            &License::shown(risk),
+            &warned(true, false),
             Reclamation::Background,
             &mut steps,
         )
@@ -2738,45 +2913,57 @@ mod tests {
         assert_eq!(
             steps.calls,
             vec![
-                Call::ReadWorktree(FreshWorktree::Guarded),
+                Call::ReadWorktree(FreshWorktree::Guarded { dirty: Some(true) }),
                 Call::RemoveWorktree(Forcing::Unforced),
             ]
         );
         assert!(report.branch.is_none());
     }
 
+    /// Git has one `--force` for both guards, so forcing past the submodule
+    /// guard would also discard files nobody was warned of.
     #[test]
-    fn stale_removal_does_not_let_a_dirty_marker_override_a_submodule_guard() {
-        let mut steps = FakeSteps::new();
-        steps.worktree_state = FreshWorktree::Guarded;
-        steps.worktree = git::WorktreeRemoveOutcome::Failed("submodule".to_string());
-        let risk = Risk {
-            dirty: true,
-            unmerged: None,
-        };
+    fn a_submodule_marker_does_not_cover_dirtiness_that_arose_after_it() {
+        for dirty in [Some(true), None] {
+            assert_eq!(
+                worktree_forcing_for(FreshWorktree::Guarded { dirty }, &warned(false, true)),
+                [Call::RemoveWorktree(Forcing::Unforced)],
+                "{dirty:?}"
+            );
+        }
+    }
 
-        let report = remove(
-            held(),
-            &License::shown(risk),
-            Reclamation::Synchronous,
-            &mut steps,
-        )
-        .expect("git refusal is an outcome");
-
+    #[test]
+    fn submodules_and_dirtiness_both_warned_force_past_gits_guard() {
         assert_eq!(
-            steps.calls,
-            vec![
-                Call::ReadWorktree(FreshWorktree::Guarded),
-                Call::RemoveWorktree(Forcing::Unforced),
-            ]
+            worktree_forcing_for(
+                FreshWorktree::Guarded { dirty: Some(true) },
+                &warned(true, true)
+            ),
+            [Call::RemoveWorktree(Forcing::Forced)]
         );
-        assert!(report.branch.is_none());
+    }
+
+    #[test]
+    fn stale_removal_forces_only_a_warned_submodule_guard() {
+        for (license, forcing) in [
+            (warned(true, false), Forcing::Unforced),
+            (warned(false, true), Forcing::Forced),
+        ] {
+            let mut steps = FakeSteps::new();
+            steps.worktree_state = FreshWorktree::Guarded { dirty: Some(false) };
+
+            remove(held(), &license, Reclamation::Synchronous, &mut steps)
+                .expect("no step to fail");
+
+            assert_eq!(steps.calls[1], Call::RemoveWorktree(forcing));
+        }
     }
 
     #[test]
     fn explicit_force_overrides_an_initialized_submodule_guard() {
         let mut steps = FakeSteps::new();
-        steps.worktree_state = FreshWorktree::Guarded;
+        steps.worktree_state = FreshWorktree::Guarded { dirty: Some(true) };
 
         remove(
             held(),
@@ -2789,7 +2976,7 @@ mod tests {
         assert_eq!(
             steps.calls,
             vec![
-                Call::ReadWorktree(FreshWorktree::Guarded),
+                Call::ReadWorktree(FreshWorktree::Guarded { dirty: Some(true) }),
                 Call::RemoveWorktree(Forcing::Forced),
                 Call::DeleteBranch(Forcing::Forced),
             ]
@@ -2965,6 +3152,7 @@ mod tests {
         dirty_only.worktree_state = FreshWorktree::Dirty;
         let risk = Risk {
             dirty: true,
+            submodules: false,
             unmerged: None,
         };
         remove(
@@ -2986,6 +3174,7 @@ mod tests {
         let mut unmerged_only = FakeSteps::new();
         let risk = Risk {
             dirty: false,
+            submodules: false,
             unmerged: Some(git::Unmerged::Ahead(2)),
         };
         remove(

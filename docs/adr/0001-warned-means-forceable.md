@@ -12,4 +12,5 @@ git-switch destroys things that git itself guards behind `--force` and `-D`: wor
 - **Proof stands alongside warning.** [ADR 0005](./0005-proof-of-equivalence-is-a-license.md) admits a
   third license this rule did not anticipate: a branch whose work is demonstrably already in the
   anchor is forced without a marker, because the marker would have warned of nothing.
+- **Initialized submodules are a risk of their own.** Git refuses to remove a worktree holding one even when it is clean, and forcing past that deletes the submodule repositories inside it. They get their own marker, and since git's single `--force` covers both worktree guards at once, a worktree is forced only when both its submodules and any dirtiness found at removal were warned of.
 - **Locked worktrees are reported, not escalated.** `--force` is passed once; git wants `--force --force` for a locked worktree, and a lock is a deliberate signal we don't override.

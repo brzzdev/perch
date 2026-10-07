@@ -156,7 +156,7 @@ If the worktree directory name collides with `ls`, `rm`, `list`, or `remove`, pu
 
 `wt rm .` removes the worktree you're in and `cd`s you back to the main checkout. If your cwd is the main checkout there's nothing for `.` to name, and it says so.
 
-Removing a worktree destroys two things — a directory and a branch — so anything irreversible is shown before it happens. In the picker, rows carry markers: `●` for uncommitted changes, `↑3` for commits that aren't merged anywhere (a bare `↑` when the branch has no upstream to count against). A marked row is fair warning, so ticking it removes the worktree and deletes the branch outright. An unmarked row has nothing to lose, so it keeps git's own guards — no `--force` on the worktree, a plain `git branch -d` on the branch. If such a worktree turns out to be dirty after all (you changed it while the picker was open), git refuses and says so rather than discarding the work.
+Removing a worktree destroys two things — a directory and a branch — so anything irreversible is shown before it happens. In the picker, rows carry markers: `●` for uncommitted changes, `◆` for initialized submodules (their checkouts go with the worktree, along with any unpushed work inside them that perch can't check), `↑3` for commits that aren't merged anywhere (a bare `↑` when the branch has no upstream to count against). A marked row is fair warning, so ticking it removes the worktree and deletes the branch outright. An unmarked row has nothing to lose, so it keeps git's own guards — no `--force` on the worktree, a plain `git branch -d` on the branch. If such a worktree turns out to be dirty after all (you changed it while the picker was open), git refuses and says so rather than discarding the work.
 
 A named target like `wt rm .` has no row to carry a marker, so the same information arrives as a confirmation instead:
 
@@ -274,7 +274,7 @@ After a switch, `perch` offers to delete branches that have outlived their purpo
     [ ] spike/abandoned  ↑
 ```
 
-The markers mean the same thing as in `wt rm`: `●` for a worktree with uncommitted changes, `↑` for commits that aren't merged anywhere — the case where a branch's remote was deleted while it still held unpushed work. `(+ worktree, missing)` marks a leftover registration whose directory is already gone. Every deletion reports itself, naming the path of any worktree that was removed.
+The markers mean the same thing as in `wt rm`: `●` for a worktree with uncommitted changes, `◆` for one with initialized submodules, `↑` for commits that aren't merged anywhere — the case where a branch's remote was deleted while it still held unpushed work. `(+ worktree, missing)` marks a leftover registration whose directory is already gone. Every deletion reports itself, naming the path of any worktree that was removed.
 
 A branch that landed by squash or rebase merge draws no `↑`, and is deleted without being asked about. Git considers it unmerged — its commits are nowhere in your default branch under those hashes — but its work is there under other ones, so the warning would name commits nothing can lose. `perch` proves that for itself, locally: either the anchor already carries the branch's patch (git's own test, the one `git rebase` uses to drop redundant commits), or the files the branch touched now read identically there. It only ever *removes* a warning — a branch it can't prove keeps its marker, and one whose proof it can't establish at all is treated as holding unique work. See [ADR 0005](docs/adr/0005-proof-of-equivalence-is-a-license.md).
 

@@ -873,27 +873,22 @@ pub(crate) fn assess(request: Request) -> AppResult<Assessment> {
 }
 
 fn risk_legend(risks: impl IntoIterator<Item = Risk>) -> Option<String> {
-    let (has_dirty, has_submodules, has_unmerged) = risks.into_iter().fold(
-        (false, false, false),
-        |(has_dirty, has_submodules, has_unmerged), risk| {
-            (
-                has_dirty || risk.dirty,
-                has_submodules || risk.submodules,
-                has_unmerged || risk.unmerged.is_some(),
-            )
-        },
-    );
+    let seen = risks.into_iter().fold(Risk::default(), |seen, risk| Risk {
+        dirty: seen.dirty || risk.dirty,
+        submodules: seen.submodules || risk.submodules,
+        unmerged: seen.unmerged.or(risk.unmerged),
+    });
     let mut parts = Vec::new();
-    if has_dirty {
+    if seen.dirty {
         parts.push(format!("{} uncommitted changes", marker::Marker::Dirty));
     }
-    if has_submodules {
+    if seen.submodules {
         parts.push(format!(
             "{} initialized submodules",
             marker::Marker::Submodules
         ));
     }
-    if has_unmerged {
+    if seen.unmerged.is_some() {
         parts.push(format!(
             "{} unmerged commits",
             marker::Marker::Unmerged(None)
@@ -1646,7 +1641,7 @@ fn remove<'a>(
 /// that could not be read counts as found, and submodules that could not be
 /// read leave git's guard in charge.
 fn worktree_forcing(state: FreshWorktree, license: WorktreeLicense) -> Forcing {
-    let covered = match (license, state) {
+    Forcing::from(match (license, state) {
         (WorktreeLicense::Forced, _) => true,
         (
             WorktreeLicense::Shown { dirty, .. },
@@ -1660,12 +1655,7 @@ fn worktree_forcing(state: FreshWorktree, license: WorktreeLicense) -> Forcing {
             WorktreeLicense::Shown { .. },
             FreshWorktree::Clean | FreshWorktree::Missing | FreshWorktree::SubmodulesUnreadable,
         ) => false,
-    };
-    if covered {
-        Forcing::Forced
-    } else {
-        Forcing::Unforced
-    }
+    })
 }
 
 fn remove_worktree_in_background(

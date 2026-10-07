@@ -45,6 +45,13 @@ pub(crate) fn describe(risk: Risk, subject: &str, path: &Path) -> Vec<String> {
     if risk.dirty {
         lines.push(format!("{} has uncommitted changes", display_path(path)));
     }
+    if risk.submodules {
+        lines.push(format!(
+            "{} has initialized submodules; their repositories go with it, and any unpushed \
+             commits or stashes in them, which perch cannot check, will be lost",
+            display_path(path)
+        ));
+    }
     match risk.unmerged {
         Some(git::Unmerged::Ahead(n)) => {
             lines.push(format!("{subject} has {n} unmerged commit(s)"));
@@ -557,6 +564,7 @@ mod tests {
     fn describe_names_the_worktree_by_path_and_the_branch_by_name() {
         let risk = Risk {
             dirty: true,
+            submodules: false,
             unmerged: Some(git::Unmerged::Ahead(2)),
         };
         assert_eq!(
@@ -572,6 +580,7 @@ mod tests {
     fn describe_says_when_there_is_no_upstream_to_count_against() {
         let risk = Risk {
             dirty: false,
+            submodules: false,
             unmerged: Some(git::Unmerged::NoUpstream),
         };
         assert_eq!(
@@ -586,6 +595,7 @@ mod tests {
     fn warnings_front_each_risk_with_the_warning_glyph() {
         let risk = Risk {
             dirty: true,
+            submodules: false,
             unmerged: Some(git::Unmerged::Ahead(2)),
         };
         assert_eq!(

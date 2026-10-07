@@ -63,11 +63,11 @@ _Avoid_: Staged, removable
 ### Destruction
 
 **Risk**:
-What removing something would irreversibly destroy: a dirty worktree's files, an unmerged branch's commits, or a shared upstream ref. Something with no risk can be removed without asking. An unmerged branch that is *Equivalent* destroys nothing, so it carries no risk and draws no *Marker*; an upstream deletion always carries risk because the local merge judgement assumes that ref survives.
+What removing something would irreversibly destroy: a dirty worktree's files, a worktree's initialized submodule repositories (with any work in them Perch cannot check), an unmerged branch's commits, or a shared upstream ref. Something with no risk can be removed without asking. An unmerged branch that is *Equivalent* destroys nothing, so it carries no risk and draws no *Marker*; an upstream deletion always carries risk because the local merge judgement assumes that ref survives.
 _Avoid_: Danger, safety, hazard
 
 **Marker**:
-The rendering of a risk in a picker row: `●` for dirty, `↑N` for unmerged. A marker is a warning, and per [ADR 0001](./docs/adr/0001-warned-means-forceable.md) a shown warning is what licenses forcing. Upstream deletion has no marker: its separate picker or confirmation is the warning. `wt ls` draws from the same vocabulary, so a glyph looks the same wherever it appears — but `↑N` there counts commits the upstream lacks, which is not the same judgement as *Unmerged* and licenses nothing. Sharing the glyphs is not sharing the facts.
+The rendering of a risk in a picker row: `●` for dirty, `◆` for initialized submodules, `↑N` for unmerged. A marker is a warning, and per [ADR 0001](./docs/adr/0001-warned-means-forceable.md) a shown warning is what licenses forcing. Upstream deletion has no marker: its separate picker or confirmation is the warning. `wt ls` draws from the same vocabulary, so a glyph looks the same wherever it appears — but `↑N` there counts commits the upstream lacks, which is not the same judgement as *Unmerged* and licenses nothing. Sharing the glyphs is not sharing the facts.
 _Avoid_: Flag, badge, indicator
 
 **Forcing**:
@@ -75,7 +75,7 @@ Destroying something git would otherwise protect, or skipping Perch's upstream-d
 _Avoid_: Overriding, ignoring
 
 **License**:
-What permits forcing: the markers already shown to the user, the separate upstream choice, an explicit `--force`, or proof that a branch is *Equivalent*. A warning or proof covers what it named and nothing else; explicit `--force` covers the whole *Removal*. Anything that became risky after its row was drawn meets git's own guard instead — as does a proof whose ground has shifted, since equivalence is established on a pair of commits and lapses when either the branch or the *Anchor* moves off it. See [ADR 0001](./docs/adr/0001-warned-means-forceable.md), [ADR 0005](./docs/adr/0005-proof-of-equivalence-is-a-license.md), and [ADR 0009](./docs/adr/0009-branch-removal-earns-a-subverb.md).
+What permits forcing: the markers already shown to the user, the separate upstream choice, an explicit `--force`, or proof that a branch is *Equivalent*. A warning or proof covers what it named and nothing else; explicit `--force` covers the whole *Removal*. Git has one `--force` for a worktree's two guards, its dirtiness and its initialized submodules, so a worktree is forced only when every risk it holds at removal was warned of. Anything that became risky after its row was drawn meets git's own guard instead — as does a proof whose ground has shifted, since equivalence is established on a pair of commits and lapses when either the branch or the *Anchor* moves off it. See [ADR 0001](./docs/adr/0001-warned-means-forceable.md), [ADR 0005](./docs/adr/0005-proof-of-equivalence-is-a-license.md), and [ADR 0009](./docs/adr/0009-branch-removal-earns-a-subverb.md).
 _Avoid_: Permission, approval, consent
 
 **Removal**:

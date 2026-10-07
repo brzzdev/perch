@@ -32,6 +32,9 @@ pub(crate) enum Marker {
     BehindUpstream(u32),
     /// A *Dirty* worktree: uncommitted or untracked changes.
     Dirty,
+    /// A worktree with initialized submodules, whose repositories go with it. Git
+    /// refuses to remove one unforced even when it is clean.
+    Submodules,
     /// An *Unmerged* branch, holding commits `git branch -d` would refuse to
     /// discard. `None` where there is no upstream to count against, which
     /// renders as a bare `↑`.
@@ -46,6 +49,7 @@ impl fmt::Display for Marker {
             }
             Marker::BehindUpstream(n) => write!(f, "{}", style(format!("↓{n}")).red()),
             Marker::Dirty => write!(f, "{}", style("●").yellow()),
+            Marker::Submodules => write!(f, "{}", style("◆").magenta()),
             Marker::Unmerged(None) => write!(f, "{}", style("↑").green()),
         }
     }

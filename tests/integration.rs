@@ -3851,14 +3851,15 @@ fn wt_rm_refuses_dirty_worktree_non_interactively() {
     assert!(path.exists(), "worktree must survive: {}", path.display());
 }
 
-#[test]
-fn wt_rm_does_not_rename_past_gits_initialized_submodule_guard() {
-    let (_bare, parent, work) = setup_with_parent();
+/// Adds a `feature` worktree whose submodule is initialized, which git refuses
+/// to remove unforced even when it is clean. The returned directory holds the
+/// submodule's source repository and must outlive the test.
+fn add_worktree_with_initialized_submodule(work: &Path, parent: &TempDir) -> (TempDir, PathBuf) {
     let submodule = TempDir::new().unwrap();
     git(submodule.path(), &["init", "--initial-branch=main"]);
     commit_in(submodule.path(), "tracked.txt", "initial submodule commit");
     git(
-        &work,
+        work,
         &[
             "-c",
             "protocol.file.allow=always",
@@ -3868,8 +3869,8 @@ fn wt_rm_does_not_rename_past_gits_initialized_submodule_guard() {
             "module",
         ],
     );
-    git(&work, &["commit", "-m", "add submodule"]);
-    let path = add_worktree(&work, &parent, "feature");
+    git(work, &["commit", "-m", "add submodule"]);
+    let path = add_worktree(work, parent, "feature");
     git(
         &path,
         &[
@@ -3880,16 +3881,66 @@ fn wt_rm_does_not_rename_past_gits_initialized_submodule_guard() {
             "--init",
         ],
     );
+    (submodule, path)
+}
+
+#[test]
+fn wt_rm_refuses_a_worktree_with_initialized_submodules_non_interactively() {
+    let (_bare, parent, work) = setup_with_parent();
+    let (_submodule, path) = add_worktree_with_initialized_submodule(&work, &parent);
 
     let output = perch_args(&work, &["wt", "rm", "feature"]);
 
-    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
     assert!(
-        stderr_str(&output).contains("working trees containing submodules"),
-        "Git's submodule guard should speak for the refusal: {}",
+        !output.status.success(),
+        "should exit non-zero; stderr: {}",
         stderr_str(&output)
     );
-    assert!(path.exists(), "the guarded worktree must survive");
+    assert!(
+        stderr_str(&output).contains("has initialized submodules"),
+        "should name the risk; got: {}",
+        stderr_str(&output)
+    );
+    assert!(path.exists(), "worktree must survive: {}", path.display());
+}
+
+/// Deinitializing a submodule empties its checkout but leaves its repository,
+/// and any commits in it, in the worktree's admin directory. Git's guard still
+/// refuses that worktree, so perch must warn about it rather than stage it away.
+#[test]
+fn wt_rm_refuses_a_worktree_keeping_a_deinitialized_submodules_repository() {
+    let (_bare, parent, work) = setup_with_parent();
+    let (_submodule, path) = add_worktree_with_initialized_submodule(&work, &parent);
+    git(&path, &["submodule", "deinit", "--force", "module"]);
+
+    let output = perch_args(&work, &["wt", "rm", "feature"]);
+
+    assert!(
+        !output.status.success(),
+        "should exit non-zero; stderr: {}",
+        stderr_str(&output)
+    );
+    assert!(
+        stderr_str(&output).contains("has initialized submodules"),
+        "should name the risk; got: {}",
+        stderr_str(&output)
+    );
+    assert!(path.exists(), "worktree must survive: {}", path.display());
+}
+
+#[test]
+fn wt_rm_force_removes_a_worktree_with_initialized_submodules() {
+    let (_bare, parent, work) = setup_with_parent();
+    let (_submodule, path) = add_worktree_with_initialized_submodule(&work, &parent);
+
+    let output = perch_args(&work, &["wt", "rm", "feature", "--force"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(
+        !path.exists(),
+        "worktree should be gone: {}",
+        path.display()
+    );
 }
 
 #[test]

@@ -5255,6 +5255,19 @@ fn rebase_merge_upstream(work: &Path, branch: &str) {
     git(work, &["fetch", "--prune", "origin"]);
 }
 
+/// Land `branch` on the remote the way a forge merge commit does: its own commits
+/// reach `main` under their own hashes, then its upstream is deleted.
+fn merge_commit_upstream(work: &Path, branch: &str) {
+    git(work, &["checkout", "main"]);
+    git(
+        work,
+        &["merge", "--no-ff", "-m", &format!("merge {branch}"), branch],
+    );
+    git(work, &["push", "origin", "main"]);
+    git(work, &["push", "origin", "--delete", branch]);
+    git(work, &["fetch", "--prune", "origin"]);
+}
+
 /// The local branch names, as one blob to search — enough to answer "did this
 /// branch survive?".
 fn branch_listing(work: &Path) -> String {
@@ -5421,6 +5434,216 @@ fn a_squash_merged_branch_is_still_proven_once_the_anchor_moves_on() {
         "the branch should be gone: {}",
         branch_listing(work.path())
     );
+}
+
+/// A squash merge lands on the forge, so a local default branch that was never
+/// pulled lacks it while its remote counterpart holds it.
+#[test]
+fn a_squash_merged_branch_is_proven_while_the_local_anchor_lags() {
+    let (_bare, work) = setup();
+
+    push_topic_branch(work.path(), "feature");
+    squash_merge_upstream(work.path(), "feature");
+    git(work.path(), &["reset", "--hard", "HEAD~1"]);
+    git(work.path(), &["branch", "dest", "main"]);
+
+    let text = cleanup_prompt(work.path(), "dest", "feature");
+
+    assert!(
+        !text.contains('↑'),
+        "the remote anchor holds the branch's patch: {text}"
+    );
+    assert!(
+        !branch_listing(work.path()).contains("feature"),
+        "the branch should be gone: {}",
+        branch_listing(work.path())
+    );
+}
+
+#[test]
+fn wt_rm_removes_a_squash_merged_branch_without_asking() {
+    let (_bare, parent, work) = setup_with_parent();
+
+    push_topic_branch(&work, "feature");
+    squash_merge_upstream(&work, "feature");
+    git(&work, &["reset", "--hard", "HEAD~1"]);
+    let path = parent.path().join("worktrees").join("repo").join("feature");
+    git(
+        &work,
+        &["worktree", "add", path.to_str().unwrap(), "feature"],
+    );
+
+    let output = perch_args(&path, &["wt", "rm", "."]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(!path.exists(), "worktree dir should be removed");
+    assert!(!local_branch_exists(&work, "feature"));
+}
+
+/// A `feature` worktree tracking a fork whose head branch is gone, with the
+/// squash on `origin/main` while local `main` and `fork/main` both lag.
+fn squash_merged_fork_worktree(parent: &Path, work: &Path) -> PathBuf {
+    let fork = parent.join("fork.git");
+    fs::create_dir(&fork).unwrap();
+    git(&fork, &["init", "--bare"]);
+    pin_default_branch(&fork);
+    git(work, &["remote", "add", "fork", fork.to_str().unwrap()]);
+    git(work, &["push", "fork", "main"]);
+    git(work, &["remote", "set-head", "fork", "main"]);
+
+    git(work, &["checkout", "-b", "feature"]);
+    commit_in(work, "feature.txt", "topic work");
+    git(work, &["push", "-u", "fork", "feature"]);
+    git(work, &["checkout", "main"]);
+    git(work, &["merge", "--squash", "feature"]);
+    git(work, &["commit", "-m", "squash feature"]);
+    git(work, &["push", "origin", "main"]);
+    git(work, &["reset", "--hard", "HEAD~1"]);
+    git(work, &["push", "fork", "--delete", "feature"]);
+    git(work, &["fetch", "--prune", "fork"]);
+    let path = parent.join("worktrees").join("repo").join("feature");
+    git(
+        work,
+        &["worktree", "add", path.to_str().unwrap(), "feature"],
+    );
+    path
+}
+
+#[test]
+fn a_merge_committed_branch_is_proven_while_the_local_anchor_lags() {
+    let (_bare, work) = setup();
+
+    push_topic_branch(work.path(), "feature");
+    merge_commit_upstream(work.path(), "feature");
+    git(work.path(), &["reset", "--hard", "HEAD~1"]);
+    git(work.path(), &["branch", "dest", "main"]);
+
+    let text = cleanup_prompt(work.path(), "dest", "feature");
+
+    assert!(
+        !text.contains('↑'),
+        "the remote anchor reaches the branch's tip: {text}"
+    );
+    assert!(!branch_listing(work.path()).contains("feature"));
+}
+
+/// With local `main` behind, nothing local holds the branch's commits, but the
+/// remote anchor reaches its tip.
+#[test]
+fn wt_rm_removes_a_merge_committed_branch_while_the_local_anchor_lags() {
+    let (_bare, parent, work) = setup_with_parent();
+
+    push_topic_branch(&work, "feature");
+    merge_commit_upstream(&work, "feature");
+    git(&work, &["reset", "--hard", "HEAD~1"]);
+    let path = parent.path().join("worktrees").join("repo").join("feature");
+    git(
+        &work,
+        &["worktree", "add", path.to_str().unwrap(), "feature"],
+    );
+
+    let output = perch_args(&path, &["wt", "rm", "."]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(!local_branch_exists(&work, "feature"));
+}
+
+/// In a fork workflow the branch tracks the fork, whose default lags the
+/// canonical remote the main worktree's branch tracks.
+#[test]
+fn wt_rm_proves_against_the_main_worktrees_remote() {
+    let (_bare, parent, work) = setup_with_parent();
+    let path = squash_merged_fork_worktree(parent.path(), &work);
+
+    let output = perch_args(&path, &["wt", "rm", "."]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(!local_branch_exists(&work, "feature"));
+}
+
+/// The current branch picks the remote stale grounds are read from, but the
+/// proof follows the main worktree's branch.
+#[test]
+fn stale_cleanup_proves_against_the_main_worktrees_remote() {
+    let (_bare, parent, work) = setup_with_parent();
+    squash_merged_fork_worktree(parent.path(), &work);
+    let side = parent.path().join("worktrees").join("repo").join("side");
+    git(
+        &work,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "side",
+            side.to_str().unwrap(),
+            "main",
+        ],
+    );
+    git(&side, &["push", "-u", "fork", "side"]);
+
+    let text = String::from_utf8_lossy_owned(drive_multi_select_prompt(
+        &side,
+        &["wt", "fresh"],
+        "feature",
+        false,
+        || {},
+    ));
+
+    assert!(
+        !text.contains('↑'),
+        "origin/main holds the branch's patch: {text}"
+    );
+    assert!(!local_branch_exists(&work, "feature"));
+}
+
+/// The local default is the first anchor, and every tip reaches itself.
+#[test]
+fn br_rm_keeps_asking_for_a_default_branch_with_unpushed_commits() {
+    let (_bare, work) = setup();
+    commit_in(work.path(), "unpushed.txt", "unpushed work");
+    git(work.path(), &["switch", "-c", "develop"]);
+
+    let output = perch_args(work.path(), &["br", "rm", "main"]);
+
+    assert!(!output.status.success());
+    assert!(local_branch_exists(work.path(), "main"));
+}
+
+/// Local `main` level with `origin/main` is proven against it, though it tracks a lagging fork.
+#[test]
+fn br_rm_proves_the_default_branch_against_its_remote_counterpart() {
+    let (_bare, work) = setup();
+    let fork = TempDir::new().unwrap();
+    git(fork.path(), &["init", "--bare"]);
+    git(
+        work.path(),
+        &["remote", "add", "fork", fork.path().to_str().unwrap()],
+    );
+    git(work.path(), &["push", "fork", "main"]);
+    commit_in(work.path(), "landed.txt", "landed on origin");
+    git(work.path(), &["push", "origin", "main"]);
+    git(work.path(), &["branch", "-u", "fork/main", "main"]);
+    git(work.path(), &["switch", "-c", "develop"]);
+    git(work.path(), &["push", "-u", "origin", "develop"]);
+
+    let output = perch_args(work.path(), &["br", "rm", "main"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(!local_branch_exists(work.path(), "main"));
+}
+
+#[test]
+fn br_rm_deletes_a_squash_merged_branch_without_asking() {
+    let (_bare, work) = setup();
+
+    push_topic_branch(work.path(), "feature");
+    squash_merge_upstream(work.path(), "feature");
+    git(work.path(), &["reset", "--hard", "HEAD~1"]);
+
+    let output = perch_args(work.path(), &["br", "rm", "feature"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(!local_branch_exists(work.path(), "feature"));
 }
 
 /// The content route compares the paths a branch touched, and git reports a
@@ -5698,11 +5921,10 @@ fn a_worktree_taken_on_the_proven_branch_mid_prompt_saves_it() {
     );
 }
 
-/// Equivalence only ever subtracts. A branch cut from the anchor and never
-/// committed to has nothing the anchor lacks, and reading that as "landed"
-/// would offer it for deletion the moment it was created.
+/// An untracked branch on the anchor's tip has nothing of its own, and offering
+/// it would sweep every branch the moment it was created.
 #[test]
-fn an_untouched_branch_cut_from_the_anchor_is_not_read_as_landed() {
+fn an_untracked_branch_on_the_anchor_tip_is_not_stale() {
     let (_bare, work) = setup();
 
     git(work.path(), &["branch", "fresh", "main"]);
@@ -5712,10 +5934,6 @@ fn an_untouched_branch_cut_from_the_anchor_is_not_read_as_landed() {
         !stale_names("origin").contains(&"fresh".to_string()),
         "an untouched branch is not stale, got: {:?}",
         stale_names("origin")
-    );
-    assert!(
-        perch::git::equivalent_branches(None, "origin", &["fresh"]).is_empty(),
-        "and an empty diff proves nothing, so equivalence cannot offer it either"
     );
 }
 

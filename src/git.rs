@@ -645,15 +645,20 @@ fn branch_refs(refs_output: &str) -> HashMap<&str, BranchRef<'_>> {
 /// judge "merged" against, and callers stand the merged rule down rather than
 /// falling back to `HEAD`.
 fn merged_anchor(remote: &str) -> Option<(String, String)> {
+    let (default, refs) = anchor_refs(remote)?;
+    refs.into_iter()
+        .find(|anchor_ref| rev_parse(None, anchor_ref).is_ok())
+        .map(|anchor_ref| (anchor_ref, default))
+}
+
+/// The default branch, with its local ref and then its remote counterpart.
+fn anchor_refs(remote: &str) -> Option<(String, [String; 2])> {
     let default = default_branch(remote)?;
-    let local = format!("refs/heads/{default}");
-    if rev_parse(None, &local).is_ok() {
-        return Some((local, default));
-    }
-    let remote_ref = format!("refs/remotes/{remote}/{default}");
-    rev_parse(None, &remote_ref)
-        .is_ok()
-        .then_some((remote_ref, default))
+    let refs = [
+        format!("refs/heads/{default}"),
+        format!("refs/remotes/{remote}/{default}"),
+    ];
+    Some((default, refs))
 }
 
 /// Which ref fact put a branch on the cleanup prompt. The facts cannot overlap:
@@ -1046,15 +1051,17 @@ pub struct Proof {
     pub tip: String,
 }
 
-/// Branches whose whole diff against the anchor is already in the anchor under
-/// some other commit — squash-merged, rebase-merged or cherry-picked — each with
-/// the [`Proof`] established for it.
+/// Branches whose whole diff against the anchor is already in the anchor — as
+/// their own commits, or squash-merged, rebase-merged or cherry-picked — each
+/// with the [`Proof`] established for it.
 ///
 /// Equivalence is positive evidence and only ever subtracts, so ask it only of
-/// branches a warning would otherwise be drawn over — ones both stale and
-/// unmerged. A branch cut from the anchor and never committed to has no diff to
-/// find already there, and is never proven by this; anything that cannot be
-/// established at all leaves the branch treated as holding unique work.
+/// branches a warning would otherwise be drawn over — unmerged ones. Anything
+/// that cannot be established at all leaves the branch treated as holding
+/// unique work.
+///
+/// The anchor's local copy is asked first, then its remote counterpart: a forge
+/// merge lands on the remote, so a local copy left unpulled has never seen it.
 ///
 /// `dir` must be the worktree the delete will run from, so what is proven here
 /// and what is re-checked there are read through the same root. Refs are shared,
@@ -1066,36 +1073,51 @@ pub fn equivalent_branches(
     remote: &str,
     candidates: &[&str],
 ) -> HashMap<String, Proof> {
-    let Some((anchor_ref, _)) = merged_anchor(remote) else {
+    if candidates.is_empty() {
+        return HashMap::new();
+    }
+    let Some((_, refs)) = anchor_refs(remote) else {
         return HashMap::new();
     };
-    let Some(anchor_tip) = resolve(dir, &anchor_ref) else {
-        return HashMap::new();
-    };
+    let anchors: Vec<(String, String)> = refs
+        .into_iter()
+        .filter_map(|anchor_ref| Some((resolve(dir, &anchor_ref)?, anchor_ref)))
+        .collect();
     candidates
         .iter()
         .filter_map(|name| {
-            let tip = resolve(dir, &format!("refs/heads/{name}"))?;
+            let own_ref = format!("refs/heads/{name}");
+            let tip = resolve(dir, &own_ref)?;
+            // A branch is no anchor for itself: every tip reaches its own.
+            let mut usable: Vec<_> = anchors
+                .iter()
+                .filter(|(_, anchor_ref)| *anchor_ref != own_ref)
+                .collect();
+            usable.dedup_by(|a, b| a.0 == b.0);
             // Every question below is asked of the *resolved* anchor, never the
             // ref name: a ref that moved mid-probe and moved back would
             // otherwise be proven against one commit and re-checked against
             // another. The name is kept only for that later re-check.
-            equivalent_to(dir, &anchor_tip, &tip).then(|| {
-                let proof = Proof {
-                    anchor_ref: anchor_ref.clone(),
-                    anchor_tip: anchor_tip.clone(),
-                    tip,
-                };
-                ((*name).to_string(), proof)
-            })
+            let (anchor_tip, anchor_ref) = usable
+                .into_iter()
+                .find(|(anchor_tip, _)| equivalent_to(dir, anchor_tip, &tip))?;
+            let proof = Proof {
+                anchor_ref: anchor_ref.clone(),
+                anchor_tip: anchor_tip.clone(),
+                tip,
+            };
+            Some(((*name).to_string(), proof))
         })
         .collect()
 }
 
 /// Whether everything `tip` adds over its merge-base with the anchor is already
-/// in the anchor. Two routes, either of which proves it, because a branch's work
-/// can land in two shapes and neither test sees both:
+/// in the anchor. Three routes, any of which proves it, because a branch's work
+/// can land in three shapes and no one test sees them all:
 ///
+/// - The anchor already reaches the tip, so the branch's own commits landed — a
+///   merge commit or a fast-forward. An untouched branch cut from the anchor
+///   passes too, and rightly: it has no commit to lose.
 /// - [`patch_landed`] asks whether the anchor already carries the branch's patch.
 ///   It survives the anchor moving on over the same files, and is the only route
 ///   that answers a squash merge — but it reads the branch's diff as *one* patch,
@@ -1103,12 +1125,15 @@ pub fn equivalent_branches(
 /// - [`content_present`] asks whether the files the branch touched now read
 ///   identically in the anchor. That is blind to how the work got there, so a
 ///   rebase-merge or a scattered cherry-pick answers it, but any later edit to
-///   the same files does too and it falls back to the first route.
+///   the same files does too and it falls back to the patch route.
 ///
 /// `anchor` is a resolved commit, not a ref name, so every question is asked of
 /// the same anchor the [`Proof`] will record. Every step is a question, so a git
 /// that refuses one answers "not equivalent" and says nothing about it.
 fn equivalent_to(dir: Option<&Path>, anchor: &str, tip: &str) -> bool {
+    if run_in(dir, &["merge-base", "--is-ancestor", tip, anchor]).is_ok() {
+        return true;
+    }
     let Some(base) = run_in(dir, &["merge-base", anchor, tip])
         .ok()
         .map(|b| b.trim().to_string())
@@ -1125,8 +1150,8 @@ fn equivalent_to(dir: Option<&Path>, anchor: &str, tip: &str) -> bool {
 /// merge-base, and handed to `git cherry`, which prints `-` for a commit whose
 /// patch is already upstream and `+` for one that isn't. The synthesised commit
 /// is dangling and unreachable; gc reaps it. An empty diff has no patch id to
-/// match, so a branch holding no work of its own comes back `+` — exactly the
-/// answer equivalence owes it.
+/// match, so this route proves nothing of a branch whose commits net to no
+/// change.
 ///
 /// `cherry` is not the whole answer, because the patch ids it compares are
 /// normalised: they ignore whitespace, so a branch differing from what landed by

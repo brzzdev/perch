@@ -96,6 +96,8 @@ pub(crate) struct BranchRequest {
     branches: Vec<String>,
     worktrees: Vec<git::Worktree>,
     current: Option<String>,
+    target: Option<String>,
+    forcing: Forcing,
     upstream: UpstreamInterest,
 }
 
@@ -104,12 +106,16 @@ impl BranchRequest {
         branches: Vec<String>,
         worktrees: Vec<git::Worktree>,
         current: Option<&str>,
+        target: Option<&str>,
+        forcing: Forcing,
         upstream: UpstreamInterest,
     ) -> Self {
         Self {
             branches,
             worktrees,
             current: current.map(str::to_string),
+            target: target.map(str::to_string),
+            forcing,
             upstream,
         }
     }
@@ -898,26 +904,26 @@ fn risk_legend(risks: impl IntoIterator<Item = Risk>) -> Option<String> {
 }
 
 fn assess_stale(request: StaleRequest) -> Assessment {
-    let main = request
-        .worktrees
-        .iter()
-        .find(|worktree| worktree.is_main)
-        .map(|worktree| worktree.path.clone());
-    let unmerged = git::unmerged_branches(main.as_deref()).unwrap_or_default();
-    let candidates: Vec<&str> = request
-        .stale
-        .iter()
-        .map(|branch| branch.name.as_str())
-        .filter(|name| {
-            unmerged.contains_key(*name) && request.destination.as_deref() != Some(*name)
-        })
-        .collect();
-    let equivalent = git::equivalent_branches(main.as_deref(), &request.remote, &candidates);
+    let main_worktree = request.worktrees.iter().find(|worktree| worktree.is_main);
+    let main = main_worktree.map(|worktree| worktree.path.clone());
+    // Grounds were read against the current branch's remote; the proof follows the main worktree's.
+    let remote = main_worktree.map_or_else(
+        || request.remote.clone(),
+        |worktree| git::current_remote(worktree.branch.as_deref()),
+    );
+    let judgement = BranchJudgement::read(
+        main.as_deref(),
+        &remote,
+        request
+            .stale
+            .iter()
+            .map(|branch| branch.name.as_str())
+            .filter(|name| request.destination.as_deref() != Some(*name)),
+    );
     build_stale_assessment(
         request,
         main,
-        &unmerged,
-        &equivalent,
+        &judgement,
         git::worktree_dirty,
         has_initialized_submodules,
     )
@@ -932,8 +938,7 @@ fn has_initialized_submodules(path: &Path) -> bool {
 fn build_stale_assessment(
     request: StaleRequest,
     main: Option<PathBuf>,
-    unmerged: &HashMap<String, git::Unmerged>,
-    equivalent: &HashMap<String, git::Proof>,
+    judgement: &BranchJudgement,
     dirty: impl Fn(&Path) -> bool,
     submodules: impl Fn(&Path) -> bool,
 ) -> Assessment {
@@ -948,15 +953,12 @@ fn build_stale_assessment(
         .unwrap_or_default();
     for stale in stale {
         let worktree = git::worktree_for_branch(&request.worktrees, &stale.name);
-        let proof = equivalent.get(&stale.name).cloned();
+        let (unmerged, proof) = judgement.of(Some(&stale.name));
         let present = worktree.as_ref().filter(|worktree| !worktree.prunable);
         let risk = Risk {
             dirty: present.is_some_and(|worktree| dirty(&worktree.path)),
             submodules: present.is_some_and(|worktree| submodules(&worktree.path)),
-            unmerged: proof
-                .is_none()
-                .then(|| unmerged.get(&stale.name).copied())
-                .flatten(),
+            unmerged,
         };
         let worktree_risk = Risk {
             unmerged: None,
@@ -1035,18 +1037,67 @@ fn stale_ground_label(ground: git::Ground) -> &'static str {
     }
 }
 
+/// The branch half of each row's *Risk*: whether `git branch -d` would refuse
+/// it, and the proof that refusing costs nothing where it is *Equivalent*.
+#[derive(Default)]
+struct BranchJudgement {
+    equivalent: HashMap<String, git::Proof>,
+    unmerged: HashMap<String, git::Unmerged>,
+}
+
+impl BranchJudgement {
+    /// Only the `deletable` branches are worth a proof.
+    fn read<'a>(
+        main: Option<&Path>,
+        remote: &str,
+        deletable: impl Iterator<Item = &'a str>,
+    ) -> Self {
+        let unmerged = git::unmerged_branches(main).unwrap_or_default();
+        let candidates: Vec<&str> = deletable
+            .filter(|name| unmerged.contains_key(*name))
+            .collect();
+        let equivalent = git::equivalent_branches(main, remote, &candidates);
+        Self {
+            equivalent,
+            unmerged,
+        }
+    }
+
+    fn of(&self, branch: Option<&str>) -> (Option<git::Unmerged>, Option<git::Proof>) {
+        let Some(branch) = branch else {
+            return (None, None);
+        };
+        match self.equivalent.get(branch) {
+            Some(proof) => (None, Some(proof.clone())),
+            None => (self.unmerged.get(branch).copied(), None),
+        }
+    }
+}
+
 fn assess_branches(request: BranchRequest) -> AppResult<Assessment> {
-    let main = request
+    let main_worktree = request
         .worktrees
         .iter()
         .find(|worktree| worktree.is_main)
         .ok_or_else(|| Error::Git {
             command: "worktree list".into(),
             message: "main worktree not found".into(),
-        })?
-        .path
-        .clone();
-    let unmerged = git::unmerged_branches(Some(&main)).unwrap_or_default();
+        })?;
+    let main = main_worktree.path.clone();
+    let remote = git::current_remote(main_worktree.branch.as_deref());
+    let reachable = |name: &str| match request.target.as_deref() {
+        None => true,
+        Some(target) => request.forcing == Forcing::Unforced && target == name,
+    };
+    let judgement = BranchJudgement::read(
+        Some(&main),
+        &remote,
+        request.branches.iter().map(String::as_str).filter(|name| {
+            reachable(name)
+                && request.current.as_deref() != Some(*name)
+                && git::worktree_for_branch(&request.worktrees, name).is_none()
+        }),
+    );
     let mut raw = Vec::new();
     let mut locals = Vec::new();
     for name in request.branches {
@@ -1054,8 +1105,9 @@ fn assess_branches(request: BranchRequest) -> AppResult<Assessment> {
         // drawn from the error naming it would raise rather than from a second
         // reading of the same fact.
         let named_error = git::worktree_for_branch(&request.worktrees, &name).map(NamedError::Held);
+        let (unmerged, proof) = judgement.of(Some(&name));
         let risk = Risk {
-            unmerged: unmerged.get(&name).copied(),
+            unmerged,
             ..Risk::default()
         };
         let annotation = if request.current.as_deref() == Some(&name) {
@@ -1086,7 +1138,7 @@ fn assess_branches(request: BranchRequest) -> AppResult<Assessment> {
         locals.push(AssessedLocal {
             target: OwnedTarget::Branch { name },
             risk,
-            proof: None,
+            proof,
             named_error,
             contains_cwd: false,
         });
@@ -1168,32 +1220,22 @@ fn build_worktree_assessment(
     mut worktree_dirty: impl FnMut(&Path) -> bool,
     mut worktree_submodules: impl FnMut(&Path) -> bool,
 ) -> AppResult<Assessment> {
-    let main = request
+    let main_worktree = request
         .worktrees
         .iter()
         .find(|worktree| worktree.is_main)
         .ok_or_else(|| Error::Git {
             command: "worktree list".into(),
             message: "no main worktree found".into(),
-        })?
-        .path
-        .clone();
-    let contains_cwd = |worktree: &git::Worktree| {
-        let path = worktree
-            .path
-            .canonicalize()
-            .unwrap_or_else(|_| worktree.path.clone());
-        request
-            .cwd
-            .as_ref()
-            .is_some_and(|cwd| cwd.starts_with(path))
-    };
+        })?;
+    let main = main_worktree.path.clone();
+    let remote = git::current_remote(main_worktree.branch.as_deref());
     let removable: Vec<(git::Worktree, bool)> = request
         .worktrees
         .into_iter()
         .filter(|worktree| !worktree.is_main)
         .map(|worktree| {
-            let contains_cwd = contains_cwd(&worktree);
+            let contains_cwd = contains_cwd(&worktree, request.cwd.as_deref());
             (worktree, contains_cwd)
         })
         .collect();
@@ -1204,24 +1246,32 @@ fn build_worktree_assessment(
         .max_by_key(|(_, (worktree, _))| worktree.path.as_os_str().len())
         .map(|(index, _)| LocalId(index));
     let worktree_target = resolve_worktree_target(&removable, current, request.target.as_deref());
-    let unmerged = git::unmerged_branches(Some(&main)).unwrap_or_default();
+    let reachable = |index: usize| {
+        request.target.is_none()
+            || (request.forcing == Forcing::Unforced
+                && worktree_target.as_ref().and_then(|resolved| resolved.id)
+                    == Some(LocalId(index)))
+    };
+    let judgement = BranchJudgement::read(
+        Some(&main),
+        &remote,
+        removable
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| reachable(*index))
+            .filter_map(|(_, (worktree, _))| worktree.branch.as_deref()),
+    );
     let (mut raw, mut locals) = (Vec::new(), Vec::new());
     for (index, (worktree, contains_cwd)) in removable.into_iter().enumerate() {
-        let assess_worktree = !worktree.prunable
-            && (request.target.is_none()
-                || (request.forcing == Forcing::Unforced
-                    && worktree_target.as_ref().and_then(|resolved| resolved.id)
-                        == Some(LocalId(index))));
+        let assess_worktree = !worktree.prunable && reachable(index);
+        let (unmerged, proof) = judgement.of(worktree.branch.as_deref());
         let risk = Risk {
             // INVARIANT: Named assessments never render an unassessed worktree
             // risk. Non-target rows are unreachable, and --force consumes no
             // warnings.
             dirty: assess_worktree && worktree_dirty(&worktree.path),
             submodules: assess_worktree && worktree_submodules(&worktree.path),
-            unmerged: worktree
-                .branch
-                .as_deref()
-                .and_then(|branch| unmerged.get(branch).copied()),
+            unmerged,
         };
         raw.push((
             worktree_row_name(&worktree, current == Some(LocalId(index))),
@@ -1239,7 +1289,7 @@ fn build_worktree_assessment(
         locals.push(AssessedLocal {
             target,
             risk,
-            proof: None,
+            proof,
             named_error: None,
             contains_cwd,
         });
@@ -1266,6 +1316,14 @@ fn build_worktree_assessment(
         worktree_target,
         upstream: UpstreamInterest::None,
     })
+}
+
+fn contains_cwd(worktree: &git::Worktree, cwd: Option<&Path>) -> bool {
+    let path = worktree
+        .path
+        .canonicalize()
+        .unwrap_or_else(|_| worktree.path.clone());
+    cwd.is_some_and(|cwd| cwd.starts_with(path))
 }
 
 /// A worktree picker row's name: its branch, or its path where it is detached.
@@ -1818,8 +1876,7 @@ mod tests {
                 Some("feature"),
             ),
             None,
-            &HashMap::new(),
-            &HashMap::new(),
+            &BranchJudgement::default(),
             |_| false,
             |_| false,
         );
@@ -2181,8 +2238,7 @@ mod tests {
                 None,
             ),
             None,
-            &HashMap::new(),
-            &HashMap::new(),
+            &BranchJudgement::default(),
             |_| false,
             |_| false,
         );
@@ -2211,8 +2267,7 @@ mod tests {
                 None,
             ),
             None,
-            &HashMap::new(),
-            &HashMap::new(),
+            &BranchJudgement::default(),
             |_| false,
             |_| false,
         );
@@ -2252,8 +2307,7 @@ mod tests {
                 None,
             ),
             None,
-            &HashMap::new(),
-            &HashMap::new(),
+            &BranchJudgement::default(),
             |_| false,
             |_| false,
         );
@@ -2285,8 +2339,10 @@ mod tests {
                 None,
             ),
             None,
-            &HashMap::from([("feature".to_string(), git::Unmerged::Ahead(2))]),
-            &HashMap::new(),
+            &BranchJudgement {
+                unmerged: HashMap::from([("feature".to_string(), git::Unmerged::Ahead(2))]),
+                ..BranchJudgement::default()
+            },
             |path| path == Path::new("/tmp/feature"),
             |path| path == Path::new("/tmp/feature"),
         );
@@ -2353,8 +2409,10 @@ mod tests {
                 None,
             ),
             None,
-            &HashMap::from([("shipped".to_string(), git::Unmerged::NoUpstream)]),
-            &HashMap::from([("shipped".to_string(), proof.clone())]),
+            &BranchJudgement {
+                equivalent: HashMap::from([("shipped".to_string(), proof.clone())]),
+                unmerged: HashMap::from([("shipped".to_string(), git::Unmerged::NoUpstream)]),
+            },
             |_| false,
             |_| false,
         );
@@ -2605,6 +2663,8 @@ mod tests {
             branches,
             worktrees,
             Some("main"),
+            Some("feature"),
+            Forcing::Unforced,
             UpstreamInterest::None,
         )))
         .expect("assessment");

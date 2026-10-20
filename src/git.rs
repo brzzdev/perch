@@ -1089,7 +1089,7 @@ pub fn equivalent_branches(
             let own_ref = format!("refs/heads/{name}");
             let tip = resolve(dir, &own_ref)?;
             // A branch is no anchor for itself: every tip reaches its own.
-            let mut usable: Vec<&(String, String)> = anchors
+            let mut usable: Vec<_> = anchors
                 .iter()
                 .filter(|(_, anchor_ref)| *anchor_ref != own_ref)
                 .collect();

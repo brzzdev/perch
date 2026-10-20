@@ -5609,8 +5609,7 @@ fn br_rm_keeps_asking_for_a_default_branch_with_unpushed_commits() {
     assert!(local_branch_exists(work.path(), "main"));
 }
 
-/// Local `main` level with `origin/main` shares its tip, so the remote must
-/// survive the self-anchor exclusion rather than be folded into it.
+/// Local `main` level with `origin/main` is proven against it, though it tracks a lagging fork.
 #[test]
 fn br_rm_proves_the_default_branch_against_its_remote_counterpart() {
     let (_bare, work) = setup();

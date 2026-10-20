@@ -645,15 +645,20 @@ fn branch_refs(refs_output: &str) -> HashMap<&str, BranchRef<'_>> {
 /// judge "merged" against, and callers stand the merged rule down rather than
 /// falling back to `HEAD`.
 fn merged_anchor(remote: &str) -> Option<(String, String)> {
+    let (default, refs) = anchor_refs(remote)?;
+    refs.into_iter()
+        .find(|anchor_ref| rev_parse(None, anchor_ref).is_ok())
+        .map(|anchor_ref| (anchor_ref, default))
+}
+
+/// The default branch, with its local ref and then its remote counterpart.
+fn anchor_refs(remote: &str) -> Option<(String, [String; 2])> {
     let default = default_branch(remote)?;
-    let local = format!("refs/heads/{default}");
-    if rev_parse(None, &local).is_ok() {
-        return Some((local, default));
-    }
-    let remote_ref = format!("refs/remotes/{remote}/{default}");
-    rev_parse(None, &remote_ref)
-        .is_ok()
-        .then_some((remote_ref, default))
+    let refs = [
+        format!("refs/heads/{default}"),
+        format!("refs/remotes/{remote}/{default}"),
+    ];
+    Some((default, refs))
 }
 
 /// Which ref fact put a branch on the cleanup prompt. The facts cannot overlap:
@@ -1069,16 +1074,16 @@ pub fn equivalent_branches(
     remote: &str,
     candidates: &[&str],
 ) -> HashMap<String, Proof> {
-    let Some(default) = default_branch(remote) else {
+    if candidates.is_empty() {
+        return HashMap::new();
+    }
+    let Some((_, refs)) = anchor_refs(remote) else {
         return HashMap::new();
     };
-    let mut anchors: Vec<(String, String)> = [
-        format!("refs/heads/{default}"),
-        format!("refs/remotes/{remote}/{default}"),
-    ]
-    .into_iter()
-    .filter_map(|anchor_ref| Some((resolve(dir, &anchor_ref)?, anchor_ref)))
-    .collect();
+    let mut anchors: Vec<(String, String)> = refs
+        .into_iter()
+        .filter_map(|anchor_ref| Some((resolve(dir, &anchor_ref)?, anchor_ref)))
+        .collect();
     anchors.dedup_by(|a, b| a.0 == b.0);
     candidates
         .iter()

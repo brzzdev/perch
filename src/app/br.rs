@@ -28,7 +28,8 @@ pub(crate) fn run_rm(options: &BranchRemoval) -> AppResult<()> {
         local,
         worktrees,
         current.as_deref(),
-        &git::current_remote(current.as_deref()),
+        options.target(),
+        git::Forcing::from(options.force()),
         upstream,
     )))?;
     let Some(selection) = select_removal_locals(

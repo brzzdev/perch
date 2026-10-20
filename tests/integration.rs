@@ -5509,6 +5509,24 @@ fn squash_merged_fork_worktree(parent: &Path, work: &Path) -> PathBuf {
     path
 }
 
+#[test]
+fn a_merge_committed_branch_is_proven_while_the_local_anchor_lags() {
+    let (_bare, work) = setup();
+
+    push_topic_branch(work.path(), "feature");
+    merge_commit_upstream(work.path(), "feature");
+    git(work.path(), &["reset", "--hard", "HEAD~1"]);
+    git(work.path(), &["branch", "dest", "main"]);
+
+    let text = cleanup_prompt(work.path(), "dest", "feature");
+
+    assert!(
+        !text.contains('↑'),
+        "the remote anchor reaches the branch's tip: {text}"
+    );
+    assert!(!branch_listing(work.path()).contains("feature"));
+}
+
 /// With local `main` behind, nothing local holds the branch's commits, but the
 /// remote anchor reaches its tip.
 #[test]
@@ -5576,6 +5594,19 @@ fn stale_cleanup_proves_against_the_main_worktrees_remote() {
         "origin/main holds the branch's patch: {text}"
     );
     assert!(!local_branch_exists(&work, "feature"));
+}
+
+/// The local default is the first anchor, and every tip reaches itself.
+#[test]
+fn br_rm_keeps_asking_for_a_default_branch_with_unpushed_commits() {
+    let (_bare, work) = setup();
+    commit_in(work.path(), "unpushed.txt", "unpushed work");
+    git(work.path(), &["switch", "-c", "develop"]);
+
+    let output = perch_args(work.path(), &["br", "rm", "main"]);
+
+    assert!(!output.status.success());
+    assert!(local_branch_exists(work.path(), "main"));
 }
 
 #[test]
@@ -5867,11 +5898,10 @@ fn a_worktree_taken_on_the_proven_branch_mid_prompt_saves_it() {
     );
 }
 
-/// A branch cut from the anchor and never committed to has nothing the anchor
-/// lacks, and reading that as "landed" would offer it for deletion the moment
-/// it was created. Equivalence only ever subtracts, so staleness alone decides.
+/// An untracked branch on the anchor's tip has nothing of its own, and offering
+/// it would sweep every branch the moment it was created.
 #[test]
-fn an_untouched_branch_cut_from_the_anchor_is_not_read_as_landed() {
+fn an_untracked_branch_on_the_anchor_tip_is_not_stale() {
     let (_bare, work) = setup();
 
     git(work.path(), &["branch", "fresh", "main"]);

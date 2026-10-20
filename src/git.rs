@@ -1051,9 +1051,9 @@ pub struct Proof {
     pub tip: String,
 }
 
-/// Branches whose whole diff against the anchor is already in the anchor under
-/// some other commit — squash-merged, rebase-merged or cherry-picked — each with
-/// the [`Proof`] established for it.
+/// Branches whose whole diff against the anchor is already in the anchor — as
+/// their own commits, or squash-merged, rebase-merged or cherry-picked — each
+/// with the [`Proof`] established for it.
 ///
 /// Equivalence is positive evidence and only ever subtracts, so ask it only of
 /// branches a warning would otherwise be drawn over — unmerged ones. Anything
@@ -1092,9 +1092,11 @@ pub fn equivalent_branches(
             // ref name: a ref that moved mid-probe and moved back would
             // otherwise be proven against one commit and re-checked against
             // another. The name is kept only for that later re-check.
-            let (anchor_tip, anchor_ref) = anchors
-                .iter()
-                .find(|(anchor_tip, _)| equivalent_to(dir, anchor_tip, &tip))?;
+            // A branch is no anchor for itself: every tip reaches its own.
+            let own_ref = format!("refs/heads/{name}");
+            let (anchor_tip, anchor_ref) = anchors.iter().find(|(anchor_tip, anchor_ref)| {
+                *anchor_ref != own_ref && equivalent_to(dir, anchor_tip, &tip)
+            })?;
             let proof = Proof {
                 anchor_ref: anchor_ref.clone(),
                 anchor_tip: anchor_tip.clone(),

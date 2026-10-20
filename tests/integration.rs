@@ -5609,6 +5609,30 @@ fn br_rm_keeps_asking_for_a_default_branch_with_unpushed_commits() {
     assert!(local_branch_exists(work.path(), "main"));
 }
 
+/// Local `main` level with `origin/main` shares its tip, so the remote must
+/// survive the self-anchor exclusion rather than be folded into it.
+#[test]
+fn br_rm_proves_the_default_branch_against_its_remote_counterpart() {
+    let (_bare, work) = setup();
+    let fork = TempDir::new().unwrap();
+    git(fork.path(), &["init", "--bare"]);
+    git(
+        work.path(),
+        &["remote", "add", "fork", fork.path().to_str().unwrap()],
+    );
+    git(work.path(), &["push", "fork", "main"]);
+    commit_in(work.path(), "landed.txt", "landed on origin");
+    git(work.path(), &["push", "origin", "main"]);
+    git(work.path(), &["branch", "-u", "fork/main", "main"]);
+    git(work.path(), &["switch", "-c", "develop"]);
+    git(work.path(), &["push", "-u", "origin", "develop"]);
+
+    let output = perch_args(work.path(), &["br", "rm", "main"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(!local_branch_exists(work.path(), "main"));
+}
+
 #[test]
 fn br_rm_deletes_a_squash_merged_branch_without_asking() {
     let (_bare, work) = setup();

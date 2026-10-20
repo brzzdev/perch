@@ -1079,24 +1079,28 @@ pub fn equivalent_branches(
     let Some((_, refs)) = anchor_refs(remote) else {
         return HashMap::new();
     };
-    let mut anchors: Vec<(String, String)> = refs
+    let anchors: Vec<(String, String)> = refs
         .into_iter()
         .filter_map(|anchor_ref| Some((resolve(dir, &anchor_ref)?, anchor_ref)))
         .collect();
-    anchors.dedup_by(|a, b| a.0 == b.0);
     candidates
         .iter()
         .filter_map(|name| {
-            let tip = resolve(dir, &format!("refs/heads/{name}"))?;
+            let own_ref = format!("refs/heads/{name}");
+            let tip = resolve(dir, &own_ref)?;
+            // A branch is no anchor for itself: every tip reaches its own.
+            let mut usable: Vec<&(String, String)> = anchors
+                .iter()
+                .filter(|(_, anchor_ref)| *anchor_ref != own_ref)
+                .collect();
+            usable.dedup_by(|a, b| a.0 == b.0);
             // Every question below is asked of the *resolved* anchor, never the
             // ref name: a ref that moved mid-probe and moved back would
             // otherwise be proven against one commit and re-checked against
             // another. The name is kept only for that later re-check.
-            // A branch is no anchor for itself: every tip reaches its own.
-            let own_ref = format!("refs/heads/{name}");
-            let (anchor_tip, anchor_ref) = anchors.iter().find(|(anchor_tip, anchor_ref)| {
-                *anchor_ref != own_ref && equivalent_to(dir, anchor_tip, &tip)
-            })?;
+            let (anchor_tip, anchor_ref) = usable
+                .into_iter()
+                .find(|(anchor_tip, _)| equivalent_to(dir, anchor_tip, &tip))?;
             let proof = Proof {
                 anchor_ref: anchor_ref.clone(),
                 anchor_tip: anchor_tip.clone(),

@@ -1,5 +1,7 @@
 # Proof of equivalence is a license
 
+> [ADR 0012](./0012-equivalence-answers-every-removal.md) adds a third route: an anchor that already reaches the branch's tip proves it, which proves an untouched branch too. Every other consequence stands.
+
 A squash-merged branch is unmerged by every test git offers: its commits are not ancestors of the
 anchor, so `git branch -d` refuses it and the picker draws `↑N` over work that already landed. The
 warning is true and useless — the commits it names are irrecoverable only in the sense that their

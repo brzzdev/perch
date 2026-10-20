@@ -5255,6 +5255,19 @@ fn rebase_merge_upstream(work: &Path, branch: &str) {
     git(work, &["fetch", "--prune", "origin"]);
 }
 
+/// Land `branch` on the remote the way a forge merge commit does: its own commits
+/// reach `main` under their own hashes, then its upstream is deleted.
+fn merge_commit_upstream(work: &Path, branch: &str) {
+    git(work, &["checkout", "main"]);
+    git(
+        work,
+        &["merge", "--no-ff", "-m", &format!("merge {branch}"), branch],
+    );
+    git(work, &["push", "origin", "main"]);
+    git(work, &["push", "origin", "--delete", branch]);
+    git(work, &["fetch", "--prune", "origin"]);
+}
+
 /// The local branch names, as one blob to search — enough to answer "did this
 /// branch survive?".
 fn branch_listing(work: &Path) -> String {
@@ -5494,6 +5507,27 @@ fn squash_merged_fork_worktree(parent: &Path, work: &Path) -> PathBuf {
         &["worktree", "add", path.to_str().unwrap(), "feature"],
     );
     path
+}
+
+/// With local `main` behind, nothing local holds the branch's commits, but the
+/// remote anchor reaches its tip.
+#[test]
+fn wt_rm_removes_a_merge_committed_branch_while_the_local_anchor_lags() {
+    let (_bare, parent, work) = setup_with_parent();
+
+    push_topic_branch(&work, "feature");
+    merge_commit_upstream(&work, "feature");
+    git(&work, &["reset", "--hard", "HEAD~1"]);
+    let path = parent.path().join("worktrees").join("repo").join("feature");
+    git(
+        &work,
+        &["worktree", "add", path.to_str().unwrap(), "feature"],
+    );
+
+    let output = perch_args(&path, &["wt", "rm", "."]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(!local_branch_exists(&work, "feature"));
 }
 
 /// In a fork workflow the branch tracks the fork, whose default lags the
@@ -5833,9 +5867,9 @@ fn a_worktree_taken_on_the_proven_branch_mid_prompt_saves_it() {
     );
 }
 
-/// Equivalence only ever subtracts. A branch cut from the anchor and never
-/// committed to has nothing the anchor lacks, and reading that as "landed"
-/// would offer it for deletion the moment it was created.
+/// A branch cut from the anchor and never committed to has nothing the anchor
+/// lacks, and reading that as "landed" would offer it for deletion the moment
+/// it was created. Equivalence only ever subtracts, so staleness alone decides.
 #[test]
 fn an_untouched_branch_cut_from_the_anchor_is_not_read_as_landed() {
     let (_bare, work) = setup();
@@ -5847,10 +5881,6 @@ fn an_untouched_branch_cut_from_the_anchor_is_not_read_as_landed() {
         !stale_names("origin").contains(&"fresh".to_string()),
         "an untouched branch is not stale, got: {:?}",
         stale_names("origin")
-    );
-    assert!(
-        perch::git::equivalent_branches(None, "origin", &["fresh"]).is_empty(),
-        "and an empty diff proves nothing, so equivalence cannot offer it either"
     );
 }
 

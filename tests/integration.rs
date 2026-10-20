@@ -5510,7 +5510,7 @@ fn wt_rm_proves_against_the_main_worktrees_remote() {
 }
 
 /// The current branch picks the remote stale grounds are read from, but the
-/// proof follows the main worktree's branch, as `br rm` and `wt rm` do.
+/// proof follows the main worktree's branch.
 #[test]
 fn stale_cleanup_proves_against_the_main_worktrees_remote() {
     let (_bare, parent, work) = setup_with_parent();

@@ -904,14 +904,17 @@ fn risk_legend(risks: impl IntoIterator<Item = Risk>) -> Option<String> {
 }
 
 fn assess_stale(request: StaleRequest) -> Assessment {
-    let main = request
-        .worktrees
-        .iter()
-        .find(|worktree| worktree.is_main)
-        .map(|worktree| worktree.path.clone());
+    let main_worktree = request.worktrees.iter().find(|worktree| worktree.is_main);
+    let main = main_worktree.map(|worktree| worktree.path.clone());
+    // Grounds were read against the current branch's remote; the proof follows
+    // the main worktree's, as the named removals' does.
+    let remote = main_worktree.map_or_else(
+        || request.remote.clone(),
+        |worktree| git::current_remote(worktree.branch.as_deref()),
+    );
     let judgement = BranchJudgement::read(
         main.as_deref(),
-        &request.remote,
+        &remote,
         request
             .stale
             .iter()

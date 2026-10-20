@@ -5467,40 +5467,80 @@ fn wt_rm_removes_a_squash_merged_branch_without_asking() {
     assert!(!local_branch_exists(&work, "feature"));
 }
 
+/// A `feature` worktree tracking a fork whose head branch is gone, with the
+/// squash on `origin/main` while local `main` and `fork/main` both lag.
+fn squash_merged_fork_worktree(parent: &Path, work: &Path) -> PathBuf {
+    let fork = parent.join("fork.git");
+    fs::create_dir(&fork).unwrap();
+    git(&fork, &["init", "--bare"]);
+    pin_default_branch(&fork);
+    git(work, &["remote", "add", "fork", fork.to_str().unwrap()]);
+    git(work, &["push", "fork", "main"]);
+    git(work, &["remote", "set-head", "fork", "main"]);
+
+    git(work, &["checkout", "-b", "feature"]);
+    commit_in(work, "feature.txt", "topic work");
+    git(work, &["push", "-u", "fork", "feature"]);
+    git(work, &["checkout", "main"]);
+    git(work, &["merge", "--squash", "feature"]);
+    git(work, &["commit", "-m", "squash feature"]);
+    git(work, &["push", "origin", "main"]);
+    git(work, &["reset", "--hard", "HEAD~1"]);
+    git(work, &["push", "fork", "--delete", "feature"]);
+    git(work, &["fetch", "--prune", "fork"]);
+    let path = parent.join("worktrees").join("repo").join("feature");
+    git(
+        work,
+        &["worktree", "add", path.to_str().unwrap(), "feature"],
+    );
+    path
+}
+
 /// In a fork workflow the branch tracks the fork, whose default lags the
 /// canonical remote the main worktree's branch tracks.
 #[test]
 fn wt_rm_proves_against_the_main_worktrees_remote() {
     let (_bare, parent, work) = setup_with_parent();
-    let fork = TempDir::new().unwrap();
-    git(fork.path(), &["init", "--bare"]);
-    pin_default_branch(fork.path());
-    git(
-        &work,
-        &["remote", "add", "fork", fork.path().to_str().unwrap()],
-    );
-    git(&work, &["push", "fork", "main"]);
-    git(&work, &["remote", "set-head", "fork", "main"]);
-
-    git(&work, &["checkout", "-b", "feature"]);
-    commit_in(&work, "feature.txt", "topic work");
-    git(&work, &["push", "-u", "fork", "feature"]);
-    git(&work, &["checkout", "main"]);
-    git(&work, &["merge", "--squash", "feature"]);
-    git(&work, &["commit", "-m", "squash feature"]);
-    git(&work, &["push", "origin", "main"]);
-    git(&work, &["reset", "--hard", "HEAD~1"]);
-    git(&work, &["push", "fork", "--delete", "feature"]);
-    git(&work, &["fetch", "--prune", "fork"]);
-    let path = parent.path().join("worktrees").join("repo").join("feature");
-    git(
-        &work,
-        &["worktree", "add", path.to_str().unwrap(), "feature"],
-    );
+    let path = squash_merged_fork_worktree(parent.path(), &work);
 
     let output = perch_args(&path, &["wt", "rm", "."]);
 
     assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(!local_branch_exists(&work, "feature"));
+}
+
+/// The current branch picks the remote stale grounds are read from, but the
+/// proof follows the main worktree's branch, as `br rm` and `wt rm` do.
+#[test]
+fn stale_cleanup_proves_against_the_main_worktrees_remote() {
+    let (_bare, parent, work) = setup_with_parent();
+    squash_merged_fork_worktree(parent.path(), &work);
+    let side = parent.path().join("worktrees").join("repo").join("side");
+    git(
+        &work,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "side",
+            side.to_str().unwrap(),
+            "main",
+        ],
+    );
+    git(&side, &["push", "-u", "fork", "side"]);
+
+    let text = String::from_utf8_lossy_owned(drive_multi_select_prompt(
+        &side,
+        &["wt", "fresh"],
+        "feature",
+        false,
+        || {},
+    ));
+
+    assert!(
+        !text.contains('↑'),
+        "origin/main holds the branch's patch: {text}"
+    );
     assert!(!local_branch_exists(&work, "feature"));
 }
 

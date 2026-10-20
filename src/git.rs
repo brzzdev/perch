@@ -1056,6 +1056,9 @@ pub struct Proof {
 /// find already there, and is never proven by this; anything that cannot be
 /// established at all leaves the branch treated as holding unique work.
 ///
+/// The anchor's local copy is asked first, then its remote counterpart: a forge
+/// merge lands on the remote, so a local copy left unpulled has never seen it.
+///
 /// `dir` must be the worktree the delete will run from, so what is proven here
 /// and what is re-checked there are read through the same root. Refs are shared,
 /// so the two agree anyway; asking from one place is what keeps that a fact
@@ -1066,12 +1069,17 @@ pub fn equivalent_branches(
     remote: &str,
     candidates: &[&str],
 ) -> HashMap<String, Proof> {
-    let Some((anchor_ref, _)) = merged_anchor(remote) else {
+    let Some(default) = default_branch(remote) else {
         return HashMap::new();
     };
-    let Some(anchor_tip) = resolve(dir, &anchor_ref) else {
-        return HashMap::new();
-    };
+    let mut anchors: Vec<(String, String)> = [
+        format!("refs/heads/{default}"),
+        format!("refs/remotes/{remote}/{default}"),
+    ]
+    .into_iter()
+    .filter_map(|anchor_ref| Some((resolve(dir, &anchor_ref)?, anchor_ref)))
+    .collect();
+    anchors.dedup_by(|a, b| a.0 == b.0);
     candidates
         .iter()
         .filter_map(|name| {
@@ -1080,14 +1088,15 @@ pub fn equivalent_branches(
             // ref name: a ref that moved mid-probe and moved back would
             // otherwise be proven against one commit and re-checked against
             // another. The name is kept only for that later re-check.
-            equivalent_to(dir, &anchor_tip, &tip).then(|| {
-                let proof = Proof {
-                    anchor_ref: anchor_ref.clone(),
-                    anchor_tip: anchor_tip.clone(),
-                    tip,
-                };
-                ((*name).to_string(), proof)
-            })
+            let (anchor_tip, anchor_ref) = anchors
+                .iter()
+                .find(|(anchor_tip, _)| equivalent_to(dir, anchor_tip, &tip))?;
+            let proof = Proof {
+                anchor_ref: anchor_ref.clone(),
+                anchor_tip: anchor_tip.clone(),
+                tip,
+            };
+            Some(((*name).to_string(), proof))
         })
         .collect()
 }

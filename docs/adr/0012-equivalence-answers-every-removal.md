@@ -1,0 +1,10 @@
+# Equivalence answers every removal
+
+[ADR 0009](./0009-branch-removal-earns-a-subverb.md) kept the *Equivalent* proof exclusive to stale cleanup, leaving `br rm` and `wt rm` to mirror `git branch -d` alone. On a forge that deletes the head branch on merge, as GitHub does, that rule answers every squash merge wrongly: the upstream goes `[gone]`, `-d` falls back to HEAD, and HEAD never holds the squashed commits under their own hashes. So `wt rm .` on a merged pull request asked to discard work that had already landed, on every merge, and a warning given every time is a warning nobody reads. The named removals now ask for the same proof the sweep does, and an *Equivalent* branch goes without being asked about.
+
+## Consequences
+
+- **The proof is the same proof.** It is established on the same pair of commits and re-checked before the delete exactly as [ADR 0005](./0005-proof-of-equivalence-is-a-license.md) records; only who asks for it has widened. It is asked of branches a warning would otherwise be drawn over and that the removal can reach: an unmerged branch, not current, not held elsewhere, and for a named `wt rm` only the named target. `--force` asks nothing, since it needs no warning to be withdrawn.
+- **The anchor's remote counterpart is asked too.** A forge merge lands on the remote, so a local default branch that was never pulled lacks it while `origin/main` holds it. The proof tries the local copy first, then the remote counterpart, and records whichever one proved it. Stale cleanup benefits as well. The merged rule that puts branches on the cleanup prompt still reads the local copy first, so this only ever subtracts.
+- **`--merged` and *Unmerged* are unchanged.** *Unmerged* still predicts `git branch -d` exactly. An *Equivalent* branch is still unmerged, and still meets git's guard wherever the proof lapses.
+- **Removal costs a probe per unmerged branch.** A picker over many unmerged branches runs `merge-base`, `commit-tree` and `cherry` for each, against up to two anchors. That is bounded by what the user could remove, and it is the same cost the sweep already pays.

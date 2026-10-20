@@ -5423,6 +5423,63 @@ fn a_squash_merged_branch_is_still_proven_once_the_anchor_moves_on() {
     );
 }
 
+/// A squash merge lands on the forge, so a local default branch that was never
+/// pulled lacks it while its remote counterpart holds it.
+#[test]
+fn a_squash_merged_branch_is_proven_while_the_local_anchor_lags() {
+    let (_bare, work) = setup();
+
+    push_topic_branch(work.path(), "feature");
+    squash_merge_upstream(work.path(), "feature");
+    git(work.path(), &["reset", "--hard", "HEAD~1"]);
+    git(work.path(), &["branch", "dest", "main"]);
+
+    let text = cleanup_prompt(work.path(), "dest", "feature");
+
+    assert!(
+        !text.contains('↑'),
+        "the remote anchor holds the branch's patch: {text}"
+    );
+    assert!(
+        !branch_listing(work.path()).contains("feature"),
+        "the branch should be gone: {}",
+        branch_listing(work.path())
+    );
+}
+
+#[test]
+fn wt_rm_removes_a_squash_merged_branch_without_asking() {
+    let (_bare, parent, work) = setup_with_parent();
+
+    push_topic_branch(&work, "feature");
+    squash_merge_upstream(&work, "feature");
+    git(&work, &["reset", "--hard", "HEAD~1"]);
+    let path = parent.path().join("worktrees").join("repo").join("feature");
+    git(
+        &work,
+        &["worktree", "add", path.to_str().unwrap(), "feature"],
+    );
+
+    let output = perch_args(&work, &["wt", "rm", "feature"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(!path.exists(), "worktree dir should be removed");
+    assert!(!local_branch_exists(&work, "feature"));
+}
+
+#[test]
+fn br_rm_deletes_a_squash_merged_branch_without_asking() {
+    let (_bare, work) = setup();
+
+    push_topic_branch(work.path(), "feature");
+    squash_merge_upstream(work.path(), "feature");
+
+    let output = perch_args(work.path(), &["br", "rm", "feature"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(!local_branch_exists(work.path(), "feature"));
+}
+
 /// The content route compares the paths a branch touched, and git reports a
 /// rename as its destination alone — which would leave the deletion of its
 /// source uncompared, and prove a branch whose deletion never landed.

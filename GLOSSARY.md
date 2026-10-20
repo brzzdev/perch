@@ -23,7 +23,7 @@ Holding commits that `git branch -d` would refuse to discard. Git's rule is *"fu
 _Avoid_: Unpushed, ahead, dirty
 
 **Equivalent**:
-A branch whose whole diff against the anchor is already in the anchor, under some other commit — squash-merged, rebase-merged, or cherry-picked. It is the one judgement read from *content* rather than from what a branch tracks or where its commits sit, and it is positive evidence: where it cannot be established, the branch is treated as holding unique work. Equivalence only ever subtracts a *Risk* from a branch already on the cleanup prompt, never adds a branch to it. See [ADR 0005](./docs/adr/0005-proof-of-equivalence-is-a-license.md).
+A branch whose whole diff against the anchor is already in the anchor, under some other commit — squash-merged, rebase-merged, or cherry-picked. It is the one judgement read from *content* rather than from what a branch tracks or where its commits sit, and it is positive evidence: where it cannot be established, the branch is treated as holding unique work. It is proven against the anchor, or against its remote counterpart where the local copy has not caught up. Equivalence only ever subtracts a *Risk* from a branch on the cleanup prompt or named for removal, and never adds a branch to the prompt. See [ADR 0005](./docs/adr/0005-proof-of-equivalence-is-a-license.md) and [ADR 0012](./docs/adr/0012-equivalence-answers-every-removal.md).
 _Avoid_: Squashed, duplicate, redundant
 
 **Kept**:

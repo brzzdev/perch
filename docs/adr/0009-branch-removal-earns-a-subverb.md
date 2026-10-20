@@ -1,6 +1,8 @@
 # Branch removal earns a subverb
 
 > The consequence that *Kept* branches are drawn disabled in the picker is superseded by [ADR 0011](./0011-keeping-is-about-the-sweep.md). Held branches are still disabled, and every other consequence stands.
+>
+> The consequence that the *Equivalent* proof is exclusive to stale cleanup is superseded by [ADR 0012](./0012-equivalence-answers-every-removal.md).
 
 ADR 0007 kept `rm` under `wt` alone because Git already deletes branches, but the resulting command is harder to discover than the operation: `wt rm` strongly suggests a matching `br rm`, and Perch already owns the picker, risk markers, and removal rules that make it more than an alias for `git branch -d`. `br rm` therefore removes local branches, while `wt rm` continues to remove worktrees and their branches. This supersedes only ADR 0007's consequence that `br` gets no `rm`; its three navigation intents remain unchanged.
 

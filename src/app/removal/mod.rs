@@ -96,6 +96,7 @@ pub(crate) struct BranchRequest {
     branches: Vec<String>,
     worktrees: Vec<git::Worktree>,
     current: Option<String>,
+    remote: String,
     upstream: UpstreamInterest,
 }
 
@@ -104,12 +105,14 @@ impl BranchRequest {
         branches: Vec<String>,
         worktrees: Vec<git::Worktree>,
         current: Option<&str>,
+        remote: &str,
         upstream: UpstreamInterest,
     ) -> Self {
         Self {
             branches,
             worktrees,
             current: current.map(str::to_string),
+            remote: remote.to_string(),
             upstream,
         }
     }
@@ -119,6 +122,7 @@ pub(crate) struct WorktreeRequest {
     worktrees: Vec<git::Worktree>,
     cwd: Option<PathBuf>,
     target: Option<String>,
+    remote: String,
     forcing: Forcing,
 }
 
@@ -127,12 +131,14 @@ impl WorktreeRequest {
         worktrees: Vec<git::Worktree>,
         cwd: Option<PathBuf>,
         target: Option<&str>,
+        remote: &str,
         forcing: Forcing,
     ) -> Self {
         Self {
             worktrees,
             cwd,
             target: target.map(str::to_string),
+            remote: remote.to_string(),
             forcing,
         }
     }
@@ -1035,6 +1041,39 @@ fn stale_ground_label(ground: git::Ground) -> &'static str {
     }
 }
 
+/// The branch half of each row's *Risk*: whether `git branch -d` would refuse
+/// it, and the proof that refusing costs nothing where it is *Equivalent*.
+struct BranchJudgement {
+    equivalent: HashMap<String, git::Proof>,
+    unmerged: HashMap<String, git::Unmerged>,
+}
+
+impl BranchJudgement {
+    /// `reachable` names the branches the removal could delete; only those are
+    /// worth a proof.
+    fn read<'a>(main: &Path, remote: &str, reachable: impl Iterator<Item = &'a str>) -> Self {
+        let unmerged = git::unmerged_branches(Some(main)).unwrap_or_default();
+        let candidates: Vec<&str> = reachable
+            .filter(|name| unmerged.contains_key(*name))
+            .collect();
+        let equivalent = git::equivalent_branches(Some(main), remote, &candidates);
+        Self {
+            equivalent,
+            unmerged,
+        }
+    }
+
+    fn of(&self, branch: Option<&str>) -> (Option<git::Unmerged>, Option<git::Proof>) {
+        let Some(branch) = branch else {
+            return (None, None);
+        };
+        match self.equivalent.get(branch) {
+            Some(proof) => (None, Some(proof.clone())),
+            None => (self.unmerged.get(branch).copied(), None),
+        }
+    }
+}
+
 fn assess_branches(request: BranchRequest) -> AppResult<Assessment> {
     let main = request
         .worktrees
@@ -1046,7 +1085,14 @@ fn assess_branches(request: BranchRequest) -> AppResult<Assessment> {
         })?
         .path
         .clone();
-    let unmerged = git::unmerged_branches(Some(&main)).unwrap_or_default();
+    let judgement = BranchJudgement::read(
+        &main,
+        &request.remote,
+        request.branches.iter().map(String::as_str).filter(|name| {
+            request.current.as_deref() != Some(*name)
+                && git::worktree_for_branch(&request.worktrees, name).is_none()
+        }),
+    );
     let mut raw = Vec::new();
     let mut locals = Vec::new();
     for name in request.branches {
@@ -1054,8 +1100,9 @@ fn assess_branches(request: BranchRequest) -> AppResult<Assessment> {
         // drawn from the error naming it would raise rather than from a second
         // reading of the same fact.
         let named_error = git::worktree_for_branch(&request.worktrees, &name).map(NamedError::Held);
+        let (unmerged, proof) = judgement.of(Some(&name));
         let risk = Risk {
-            unmerged: unmerged.get(&name).copied(),
+            unmerged,
             ..Risk::default()
         };
         let annotation = if request.current.as_deref() == Some(&name) {
@@ -1086,7 +1133,7 @@ fn assess_branches(request: BranchRequest) -> AppResult<Assessment> {
         locals.push(AssessedLocal {
             target: OwnedTarget::Branch { name },
             risk,
-            proof: None,
+            proof,
             named_error,
             contains_cwd: false,
         });
@@ -1178,22 +1225,12 @@ fn build_worktree_assessment(
         })?
         .path
         .clone();
-    let contains_cwd = |worktree: &git::Worktree| {
-        let path = worktree
-            .path
-            .canonicalize()
-            .unwrap_or_else(|_| worktree.path.clone());
-        request
-            .cwd
-            .as_ref()
-            .is_some_and(|cwd| cwd.starts_with(path))
-    };
     let removable: Vec<(git::Worktree, bool)> = request
         .worktrees
         .into_iter()
         .filter(|worktree| !worktree.is_main)
         .map(|worktree| {
-            let contains_cwd = contains_cwd(&worktree);
+            let contains_cwd = contains_cwd(&worktree, request.cwd.as_deref());
             (worktree, contains_cwd)
         })
         .collect();
@@ -1204,24 +1241,32 @@ fn build_worktree_assessment(
         .max_by_key(|(_, (worktree, _))| worktree.path.as_os_str().len())
         .map(|(index, _)| LocalId(index));
     let worktree_target = resolve_worktree_target(&removable, current, request.target.as_deref());
-    let unmerged = git::unmerged_branches(Some(&main)).unwrap_or_default();
+    let reachable = |index: usize| {
+        request.target.is_none()
+            || (request.forcing == Forcing::Unforced
+                && worktree_target.as_ref().and_then(|resolved| resolved.id)
+                    == Some(LocalId(index)))
+    };
+    let judgement = BranchJudgement::read(
+        &main,
+        &request.remote,
+        removable
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| reachable(*index))
+            .filter_map(|(_, (worktree, _))| worktree.branch.as_deref()),
+    );
     let (mut raw, mut locals) = (Vec::new(), Vec::new());
     for (index, (worktree, contains_cwd)) in removable.into_iter().enumerate() {
-        let assess_worktree = !worktree.prunable
-            && (request.target.is_none()
-                || (request.forcing == Forcing::Unforced
-                    && worktree_target.as_ref().and_then(|resolved| resolved.id)
-                        == Some(LocalId(index))));
+        let assess_worktree = !worktree.prunable && reachable(index);
+        let (unmerged, proof) = judgement.of(worktree.branch.as_deref());
         let risk = Risk {
             // INVARIANT: Named assessments never render an unassessed worktree
             // risk. Non-target rows are unreachable, and --force consumes no
             // warnings.
             dirty: assess_worktree && worktree_dirty(&worktree.path),
             submodules: assess_worktree && worktree_submodules(&worktree.path),
-            unmerged: worktree
-                .branch
-                .as_deref()
-                .and_then(|branch| unmerged.get(branch).copied()),
+            unmerged,
         };
         raw.push((
             worktree_row_name(&worktree, current == Some(LocalId(index))),
@@ -1239,7 +1284,7 @@ fn build_worktree_assessment(
         locals.push(AssessedLocal {
             target,
             risk,
-            proof: None,
+            proof,
             named_error: None,
             contains_cwd,
         });
@@ -1266,6 +1311,14 @@ fn build_worktree_assessment(
         worktree_target,
         upstream: UpstreamInterest::None,
     })
+}
+
+fn contains_cwd(worktree: &git::Worktree, cwd: Option<&Path>) -> bool {
+    let path = worktree
+        .path
+        .canonicalize()
+        .unwrap_or_else(|_| worktree.path.clone());
+    cwd.is_some_and(|cwd| cwd.starts_with(path))
 }
 
 /// A worktree picker row's name: its branch, or its path where it is detached.
@@ -1863,6 +1916,7 @@ mod tests {
             with_main_worktree(worktrees),
             cwd.map(PathBuf::from),
             Some(target),
+            "origin",
             Forcing::Unforced,
         ))
         .expect("worktree assessment")
@@ -1877,7 +1931,7 @@ mod tests {
         let read_paths = std::cell::RefCell::new(Vec::new());
 
         let assessment = build_worktree_assessment(
-            WorktreeRequest::new(worktrees, None, Some("feature"), Forcing::Forced),
+            WorktreeRequest::new(worktrees, None, Some("feature"), "origin", Forcing::Forced),
             |path| {
                 read_paths.borrow_mut().push(path.to_path_buf());
                 true
@@ -1909,6 +1963,7 @@ mod tests {
                 worktrees,
                 Some(PathBuf::from("/tmp/worktrees/outer/inner/src")),
                 Some("."),
+                "origin",
                 Forcing::Unforced,
             ),
             |path| {
@@ -1948,7 +2003,7 @@ mod tests {
         let mut dirty_paths = Vec::new();
 
         let assessment = build_worktree_assessment(
-            WorktreeRequest::new(worktrees, None, Some("login"), Forcing::Unforced),
+            WorktreeRequest::new(worktrees, None, Some("login"), "origin", Forcing::Unforced),
             |path| {
                 dirty_paths.push(path.to_path_buf());
                 true
@@ -1977,7 +2032,7 @@ mod tests {
         let mut dirty_paths = Vec::new();
 
         build_worktree_assessment(
-            WorktreeRequest::new(worktrees, None, None, Forcing::Unforced),
+            WorktreeRequest::new(worktrees, None, None, "origin", Forcing::Unforced),
             |path| {
                 dirty_paths.push(path.to_path_buf());
                 false
@@ -2004,7 +2059,7 @@ mod tests {
             ]);
 
             let assessment = build_worktree_assessment(
-                WorktreeRequest::new(worktrees, None, None, forcing),
+                WorktreeRequest::new(worktrees, None, None, "origin", forcing),
                 |path| path.ends_with("feature"),
                 |_| false,
             )
@@ -2039,7 +2094,7 @@ mod tests {
         ]);
 
         let assessment = build_worktree_assessment(
-            WorktreeRequest::new(worktrees, None, None, Forcing::Unforced),
+            WorktreeRequest::new(worktrees, None, None, "origin", Forcing::Unforced),
             |path| path.ends_with("both"),
             |path| !path.ends_with("plain"),
         )
@@ -2066,7 +2121,13 @@ mod tests {
             with_main_worktree(vec![test_worktree("feature", "/tmp/worktrees/feature")]);
 
         let assessment = build_worktree_assessment(
-            WorktreeRequest::new(worktrees, None, Some("feature"), Forcing::Unforced),
+            WorktreeRequest::new(
+                worktrees,
+                None,
+                Some("feature"),
+                "origin",
+                Forcing::Unforced,
+            ),
             |_| false,
             |_| true,
         )
@@ -2096,7 +2157,13 @@ mod tests {
         let worktrees =
             with_main_worktree(vec![test_worktree("feature", "/tmp/worktrees/feature")]);
         let assessment = build_worktree_assessment(
-            WorktreeRequest::new(worktrees, None, Some("feature"), Forcing::Unforced),
+            WorktreeRequest::new(
+                worktrees,
+                None,
+                Some("feature"),
+                "origin",
+                Forcing::Unforced,
+            ),
             |_| false,
             |_| true,
         )
@@ -2373,7 +2440,7 @@ mod tests {
             "/tmp/worktrees/repo/feat/login",
         )]);
         let assessment = build_worktree_assessment(
-            WorktreeRequest::new(worktrees, None, Some("feat"), Forcing::Unforced),
+            WorktreeRequest::new(worktrees, None, Some("feat"), "origin", Forcing::Unforced),
             |_| false,
             |_| false,
         )
@@ -2605,6 +2672,7 @@ mod tests {
             branches,
             worktrees,
             Some("main"),
+            "origin",
             UpstreamInterest::None,
         )))
         .expect("assessment");
@@ -2645,6 +2713,7 @@ mod tests {
                 .ok()
                 .and_then(|dir| dir.canonicalize().ok()),
             None,
+            "origin",
             Forcing::Forced,
         )))
         .expect("assessment");

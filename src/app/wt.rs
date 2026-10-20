@@ -217,7 +217,6 @@ pub(crate) fn run_rm(options: &WorktreeRemoval) -> AppResult<()> {
         worktrees,
         cwd,
         options.target(),
-        &git::current_remote(git::current_branch().ok().flatten().as_deref()),
         forcing,
     )))?;
     if assessment.offers().is_empty() {

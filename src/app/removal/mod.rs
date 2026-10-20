@@ -125,7 +125,6 @@ pub(crate) struct WorktreeRequest {
     worktrees: Vec<git::Worktree>,
     cwd: Option<PathBuf>,
     target: Option<String>,
-    remote: String,
     forcing: Forcing,
 }
 
@@ -134,14 +133,12 @@ impl WorktreeRequest {
         worktrees: Vec<git::Worktree>,
         cwd: Option<PathBuf>,
         target: Option<&str>,
-        remote: &str,
         forcing: Forcing,
     ) -> Self {
         Self {
             worktrees,
             cwd,
             target: target.map(str::to_string),
-            remote: remote.to_string(),
             forcing,
         }
     }
@@ -1076,23 +1073,23 @@ impl BranchJudgement {
 }
 
 fn assess_branches(request: BranchRequest) -> AppResult<Assessment> {
-    let main = request
+    let main_worktree = request
         .worktrees
         .iter()
         .find(|worktree| worktree.is_main)
         .ok_or_else(|| Error::Git {
             command: "worktree list".into(),
             message: "main worktree not found".into(),
-        })?
-        .path
-        .clone();
+        })?;
+    let main = main_worktree.path.clone();
+    let remote = git::current_remote(main_worktree.branch.as_deref());
     let reachable = |name: &str| match request.target.as_deref() {
         None => true,
         Some(target) => request.forcing == Forcing::Unforced && target == name,
     };
     let judgement = BranchJudgement::read(
         Some(&main),
-        &git::current_remote(request.current.as_deref()),
+        &remote,
         request.branches.iter().map(String::as_str).filter(|name| {
             reachable(name)
                 && request.current.as_deref() != Some(*name)
@@ -1221,16 +1218,16 @@ fn build_worktree_assessment(
     mut worktree_dirty: impl FnMut(&Path) -> bool,
     mut worktree_submodules: impl FnMut(&Path) -> bool,
 ) -> AppResult<Assessment> {
-    let main = request
+    let main_worktree = request
         .worktrees
         .iter()
         .find(|worktree| worktree.is_main)
         .ok_or_else(|| Error::Git {
             command: "worktree list".into(),
             message: "no main worktree found".into(),
-        })?
-        .path
-        .clone();
+        })?;
+    let main = main_worktree.path.clone();
+    let remote = git::current_remote(main_worktree.branch.as_deref());
     let removable: Vec<(git::Worktree, bool)> = request
         .worktrees
         .into_iter()
@@ -1255,7 +1252,7 @@ fn build_worktree_assessment(
     };
     let judgement = BranchJudgement::read(
         Some(&main),
-        &request.remote,
+        &remote,
         removable
             .iter()
             .enumerate()
@@ -1921,7 +1918,6 @@ mod tests {
             with_main_worktree(worktrees),
             cwd.map(PathBuf::from),
             Some(target),
-            "origin",
             Forcing::Unforced,
         ))
         .expect("worktree assessment")
@@ -1936,7 +1932,7 @@ mod tests {
         let read_paths = std::cell::RefCell::new(Vec::new());
 
         let assessment = build_worktree_assessment(
-            WorktreeRequest::new(worktrees, None, Some("feature"), "origin", Forcing::Forced),
+            WorktreeRequest::new(worktrees, None, Some("feature"), Forcing::Forced),
             |path| {
                 read_paths.borrow_mut().push(path.to_path_buf());
                 true
@@ -1968,7 +1964,6 @@ mod tests {
                 worktrees,
                 Some(PathBuf::from("/tmp/worktrees/outer/inner/src")),
                 Some("."),
-                "origin",
                 Forcing::Unforced,
             ),
             |path| {
@@ -2008,7 +2003,7 @@ mod tests {
         let mut dirty_paths = Vec::new();
 
         let assessment = build_worktree_assessment(
-            WorktreeRequest::new(worktrees, None, Some("login"), "origin", Forcing::Unforced),
+            WorktreeRequest::new(worktrees, None, Some("login"), Forcing::Unforced),
             |path| {
                 dirty_paths.push(path.to_path_buf());
                 true
@@ -2037,7 +2032,7 @@ mod tests {
         let mut dirty_paths = Vec::new();
 
         build_worktree_assessment(
-            WorktreeRequest::new(worktrees, None, None, "origin", Forcing::Unforced),
+            WorktreeRequest::new(worktrees, None, None, Forcing::Unforced),
             |path| {
                 dirty_paths.push(path.to_path_buf());
                 false
@@ -2064,7 +2059,7 @@ mod tests {
             ]);
 
             let assessment = build_worktree_assessment(
-                WorktreeRequest::new(worktrees, None, None, "origin", forcing),
+                WorktreeRequest::new(worktrees, None, None, forcing),
                 |path| path.ends_with("feature"),
                 |_| false,
             )
@@ -2099,7 +2094,7 @@ mod tests {
         ]);
 
         let assessment = build_worktree_assessment(
-            WorktreeRequest::new(worktrees, None, None, "origin", Forcing::Unforced),
+            WorktreeRequest::new(worktrees, None, None, Forcing::Unforced),
             |path| path.ends_with("both"),
             |path| !path.ends_with("plain"),
         )
@@ -2126,13 +2121,7 @@ mod tests {
             with_main_worktree(vec![test_worktree("feature", "/tmp/worktrees/feature")]);
 
         let assessment = build_worktree_assessment(
-            WorktreeRequest::new(
-                worktrees,
-                None,
-                Some("feature"),
-                "origin",
-                Forcing::Unforced,
-            ),
+            WorktreeRequest::new(worktrees, None, Some("feature"), Forcing::Unforced),
             |_| false,
             |_| true,
         )
@@ -2162,13 +2151,7 @@ mod tests {
         let worktrees =
             with_main_worktree(vec![test_worktree("feature", "/tmp/worktrees/feature")]);
         let assessment = build_worktree_assessment(
-            WorktreeRequest::new(
-                worktrees,
-                None,
-                Some("feature"),
-                "origin",
-                Forcing::Unforced,
-            ),
+            WorktreeRequest::new(worktrees, None, Some("feature"), Forcing::Unforced),
             |_| false,
             |_| true,
         )
@@ -2446,7 +2429,7 @@ mod tests {
             "/tmp/worktrees/repo/feat/login",
         )]);
         let assessment = build_worktree_assessment(
-            WorktreeRequest::new(worktrees, None, Some("feat"), "origin", Forcing::Unforced),
+            WorktreeRequest::new(worktrees, None, Some("feat"), Forcing::Unforced),
             |_| false,
             |_| false,
         )
@@ -2720,7 +2703,6 @@ mod tests {
                 .ok()
                 .and_then(|dir| dir.canonicalize().ok()),
             None,
-            "origin",
             Forcing::Forced,
         )))
         .expect("assessment");

@@ -5460,10 +5460,47 @@ fn wt_rm_removes_a_squash_merged_branch_without_asking() {
         &["worktree", "add", path.to_str().unwrap(), "feature"],
     );
 
-    let output = perch_args(&work, &["wt", "rm", "feature"]);
+    let output = perch_args(&path, &["wt", "rm", "."]);
 
     assert!(output.status.success(), "stderr: {}", stderr_str(&output));
     assert!(!path.exists(), "worktree dir should be removed");
+    assert!(!local_branch_exists(&work, "feature"));
+}
+
+/// In a fork workflow the branch tracks the fork, whose default lags the
+/// canonical remote the main worktree's branch tracks.
+#[test]
+fn wt_rm_proves_against_the_main_worktrees_remote() {
+    let (_bare, parent, work) = setup_with_parent();
+    let fork = TempDir::new().unwrap();
+    git(fork.path(), &["init", "--bare"]);
+    pin_default_branch(fork.path());
+    git(
+        &work,
+        &["remote", "add", "fork", fork.path().to_str().unwrap()],
+    );
+    git(&work, &["push", "fork", "main"]);
+    git(&work, &["remote", "set-head", "fork", "main"]);
+
+    git(&work, &["checkout", "-b", "feature"]);
+    commit_in(&work, "feature.txt", "topic work");
+    git(&work, &["push", "-u", "fork", "feature"]);
+    git(&work, &["checkout", "main"]);
+    git(&work, &["merge", "--squash", "feature"]);
+    git(&work, &["commit", "-m", "squash feature"]);
+    git(&work, &["push", "origin", "main"]);
+    git(&work, &["reset", "--hard", "HEAD~1"]);
+    git(&work, &["push", "fork", "--delete", "feature"]);
+    git(&work, &["fetch", "--prune", "fork"]);
+    let path = parent.path().join("worktrees").join("repo").join("feature");
+    git(
+        &work,
+        &["worktree", "add", path.to_str().unwrap(), "feature"],
+    );
+
+    let output = perch_args(&path, &["wt", "rm", "."]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
     assert!(!local_branch_exists(&work, "feature"));
 }
 
@@ -5473,6 +5510,7 @@ fn br_rm_deletes_a_squash_merged_branch_without_asking() {
 
     push_topic_branch(work.path(), "feature");
     squash_merge_upstream(work.path(), "feature");
+    git(work.path(), &["reset", "--hard", "HEAD~1"]);
 
     let output = perch_args(work.path(), &["br", "rm", "feature"]);
 

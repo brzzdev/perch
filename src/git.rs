@@ -286,8 +286,7 @@ pub fn fetch(dir: Option<&Path>, remote: &str, submodules: SubmoduleFetch) -> Fe
 }
 
 /// Starts `git fetch` without waiting for it, for a caller with something to
-/// do meanwhile. The child leads its own session, so it has no terminal to
-/// prompt on, and [`without_prompts`] stops it asking anywhere else. A fetch
+/// do meanwhile. [`without_prompts`] stops it asking anyone anything. A fetch
 /// that needs a person fails fast into the foreground retry, which has the
 /// user's askpass and helpers back. Its output goes nowhere: only whether it
 /// succeeded is ever read.
@@ -298,12 +297,12 @@ pub fn fetch_in_background(remote: &str) -> std::io::Result<Child> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    #[cfg(unix)]
-    session::detach(&mut command);
     command.spawn()
 }
 
-/// Has a git command fail rather than ask a person for credentials.
+/// Has a git command fail rather than ask a person for credentials. It leads
+/// its own session, so it has no terminal to prompt on: closing stdin alone
+/// leaves ssh free to read a passphrase from `/dev/tty`.
 /// `GIT_TERMINAL_PROMPT=0` has git fail at once rather than prompt. Askpass
 /// programs are switched off too, since
 /// they prompt without a terminal: an empty `GIT_ASKPASS` stands in for both
@@ -319,6 +318,8 @@ pub fn fetch_in_background(remote: &str) -> std::io::Result<Child> {
 /// Auth that needs no person, an agent or a keychain helper, still works. It
 /// must come before the subcommand, since `-c` is an option to git itself.
 fn without_prompts(command: &mut Command) -> &mut Command {
+    #[cfg(unix)]
+    session::detach(command);
     command
         .args(["-c", "credential.interactive=false"])
         .env("GIT_ASKPASS", "")
@@ -1021,8 +1022,8 @@ fn read_upstream_config() -> String {
 }
 
 /// The branches whose configured upstream git cannot see, keyed by name. A
-/// remote of `.` is the repo itself, which has nothing on a server to ask, and
-/// of several values git takes the first.
+/// remote of `.` is the repo itself, which has nothing on a server to ask. Of
+/// several values, git takes the last `remote` and the first `merge`.
 fn unfetched_upstreams<'a>(
     refs: &HashMap<&str, BranchRef<'_>>,
     config_output: &'a str,
@@ -1036,12 +1037,15 @@ fn unfetched_upstreams<'a>(
         let Some((branch, field)) = branch_config_key(key) else {
             continue;
         };
-        let values = match field {
-            "merge" => &mut merges,
-            "remote" => &mut remotes,
-            _ => continue,
-        };
-        values.entry(branch).or_insert(value);
+        match field {
+            "merge" => {
+                merges.entry(branch).or_insert(value);
+            }
+            "remote" => {
+                remotes.insert(branch, value);
+            }
+            _ => {}
+        }
     }
     remotes
         .into_iter()
@@ -2305,7 +2309,7 @@ mod tests {
 
     /// Only an upstream git resolves to nothing is unfetched: one it sees, even
     /// `[gone]`, and one tracking the repo itself have no server copy to ask.
-    /// Of two `merge` values, git's upstream is the first.
+    /// Of several values, git takes the last `remote` and the first `merge`.
     #[test]
     fn only_a_remote_upstream_git_cannot_see_is_unfetched() {
         use super::{UnfetchedUpstream, unfetched_upstreams};
@@ -2323,6 +2327,7 @@ mod tests {
             "branch.gone.merge\nrefs/heads/gone",
             "branch.local.remote\n.",
             "branch.local.merge\nrefs/heads/main",
+            "branch.release/1.2.remote\nold",
             "branch.release/1.2.remote\nupstream",
             "branch.release/1.2.merge\nrefs/heads/release/1.2",
             "branch.release/1.2.merge\nrefs/heads/other",

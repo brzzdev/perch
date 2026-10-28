@@ -34,13 +34,12 @@ static FOREGROUND_GROUP: AtomicI32 = AtomicI32::new(0);
 /// the process is exiting, and a command started now would outlive it.
 static ENDED: AtomicBool = AtomicBool::new(false);
 
-/// Held while that group is killed, while its leader is reaped, and while a
-/// command is started, so a kill can never name a group id the kernel has
-/// since handed to someone else, and a start can never slip past the end.
-static REAPING: Mutex<()> = Mutex::new(());
+/// Orders a command's start and reap against [`end_foreground`], so its kill
+/// never names a reused group id and no start slips in after it.
+static SIGNALLING: Mutex<()> = Mutex::new(());
 
-fn reaping() -> MutexGuard<'static, ()> {
-    REAPING.lock().unwrap_or_else(PoisonError::into_inner)
+fn signalling() -> MutexGuard<'static, ()> {
+    SIGNALLING.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Runs `command` to completion, as [`Command::output`] does, but leading a
@@ -53,7 +52,7 @@ pub(crate) fn output_detached(command: &mut Command) -> std::io::Result<Output> 
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = {
-        let _reaping = reaping();
+        let _signalling = signalling();
         if ENDED.load(Ordering::SeqCst) {
             return Err(std::io::ErrorKind::Interrupted.into());
         }
@@ -76,7 +75,7 @@ pub(crate) fn output_detached(command: &mut Command) -> std::io::Result<Output> 
         .and_then(|reader| reader.join().ok())
         .unwrap_or_default();
     wait_for_exit(&child);
-    let _reaping = reaping();
+    let _signalling = signalling();
     FOREGROUND_GROUP.store(0, Ordering::SeqCst);
     let status = child.wait()?;
     Ok(Output {
@@ -87,10 +86,10 @@ pub(crate) fn output_detached(command: &mut Command) -> std::io::Result<Output> 
 }
 
 /// Kills whatever [`output_detached`] is running, and refuses anything it
-/// would start afterwards, for a caller about to exit without unwinding. It
-/// only ever reads, so there is no lock to let it clear.
+/// would start afterwards, for a caller about to exit without unwinding. A
+/// read holds no lock, so SIGKILL leaves nothing behind.
 pub(crate) fn end_foreground() {
-    let _reaping = reaping();
+    let _signalling = signalling();
     ENDED.store(true, Ordering::SeqCst);
     let group = FOREGROUND_GROUP.swap(0, Ordering::SeqCst);
     if group != 0 {
@@ -153,7 +152,7 @@ mod tests {
 
         let next = output_detached(&mut Command::new("true"));
         assert_eq!(
-            next.map(|_| ()).unwrap_err().kind(),
+            next.unwrap_err().kind(),
             std::io::ErrorKind::Interrupted,
             "nothing starts once the process is ending"
         );

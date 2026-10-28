@@ -19,7 +19,7 @@ The ref fact that put a *Stale* branch on the cleanup prompt. *Tracks anchor, ah
 _Avoid_: Reason, cause, landed, merged (reserved for topology, which staleness deliberately does not read)
 
 **Unmerged**:
-Holding commits that `git branch -d` would refuse to discard. Git's rule is *"fully merged in its upstream branch, or in HEAD if no upstream was set"* — alternatives, not a pair: where an upstream exists it alone decides, so a branch merged into HEAD but ahead of its upstream is still unmerged. A branch can be both stale and unmerged: work merged into the anchor locally, before the anchor was pushed. Being *Equivalent* does not make a branch merged — git would still refuse it — it only means refusing costs nothing.
+Holding commits that `git branch -d` would refuse to discard. Git's rule is *"fully merged in its upstream branch, or in HEAD if no upstream was set"* — alternatives, not a pair: where an upstream exists it alone decides, so a branch merged into HEAD but ahead of its upstream is still unmerged. A branch can be both stale and unmerged: work merged into the anchor locally, before the anchor was pushed. Being *Equivalent* does not make a branch merged — git would still refuse it — it only means refusing costs nothing. An upstream that no fetch refspec maps to a local ref is invisible to git, which judges against HEAD instead; perch asks the server where that upstream stands, and a server copy that already holds the branch proves refusing costs nothing too. See [ADR 0013](./docs/adr/0013-an-unfetched-upstream-is-asked-of-the-server.md).
 _Avoid_: Unpushed, ahead, dirty
 
 **Equivalent**:
@@ -71,11 +71,11 @@ The rendering of a risk in a picker row: `●` for dirty, `◆` for initialized 
 _Avoid_: Flag, badge, indicator
 
 **Forcing**:
-Destroying something git would otherwise protect, or skipping Perch's upstream-deletion confirmation when `--upstream` also requests it. Only ever licensed by a warning the user has already seen, an explicit `--force`, or, for a local branch alone, proof that it is *Equivalent*.
+Destroying something git would otherwise protect, or skipping Perch's upstream-deletion confirmation when `--upstream` also requests it. Only ever licensed by a warning the user has already seen, an explicit `--force`, or, for a local branch alone, proof that it is *Equivalent* or held by its unfetched upstream.
 _Avoid_: Overriding, ignoring
 
 **License**:
-What permits forcing: the markers already shown to the user, the separate upstream choice, an explicit `--force`, or proof that a branch is *Equivalent*. A warning or proof covers what it named and nothing else; explicit `--force` covers the whole *Removal*. Git has one `--force` for a worktree's two guards, its dirtiness and its initialized submodules, so a worktree is forced only when every risk it holds at removal was warned of. Anything that became risky after its row was drawn meets git's own guard instead — as does a proof whose ground has shifted, since equivalence is established on a pair of commits and lapses when either the branch or the *Anchor* moves off it. See [ADR 0001](./docs/adr/0001-warned-means-forceable.md), [ADR 0005](./docs/adr/0005-proof-of-equivalence-is-a-license.md), and [ADR 0009](./docs/adr/0009-branch-removal-earns-a-subverb.md).
+What permits forcing: the markers already shown to the user, the separate upstream choice, an explicit `--force`, or proof that a branch is *Equivalent* or held by its unfetched upstream. A warning or proof covers what it named and nothing else; explicit `--force` covers the whole *Removal*. Git has one `--force` for a worktree's two guards, its dirtiness and its initialized submodules, so a worktree is forced only when every risk it holds at removal was warned of. Anything that became risky after its row was drawn meets git's own guard instead — as does a proof whose ground has shifted, since equivalence is established on a pair of commits and lapses when either the branch or the *Anchor* moves off it. See [ADR 0001](./docs/adr/0001-warned-means-forceable.md), [ADR 0005](./docs/adr/0005-proof-of-equivalence-is-a-license.md), and [ADR 0009](./docs/adr/0009-branch-removal-earns-a-subverb.md).
 _Avoid_: Permission, approval, consent
 
 **Removal**:

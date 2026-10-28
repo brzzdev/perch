@@ -996,6 +996,66 @@ pub enum Unmerged {
     Ahead(u32),
     /// No upstream (or a `[gone]` one), so there is nothing to count against.
     NoUpstream,
+    /// An upstream is configured, but no fetch refspec maps it to a local ref,
+    /// so git sees none and `-d` judges the branch against HEAD.
+    Unfetched,
+}
+
+/// A branch's `branch.<name>.remote` and `.merge`, read from config directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ConfiguredUpstream<'a> {
+    remote: &'a str,
+    /// The upstream as named on the remote: `refs/heads/feature`.
+    merge: &'a str,
+}
+
+/// Every `branch.<name>.remote` and `.merge` entry, NUL-separated. A repo with
+/// none makes `--get-regexp` exit 1, and it reads as empty.
+fn read_upstream_config() -> String {
+    run(&[
+        "config",
+        "-z",
+        "--get-regexp",
+        r"^branch\..*\.(remote|merge)$",
+    ])
+    .unwrap_or_default()
+}
+
+/// The branches whose configured upstream git cannot see, keyed by name. A
+/// remote of `.` is the repo itself, which has nothing on a server to ask.
+fn unfetched_upstreams<'a>(
+    refs: &HashMap<&str, BranchRef<'_>>,
+    config_output: &'a str,
+) -> HashMap<&'a str, ConfiguredUpstream<'a>> {
+    let mut remotes = HashMap::new();
+    let mut merges = HashMap::new();
+    for entry in config_output.split('\0') {
+        let Some((key, value)) = entry.split_once('\n') else {
+            continue;
+        };
+        let Some((branch, field)) = branch_config_key(key) else {
+            continue;
+        };
+        match field {
+            "merge" => merges.insert(branch, value),
+            "remote" => remotes.insert(branch, value),
+            _ => None,
+        };
+    }
+    remotes
+        .into_iter()
+        .filter(|(_, remote)| !remote.is_empty() && *remote != ".")
+        .filter(|(branch, _)| {
+            refs.get(branch)
+                .is_some_and(|r| r.upstream_branch.is_empty())
+        })
+        .filter_map(|(branch, remote)| {
+            let merge = merges
+                .get(branch)
+                .filter(|m| m.starts_with("refs/heads/"))?;
+            Some((branch, ConfiguredUpstream { remote, merge }))
+        })
+        .collect()
 }
 
 /// Branches that `git branch -d` would refuse. Callers use this both to mark
@@ -1010,10 +1070,30 @@ pub enum Unmerged {
 /// branch is merged into itself, so asking from inside the worktree being
 /// removed would report its own branch as merged and skip the warning it exists
 /// to give.
-pub fn unmerged_branches(dir: Option<&Path>) -> AppResult<HashMap<String, Unmerged>> {
+pub fn unmerged_branches(dir: Option<&Path>) -> AppResult<Refusals> {
     let merged_output = run_in(dir, &["branch", "--format=%(refname:short)", "--merged"])?;
     let refs_output = read_branch_refs()?;
-    Ok(unmerged_from(&merged_output, &branch_refs(&refs_output)))
+    let config_output = read_upstream_config();
+    let refs = branch_refs(&refs_output);
+    let unfetched = unfetched_upstreams(&refs, &config_output);
+    Ok(unmerged_from(&merged_output, &refs, &unfetched))
+}
+
+/// The branches `git branch -d` would refuse, with the upstream of each one
+/// refused as [`Unmerged::Unfetched`].
+#[derive(Debug, Default)]
+pub struct Refusals {
+    pub unfetched: HashMap<String, UnfetchedUpstream>,
+    pub unmerged: HashMap<String, Unmerged>,
+}
+
+/// An [`Unmerged::Unfetched`] branch's tip, and its upstream as config names it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UnfetchedUpstream {
+    /// The upstream as named on the remote: `refs/heads/feature`.
+    pub merge: String,
+    pub remote: String,
+    pub tip: String,
 }
 
 /// The rule half of [`unmerged_branches`], split out so it can be tested
@@ -1021,20 +1101,41 @@ pub fn unmerged_branches(dir: Option<&Path>) -> AppResult<HashMap<String, Unmerg
 fn unmerged_from(
     merged_output: &str,
     refs: &HashMap<&str, BranchRef<'_>>,
-) -> HashMap<String, Unmerged> {
+    unfetched: &HashMap<&str, ConfiguredUpstream<'_>>,
+) -> Refusals {
     let merged: HashSet<&str> = merged_output.lines().collect();
+    let mut refusals = Refusals::default();
 
-    refs.iter()
-        .filter_map(|(&name, r)| {
-            // A `[gone]` upstream reports no ahead count, so it must be treated
-            // as absent rather than as "zero ahead, therefore merged".
-            if r.upstream_branch.is_empty() || r.gone() {
-                return (!merged.contains(name)).then(|| (name.to_string(), Unmerged::NoUpstream));
+    for (&name, r) in refs {
+        // A `[gone]` upstream reports no ahead count, so it must be treated
+        // as absent rather than as "zero ahead, therefore merged".
+        let unmerged = if r.upstream_branch.is_empty() || r.gone() {
+            if merged.contains(name) {
+                continue;
             }
+            let Some(upstream) = unfetched.get(name) else {
+                refusals
+                    .unmerged
+                    .insert(name.to_string(), Unmerged::NoUpstream);
+                continue;
+            };
+            let upstream = UnfetchedUpstream {
+                merge: upstream.merge.to_string(),
+                remote: upstream.remote.to_string(),
+                tip: r.tip.to_string(),
+            };
+            refusals.unfetched.insert(name.to_string(), upstream);
+            Unmerged::Unfetched
+        } else {
             let (ahead, _) = parse_track(r.track);
-            (ahead > 0).then(|| (name.to_string(), Unmerged::Ahead(ahead)))
-        })
-        .collect()
+            if ahead == 0 {
+                continue;
+            }
+            Unmerged::Ahead(ahead)
+        };
+        refusals.unmerged.insert(name.to_string(), unmerged);
+    }
+    refusals
 }
 
 /// What was established when a branch was proven *Equivalent*: where the branch
@@ -1045,10 +1146,21 @@ fn unmerged_from(
 /// 0005](../docs/adr/0005-proof-of-equivalence-is-a-license.md).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Proof {
-    /// The ref the proof was made against, kept so it can be resolved again.
-    pub anchor_ref: String,
+    /// What the proof was made against, kept so it can be read again.
+    pub anchor: ProofAnchor,
     pub anchor_tip: String,
     pub tip: String,
+}
+
+/// Where a [`Proof`]'s anchor is read.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProofAnchor {
+    Local(String),
+    /// A branch as `remote`'s server holds it.
+    Server {
+        remote: String,
+        refname: String,
+    },
 }
 
 /// Branches whose whole diff against the anchor is already in the anchor — as
@@ -1102,13 +1214,88 @@ pub fn equivalent_branches(
                 .into_iter()
                 .find(|(anchor_tip, _)| equivalent_to(dir, anchor_tip, &tip))?;
             let proof = Proof {
-                anchor_ref: anchor_ref.clone(),
+                anchor: ProofAnchor::Local(anchor_ref.clone()),
                 anchor_tip: anchor_tip.clone(),
                 tip,
             };
             Some(((*name).to_string(), proof))
         })
         .collect()
+}
+
+/// Unfetched branches whose upstream, as the server holds it, already has
+/// their work: what `-d` would accept were the upstream fetched. Each remote is
+/// asked once, and one that cannot be reached proves nothing.
+///
+/// `dir` must be the worktree the delete will run from, as for
+/// [`equivalent_branches`].
+#[must_use]
+pub fn pushed_branches(
+    dir: Option<&Path>,
+    candidates: &[(&str, &UnfetchedUpstream)],
+) -> HashMap<String, Proof> {
+    let mut by_remote: HashMap<&str, Vec<(&str, &UnfetchedUpstream)>> = HashMap::new();
+    for &(name, upstream) in candidates {
+        by_remote
+            .entry(&upstream.remote)
+            .or_default()
+            .push((name, upstream));
+    }
+
+    let mut proven = HashMap::new();
+    for (remote, branches) in by_remote {
+        let refnames: Vec<&str> = branches.iter().map(|(_, u)| u.merge.as_str()).collect();
+        let Ok(server) = server_tips(dir, remote, &refnames) else {
+            continue;
+        };
+        for (name, upstream) in branches {
+            let Some(anchor_tip) = server.get(&upstream.merge) else {
+                continue;
+            };
+            if !equivalent_to(dir, anchor_tip, &upstream.tip) {
+                continue;
+            }
+            let proof = Proof {
+                anchor: ProofAnchor::Server {
+                    remote: remote.to_string(),
+                    refname: upstream.merge.clone(),
+                },
+                anchor_tip: anchor_tip.clone(),
+                tip: upstream.tip.clone(),
+            };
+            proven.insert(name.to_string(), proof);
+        }
+    }
+    proven
+}
+
+/// Where each of `refnames` stands on `remote`'s server. A ref the server lacks
+/// is absent from the map.
+fn server_tips(
+    dir: Option<&Path>,
+    remote: &str,
+    refnames: &[&str],
+) -> AppResult<HashMap<String, String>> {
+    let mut args = vec!["ls-remote", "--heads", "--", remote];
+    args.extend(refnames);
+    let output = run_in(dir, &args)?;
+    // ls-remote matches patterns by their tail, so `refs/heads/x` also finds
+    // `refs/heads/y/refs/heads/x`.
+    Ok(output
+        .lines()
+        .filter_map(|line| line.split_once('\t'))
+        .filter(|(_, found)| refnames.contains(found))
+        .map(|(oid, found)| (found.to_string(), oid.to_string()))
+        .collect())
+}
+
+pub(crate) fn anchor_tip(dir: Option<&Path>, anchor: &ProofAnchor) -> Option<String> {
+    match anchor {
+        ProofAnchor::Local(refname) => resolve(dir, refname),
+        ProofAnchor::Server { remote, refname } => {
+            server_tips(dir, remote, &[refname]).ok()?.remove(refname)
+        }
+    }
 }
 
 /// Whether everything `tip` adds over its merge-base with the anchor is already
@@ -1568,7 +1755,7 @@ fn clear_branch_config(dir: Option<&Path>, branch: &str) -> BranchDeleteOutcome 
     let keys = |listing: String| -> Vec<String> {
         listing
             .split('\0')
-            .filter(|key| config_branch(key) == Some(branch))
+            .filter(|key| branch_config_key(key).is_some_and(|(owner, _)| owner == branch))
             .map(String::from)
             .collect()
     };
@@ -1597,14 +1784,14 @@ fn local_config_keys(dir: Option<&Path>) -> AppResult<String> {
     run_in(dir, &["config", "--local", "--list", "--name-only", "-z"])
 }
 
-/// Which branch a `branch.<name>.<key>` config entry belongs to, or `None` for
+/// The branch and field of a `branch.<name>.<field>` config key, or `None` for
 /// any other key. Git splits a config name at its *first* and *last* dot, so the
 /// branch in the middle keeps whatever dots it has: `branch.release/1.2.remote`
 /// belongs to `release/1.2` and not to `release/1`, and matching on a prefix
 /// would have one branch's deletion clear the other's upstream.
-fn config_branch(key: &str) -> Option<&str> {
-    let (branch, _) = key.strip_prefix("branch.")?.rsplit_once('.')?;
-    (!branch.is_empty()).then_some(branch)
+fn branch_config_key(key: &str) -> Option<(&str, &str)> {
+    let (branch, field) = key.strip_prefix("branch.")?.rsplit_once('.')?;
+    (!branch.is_empty()).then_some((branch, field))
 }
 
 /// Delete a branch with `git branch -D`, discarding unmerged commits. Only for
@@ -1697,18 +1884,14 @@ pub fn delete_remote_branch(upstream: &RemoteBranch) -> AppResult<RemoteBranchDe
     }
 
     let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    let Ok(read) = run(&["ls-remote", "--heads", "--", &upstream.remote, &refname]) else {
+    let Ok(mut server) = server_tips(None, &upstream.remote, &[&refname]) else {
         return Ok(RemoteBranchDeleteOutcome::Failed(detail));
     };
-    let now = read
-        .lines()
-        .filter_map(|line| line.split_once('\t'))
-        .find_map(|(oid, found)| (found == refname).then_some(oid));
-    Ok(match now {
+    Ok(match server.remove(&refname) {
         None => RemoteBranchDeleteOutcome::AlreadyAbsent,
         Some(now) if now != upstream.tip => RemoteBranchDeleteOutcome::Moved {
             expected: upstream.tip.clone(),
-            now: now.to_string(),
+            now,
         },
         Some(_) => RemoteBranchDeleteOutcome::Failed(detail),
     })
@@ -1858,7 +2041,7 @@ mod tests {
             .map(|(name, upstream, track)| (*name, "tip", *upstream, *track))
             .collect();
         let refs_output = head_refs(&rows);
-        unmerged_from(merged, &branch_refs(&refs_output))
+        unmerged_from(merged, &branch_refs(&refs_output), &HashMap::new()).unmerged
     }
 
     /// Run the rule against an anchor named `main`, keeping only the names —
@@ -2103,20 +2286,83 @@ mod tests {
         assert_eq!(got.get("orphan"), Some(&Unmerged::NoUpstream));
     }
 
+    /// An upstream git cannot see is told apart from none at all, though `-d`
+    /// refuses both alike.
+    #[test]
+    fn an_unfetched_upstream_is_unmerged_as_unfetched() {
+        use super::{UnfetchedUpstream, unfetched_upstreams};
+        let refs_output = head_refs(&[("pushed", "tip", "", ""), ("scratch", "tip", "", "")]);
+        let refs = branch_refs(&refs_output);
+        let config = "branch.pushed.remote\norigin\0branch.pushed.merge\nrefs/heads/pushed\0";
+        let got = unmerged_from("main", &refs, &unfetched_upstreams(&refs, config));
+        assert_eq!(got.unmerged.get("pushed"), Some(&Unmerged::Unfetched));
+        assert_eq!(got.unmerged.get("scratch"), Some(&Unmerged::NoUpstream));
+        assert_eq!(
+            got.unfetched.get("pushed"),
+            Some(&UnfetchedUpstream {
+                merge: "refs/heads/pushed".to_string(),
+                remote: "origin".to_string(),
+                tip: "tip".to_string(),
+            })
+        );
+    }
+
+    /// Only an upstream git resolves to nothing is unfetched: one it sees, even
+    /// `[gone]`, and one tracking the repo itself have no server copy to ask.
+    #[test]
+    fn only_a_remote_upstream_git_cannot_see_is_unfetched() {
+        use super::{ConfiguredUpstream, unfetched_upstreams};
+        let refs_output = head_refs(&[
+            ("fetched", "tip", "refs/heads/fetched", ""),
+            ("gone", "tip", "refs/heads/gone", "gone"),
+            ("local", "tip", "", ""),
+            ("release/1.2", "tip", "", ""),
+        ]);
+        let refs = branch_refs(&refs_output);
+        let config = [
+            "branch.fetched.remote\norigin",
+            "branch.fetched.merge\nrefs/heads/fetched",
+            "branch.gone.remote\norigin",
+            "branch.gone.merge\nrefs/heads/gone",
+            "branch.local.remote\n.",
+            "branch.local.merge\nrefs/heads/main",
+            "branch.release/1.2.remote\nupstream",
+            "branch.release/1.2.merge\nrefs/heads/release/1.2",
+        ]
+        .join("\0");
+        let got = unfetched_upstreams(&refs, &config);
+        assert_eq!(
+            got,
+            HashMap::from([(
+                "release/1.2",
+                ConfiguredUpstream {
+                    merge: "refs/heads/release/1.2",
+                    remote: "upstream",
+                },
+            )])
+        );
+    }
+
     /// Git splits a config name at its first and last dot, so a branch whose
     /// name contains one owns the whole middle — and a branch whose name is a
     /// prefix of another's owns none of it.
     #[test]
     fn a_config_key_belongs_to_the_branch_between_the_outer_dots() {
-        use super::config_branch;
-        assert_eq!(config_branch("branch.feature.remote"), Some("feature"));
+        use super::branch_config_key;
         assert_eq!(
-            config_branch("branch.release/1.2.remote"),
-            Some("release/1.2")
+            branch_config_key("branch.feature.remote"),
+            Some(("feature", "remote"))
         );
-        assert_eq!(config_branch("branch.topic]x.merge"), Some("topic]x"));
-        assert_eq!(config_branch("remote.origin.url"), None);
-        assert_eq!(config_branch("branch.autosetupmerge"), None);
+        assert_eq!(
+            branch_config_key("branch.release/1.2.remote"),
+            Some(("release/1.2", "remote"))
+        );
+        assert_eq!(
+            branch_config_key("branch.topic]x.merge"),
+            Some(("topic]x", "merge"))
+        );
+        assert_eq!(branch_config_key("remote.origin.url"), None);
+        assert_eq!(branch_config_key("branch.autosetupmerge"), None);
     }
 
     #[test]

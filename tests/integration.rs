@@ -4073,6 +4073,68 @@ fn wt_rm_dot_sees_its_own_branch_as_unmerged() {
     assert!(path.exists(), "worktree must survive: {}", path.display());
 }
 
+/// Push `branch` with an upstream, then narrow the fetch refspec to `main`
+/// as a single-branch clone has it. The upstream stays configured, but git maps
+/// it to no local ref and so reports none.
+fn push_and_unfetch(dir: &Path, branch: &str) {
+    git(dir, &["push", "-u", "origin", branch]);
+    git(
+        dir,
+        &[
+            "config",
+            "--replace-all",
+            "remote.origin.fetch",
+            "+refs/heads/main:refs/remotes/origin/main",
+        ],
+    );
+    git(
+        dir,
+        &["update-ref", "-d", &format!("refs/remotes/origin/{branch}")],
+    );
+}
+
+/// `-d` falls back to HEAD for an upstream git cannot see, so it refuses a
+/// branch whose every commit is on the server. The server is asked instead.
+#[test]
+fn wt_rm_dot_deletes_a_branch_its_unfetched_upstream_holds() {
+    let (_bare, parent, work) = setup_with_parent();
+    let path = add_worktree(&work, &parent, "feature");
+    commit_in(&path, "new.txt", "pushed work");
+    push_and_unfetch(&path, "feature");
+
+    let output = perch_args(&path, &["wt", "rm", "."]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(!path.exists(), "worktree should be removed");
+    assert!(
+        !local_branch_exists(&work, "feature"),
+        "the server holds every commit, so the branch should go"
+    );
+}
+
+#[test]
+fn wt_rm_dot_refuses_commits_its_unfetched_upstream_lacks() {
+    let (_bare, parent, work) = setup_with_parent();
+    let path = add_worktree(&work, &parent, "feature");
+    commit_in(&path, "new.txt", "pushed work");
+    push_and_unfetch(&path, "feature");
+    commit_in(&path, "later.txt", "unpushed work");
+
+    let output = perch_args(&path, &["wt", "rm", "."]);
+
+    assert!(
+        !output.status.success(),
+        "unpushed work should be flagged; stderr: {}",
+        stderr_str(&output)
+    );
+    assert!(
+        stderr_str(&output).contains("its upstream is not fetched"),
+        "should say why the upstream could not answer; got: {}",
+        stderr_str(&output)
+    );
+    assert!(path.exists(), "worktree must survive: {}", path.display());
+}
+
 /// `--force` on `.` must finish the job: no worktree *and* no leftover branch.
 #[test]
 fn wt_rm_dot_force_leaves_no_branch_behind() {

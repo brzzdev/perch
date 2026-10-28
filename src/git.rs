@@ -109,26 +109,16 @@ pub enum UpstreamInspection {
 /// The same-named, explicitly configured upstream of `branch`. No fallback
 /// remote is guessed: a fetch default is not authority to delete a shared ref.
 pub fn same_named_upstream(branch: &str) -> AppResult<Option<UpstreamRef>> {
-    let local_ref = format!("refs/heads/{branch}");
-    let output = run(&[
-        "for-each-ref",
-        "--format=%(refname:short)%09%(upstream:remotename)%09%(upstream:remoteref)",
-        &local_ref,
-    ])?;
-
-    Ok(output.lines().find_map(|line| {
-        let mut parts = line.split('\t');
-        let name = parts.next()?;
-        let remote = parts.next()?;
-        let upstream_ref = parts.next()?;
-        // Same-named: the upstream's ref on the remote spells the local one.
-        let tracks_same_name =
-            name == branch && !remote.is_empty() && remote != "." && upstream_ref == local_ref;
-        tracks_same_name.then(|| UpstreamRef {
-            remote: remote.to_string(),
+    let config_output = read_upstream_config()?;
+    let Some(upstream) = configured_upstreams(&config_output).remove(branch) else {
+        return Ok(None);
+    };
+    Ok(
+        (upstream.merge.strip_prefix("refs/heads/") == Some(branch)).then(|| UpstreamRef {
+            remote: upstream.remote.to_string(),
             branch: branch.to_string(),
-        })
-    }))
+        }),
+    )
 }
 
 /// Reads an upstream from the server rather than trusting a possibly stale
@@ -736,6 +726,7 @@ pub struct StaleBranch {
 /// anchor stands the merged rule down, leaving only deleted upstreams.
 fn stale_from(
     refs: &HashMap<&str, BranchRef<'_>>,
+    unfetched: &HashSet<&str>,
     merged: &str,
     anchor: Option<&Anchor<'_>>,
 ) -> Vec<StaleBranch> {
@@ -750,6 +741,10 @@ fn stale_from(
 
     if let Some(anchor) = anchor {
         stale.extend(merged.lines().filter_map(|name| {
+            // Published under a name of its own, though git cannot see where.
+            if unfetched.contains(name) {
+                return None;
+            }
             let ground = refs
                 .get(name)
                 .filter(|branch| !branch.gone())?
@@ -803,7 +798,11 @@ pub fn stale_branches(remote: &str) -> AppResult<Vec<StaleBranch>> {
     let keep = kept_branches(remote);
 
     let refs_output = read_branch_refs()?;
+    let config_output = read_upstream_config().unwrap_or_default();
     let refs = branch_refs(&refs_output);
+    let unfetched: HashSet<&str> = unfetched_upstreams(&refs, &config_output)
+        .into_keys()
+        .collect();
 
     let resolved = merged_anchor(remote);
     let (merged, anchor_tip) = match &resolved {
@@ -823,7 +822,7 @@ pub fn stale_branches(remote: &str) -> AppResult<Vec<StaleBranch>> {
         tip: &anchor_tip,
     });
 
-    let mut branches = stale_from(&refs, &merged, anchor.as_ref());
+    let mut branches = stale_from(&refs, &unfetched, &merged, anchor.as_ref());
 
     branches.retain(|b| current.as_deref() != Some(&b.name) && !keep.contains(&b.name));
     branches.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1047,24 +1046,38 @@ pub enum Unmerged {
 }
 
 /// Every `branch.<name>.remote` and `.merge` entry, NUL-separated. A repo with
-/// none makes `--get-regexp` exit 1, and it reads as empty.
-fn read_upstream_config() -> String {
-    run(&[
-        "config",
-        "-z",
-        "--get-regexp",
-        r"^branch\..*\.(remote|merge)$",
-    ])
-    .unwrap_or_default()
+/// none makes `--get-regexp` exit 1 silently, and it reads as empty.
+///
+/// Reads the config in force, as `for-each-ref`, `ls-remote` and `push` do, so
+/// `GIT_CONFIG` is left out, as for [`config_entries`].
+fn read_upstream_config() -> AppResult<String> {
+    let output = git_cmd(None)
+        .args([
+            "config",
+            "-z",
+            "--get-regexp",
+            r"^branch\..*\.(remote|merge)$",
+        ])
+        .env_remove("GIT_CONFIG")
+        .output()?;
+    match output_text("config", output) {
+        Err(Error::Git { message, .. }) if message.is_empty() => Ok(String::new()),
+        result => result,
+    }
 }
 
-/// The branches whose configured upstream git cannot see, keyed by name. A
-/// remote of `.` is the repo itself, which has nothing on a server to ask. Of
-/// several values, git takes the last `remote` and the first `merge`.
-fn unfetched_upstreams<'a>(
-    refs: &HashMap<&str, BranchRef<'_>>,
-    config_output: &'a str,
-) -> HashMap<&'a str, UnfetchedUpstream> {
+/// A branch's upstream on a server, as config names it.
+struct ConfiguredUpstream<'a> {
+    /// As named on the remote: `refs/heads/feature`.
+    merge: &'a str,
+    remote: &'a str,
+}
+
+/// Each branch's configured upstream on a server, keyed by name, whether or
+/// not a fetch refspec maps it. A remote of `.` is the repo itself, which has
+/// nothing on a server to ask. Of several values, git takes the last `remote`
+/// and the first `merge`.
+fn configured_upstreams(config_output: &str) -> HashMap<&str, ConfiguredUpstream<'_>> {
     let mut remotes = HashMap::new();
     let mut merges = HashMap::new();
     for entry in config_output.split('\0') {
@@ -1088,16 +1101,29 @@ fn unfetched_upstreams<'a>(
         .into_iter()
         .filter(|(_, remote)| !remote.is_empty() && *remote != ".")
         .filter_map(|(branch, remote)| {
-            let r = refs.get(branch).filter(|r| r.upstream_branch.is_empty())?;
             let merge = merges
                 .get(branch)
                 .filter(|m| m.starts_with("refs/heads/"))?;
-            let upstream = UnfetchedUpstream {
+            Some((branch, ConfiguredUpstream { merge, remote }))
+        })
+        .collect()
+}
+
+/// The branches whose configured upstream git cannot see, keyed by name.
+fn unfetched_upstreams<'a>(
+    refs: &HashMap<&str, BranchRef<'_>>,
+    config_output: &'a str,
+) -> HashMap<&'a str, UnfetchedUpstream> {
+    configured_upstreams(config_output)
+        .into_iter()
+        .filter_map(|(branch, configured)| {
+            let r = refs.get(branch).filter(|r| r.upstream_branch.is_empty())?;
+            let unfetched = UnfetchedUpstream {
                 branch_tip: r.tip.to_string(),
-                merge: (*merge).to_string(),
-                remote: remote.to_string(),
+                merge: configured.merge.to_string(),
+                remote: configured.remote.to_string(),
             };
-            Some((branch, upstream))
+            Some((branch, unfetched))
         })
         .collect()
 }
@@ -1117,7 +1143,7 @@ fn unfetched_upstreams<'a>(
 pub fn unmerged_branches(dir: Option<&Path>) -> AppResult<Refusals> {
     let merged_output = run_in(dir, &["branch", "--format=%(refname:short)", "--merged"])?;
     let refs_output = read_branch_refs()?;
-    let config_output = read_upstream_config();
+    let config_output = read_upstream_config().unwrap_or_default();
     let refs = branch_refs(&refs_output);
     let unfetched = unfetched_upstreams(&refs, &config_output);
     Ok(unmerged_from(&merged_output, &refs, &unfetched))
@@ -2063,7 +2089,7 @@ mod tests {
         Anchor, Ground, StaleBranch, Unmerged, branch_refs, last_recursion_is_off, parse_track,
         stale_from, unmerged_from,
     };
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     /// Git reads both keys into one setting, so a later `submodule.recurse`
     /// overrides an earlier `fetch.recurseSubmodules`, and the reverse.
@@ -2137,7 +2163,7 @@ mod tests {
             branch: "main",
             tip: anchor_tip,
         };
-        let mut got = stale_from(&refs, merged, Some(&anchor));
+        let mut got = stale_from(&refs, &HashSet::new(), merged, Some(&anchor));
         got.sort_by(|a, b| a.name.cmp(&b.name));
         got
     }
@@ -2305,7 +2331,7 @@ mod tests {
     fn without_an_anchor_the_merged_list_is_ignored() {
         let refs_output = head_refs(&[("scratch", "bbb", "", "")]);
         let refs = branch_refs(&refs_output);
-        let got = stale_from(&refs, "scratch", None);
+        let got = stale_from(&refs, &HashSet::new(), "scratch", None);
         assert!(got.is_empty(), "no anchor, no merged rule, got: {got:?}");
     }
 

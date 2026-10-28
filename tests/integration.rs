@@ -702,6 +702,25 @@ fn merged_tracked_branch_waits_for_its_upstream_to_go() {
     );
 }
 
+#[test]
+fn unfetched_published_branch_waits_for_its_upstream_to_go() {
+    let (_bare, work) = setup();
+    git(work.path(), &["branch", "feature"]);
+    push_and_unfetch(work.path(), "feature");
+    git(
+        work.path(),
+        &["commit", "--allow-empty", "-m", "advance main"],
+    );
+
+    let _cwd = cwd_at(work.path());
+    let stale = stale_names("origin");
+
+    assert!(
+        !stale.contains(&"feature".to_string()),
+        "a configured upstream is published though no refspec maps it, got: {stale:?}"
+    );
+}
+
 /// The other half of the same ambiguity: a branch pushed before any work was
 /// done on it. Judging it by its tip would offer it the moment you switched
 /// away — and, being the branch just left, pre-tick it.
@@ -3414,6 +3433,85 @@ fn br_rm_upstream_deletes_an_explicit_same_named_upstream() {
         "the upstream deletion should be reported; got: {}",
         stderr_str(&output)
     );
+}
+
+#[test]
+fn br_rm_upstream_deletes_an_unfetched_same_named_upstream() {
+    let (_bare, work) = setup();
+    git(work.path(), &["branch", "feature"]);
+    push_and_unfetch(work.path(), "feature");
+
+    let output = drive_enter_confirmation(
+        work.path(),
+        &["br", "rm", "feature", "--upstream"],
+        "Delete upstream origin/feature too?",
+    );
+
+    assert!(!local_branch_exists(work.path(), "feature"));
+    assert_eq!(remote_branch_tip(work.path(), "origin", "feature"), None);
+    assert!(
+        output.contains("deleted upstream origin/feature"),
+        "output: {output}"
+    );
+}
+
+#[test]
+fn br_rm_upstream_refuses_commits_its_unfetched_upstream_lacks() {
+    let (_bare, work) = setup();
+    git(work.path(), &["branch", "feature"]);
+    push_and_unfetch(work.path(), "feature");
+    git(work.path(), &["switch", "feature"]);
+    git(
+        work.path(),
+        &["commit", "--allow-empty", "-m", "unpushed work"],
+    );
+    git(work.path(), &["switch", "main"]);
+
+    let output = perch_args(work.path(), &["br", "rm", "--upstream", "feature"]);
+
+    assert!(!output.status.success());
+    assert!(
+        stderr_str(&output).contains("its upstream is not fetched"),
+        "stderr: {}",
+        stderr_str(&output)
+    );
+    assert!(local_branch_exists(work.path(), "feature"));
+    assert!(remote_branch_tip(work.path(), "origin", "feature").is_some());
+}
+
+/// `GIT_CONFIG` names a file only `git config` reads; the config in force
+/// decides the upstream.
+#[test]
+fn br_rm_upstream_ignores_an_upstream_only_git_config_names() {
+    let (_bare, work) = setup();
+    git(work.path(), &["branch", "feature"]);
+    git(work.path(), &["push", "origin", "feature"]);
+    git(
+        work.path(),
+        &["branch", "--set-upstream-to=origin/main", "feature"],
+    );
+    let config = work.path().join("other.cfg");
+    fs::write(
+        &config,
+        "[branch \"feature\"]\n\tremote = origin\n\tmerge = refs/heads/feature\n",
+    )
+    .unwrap();
+
+    let output = perch_command(
+        work.path(),
+        &["br", "rm", "feature", "--upstream", "--force"],
+    )
+    .env("GIT_CONFIG", &config)
+    .env("PERCH_NO_HOOKS", "1")
+    .output()
+    .expect("failed to run perch");
+
+    assert!(
+        stderr_str(&output).contains("no explicit same-named upstream"),
+        "stderr: {}",
+        stderr_str(&output)
+    );
+    assert!(remote_branch_tip(work.path(), "origin", "feature").is_some());
 }
 
 #[test]

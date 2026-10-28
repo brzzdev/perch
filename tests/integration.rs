@@ -4145,6 +4145,36 @@ fn wt_rm_dot_asks_the_server_its_own_worktree_pushed_to() {
     );
 }
 
+/// Git rewrites a URL by `insteadOf` once, never chaining one rule into the next.
+#[test]
+fn wt_rm_dot_rewrites_the_upstream_url_once_as_the_push_did() {
+    let (bare, parent, work) = setup_with_parent();
+    let elsewhere = TempDir::new().unwrap();
+    git(elsewhere.path(), &["init", "--bare"]);
+    let bare_url = bare.path().to_str().unwrap();
+    git(&work, &["config", "remote.origin.url", "alias:"]);
+    git(
+        &work,
+        &["config", &format!("url.{bare_url}.insteadOf"), "alias:"],
+    );
+    git(
+        &work,
+        &[
+            "config",
+            &format!("url.{}.insteadOf", elsewhere.path().to_str().unwrap()),
+            bare_url,
+        ],
+    );
+    let path = add_worktree(&work, &parent, "feature");
+    commit_in(&path, "new.txt", "pushed work");
+    push_and_unfetch(&path, "feature");
+
+    let output = perch_args(&path, &["wt", "rm", "."]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(!local_branch_exists(&work, "feature"));
+}
+
 /// `push -u <url>` records the URL itself as the remote, which no refspec maps.
 #[test]
 fn wt_rm_dot_deletes_a_branch_pushed_to_a_url() {

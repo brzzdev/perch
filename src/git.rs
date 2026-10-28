@@ -1332,11 +1332,18 @@ fn server_tips(
 
 /// The URL `branch.<name>.remote` names, read in the same directory as that
 /// config, where per-worktree config can point one remote name elsewhere. It
-/// may be a URL already, which `--get-url` passes through.
+/// is the URL as configured, before `insteadOf`: `ls-remote` rewrites it once,
+/// as the push did, where a rewritten one would be rewritten again. A remote
+/// that is no configured name is a URL already. Git fetches from the first of
+/// several.
 fn upstream_url(remote: &str) -> Option<String> {
-    run(&["ls-remote", "--get-url", remote])
-        .ok()
-        .map(|url| url.trim().to_string())
+    let key = format!("remote.{remote}.url");
+    let configured = run(&["config", "--get-all", &key]).ok();
+    let url = match configured.as_deref().and_then(|urls| urls.lines().next()) {
+        Some(url) => url,
+        None => remote,
+    };
+    Some(url.to_string()).filter(|url| !url.is_empty())
 }
 
 pub(crate) fn proof_ref_tip(dir: Option<&Path>, against: &ProofRef) -> Option<String> {

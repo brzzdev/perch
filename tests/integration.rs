@@ -3479,6 +3479,41 @@ fn br_rm_upstream_refuses_commits_its_unfetched_upstream_lacks() {
     assert!(remote_branch_tip(work.path(), "origin", "feature").is_some());
 }
 
+/// `GIT_CONFIG` names a file `git config` reads alone, which `ls-remote` and
+/// `push` ignore, so it must not choose what they delete.
+#[test]
+fn br_rm_upstream_ignores_an_upstream_only_git_config_names() {
+    let (_bare, work) = setup();
+    git(work.path(), &["branch", "feature"]);
+    git(work.path(), &["push", "origin", "feature"]);
+    git(
+        work.path(),
+        &["branch", "--set-upstream-to=origin/main", "feature"],
+    );
+    let config = work.path().join("other.cfg");
+    fs::write(
+        &config,
+        "[branch \"feature\"]\n\tremote = origin\n\tmerge = refs/heads/feature\n",
+    )
+    .unwrap();
+
+    let output = perch_command(
+        work.path(),
+        &["br", "rm", "feature", "--upstream", "--force"],
+    )
+    .env("GIT_CONFIG", &config)
+    .env("PERCH_NO_HOOKS", "1")
+    .output()
+    .expect("failed to run perch");
+
+    assert!(
+        stderr_str(&output).contains("no explicit same-named upstream"),
+        "stderr: {}",
+        stderr_str(&output)
+    );
+    assert!(remote_branch_tip(work.path(), "origin", "feature").is_some());
+}
+
 #[test]
 fn br_rm_upstream_uses_the_configured_non_origin_remote() {
     let (_bare, work) = setup_with_remote("upstream");

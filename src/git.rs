@@ -1047,13 +1047,20 @@ pub enum Unmerged {
 
 /// Every `branch.<name>.remote` and `.merge` entry, NUL-separated. A repo with
 /// none makes `--get-regexp` exit 1 silently, and it reads as empty.
+///
+/// `GIT_CONFIG` is left out, as for [`config_entries`]: `ls-remote` and `push`
+/// ignore it, so it must not name the upstream they act on.
 fn read_upstream_config() -> AppResult<String> {
-    match run(&[
-        "config",
-        "-z",
-        "--get-regexp",
-        r"^branch\..*\.(remote|merge)$",
-    ]) {
+    let output = git_cmd(None)
+        .args([
+            "config",
+            "-z",
+            "--get-regexp",
+            r"^branch\..*\.(remote|merge)$",
+        ])
+        .env_remove("GIT_CONFIG")
+        .output()?;
+    match output_text("config", output) {
         Err(Error::Git { message, .. }) if message.is_empty() => Ok(String::new()),
         result => result,
     }

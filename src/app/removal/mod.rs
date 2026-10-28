@@ -1040,8 +1040,7 @@ fn stale_ground_label(ground: git::Ground) -> &'static str {
     }
 }
 
-/// Whether an unfetched upstream is asked of its server. Only a named target
-/// asks: a picker or the sweep would wait on the network before drawing.
+/// Whether an unfetched upstream is asked of its server.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ServerProof {
     Ask,
@@ -1089,7 +1088,7 @@ impl BranchJudgement {
                 .filter(|name| !proven.contains_key(*name))
                 .filter_map(|name| Some((name, unfetched.get(name)?)))
                 .collect();
-            proven.extend(git::pushed_branches(main, &unproven));
+            proven.extend(git::server_proven_branches(main, &unproven));
         }
         Self { proven, unmerged }
     }
@@ -1530,10 +1529,9 @@ impl Report<'_> {
 /// exactly as the key source drives the interactive pickers; [`GitSteps`] is the
 /// real implementation.
 trait Steps {
-    /// What a proof's anchor holds *now* — asked to check the proof still covers
-    /// what it was established on, so it must read the repo or server rather
-    /// than anything remembered.
-    fn anchor_tip(&mut self, anchor: &git::ProofAnchor) -> Option<String>;
+    /// What a proof was made against holds *now*, read from the repo or server
+    /// rather than remembered.
+    fn proof_ref_tip(&mut self, against: &git::ProofRef) -> Option<String>;
 
     fn delete_branch(
         &mut self,
@@ -1597,8 +1595,8 @@ impl GitSteps {
 }
 
 impl Steps for GitSteps {
-    fn anchor_tip(&mut self, anchor: &git::ProofAnchor) -> Option<String> {
-        git::anchor_tip(self.main.as_deref(), anchor)
+    fn proof_ref_tip(&mut self, against: &git::ProofRef) -> Option<String> {
+        git::proof_ref_tip(self.main.as_deref(), against)
     }
 
     fn delete_branch(
@@ -1711,7 +1709,7 @@ fn remove<'a>(
         let outcome = match &license.branch {
             BranchLicense::Outright => steps.delete_branch(branch, Forcing::Forced),
             BranchLicense::Proven(proof)
-                if steps.anchor_tip(&proof.anchor).as_ref() == Some(&proof.anchor_tip) =>
+                if steps.proof_ref_tip(&proof.against).as_ref() == Some(&proof.against_tip) =>
             {
                 match steps.delete_branch_at(branch, &proof.tip)? {
                     Some(outcome) => Ok(outcome),
@@ -2426,8 +2424,8 @@ mod tests {
     #[test]
     fn equivalent_stale_branch_keeps_its_proof_without_an_unmerged_risk() {
         let proof = git::Proof {
-            anchor: git::ProofAnchor::Local("refs/heads/main".to_string()),
-            anchor_tip: "def".to_string(),
+            against: git::ProofRef::Local("refs/heads/main".to_string()),
+            against_tip: "def".to_string(),
             tip: "abc".to_string(),
         };
         let assessment = build_stale_assessment(
@@ -2543,16 +2541,15 @@ mod tests {
 
     fn proof() -> git::Proof {
         git::Proof {
-            anchor: git::ProofAnchor::Local(ANCHOR_REF.to_string()),
-            anchor_tip: PROVEN_ANCHOR.to_string(),
+            against: git::ProofRef::Local(ANCHOR_REF.to_string()),
+            against_tip: PROVEN_ANCHOR.to_string(),
             tip: PROVEN_TIP.to_string(),
         }
     }
 
     impl Steps for FakeSteps {
-        fn anchor_tip(&mut self, anchor: &git::ProofAnchor) -> Option<String> {
-            let (git::ProofAnchor::Local(refname) | git::ProofAnchor::Server { refname, .. }) =
-                anchor;
+        fn proof_ref_tip(&mut self, against: &git::ProofRef) -> Option<String> {
+            let (git::ProofRef::Local(refname) | git::ProofRef::Server { refname, .. }) = against;
             self.refs.get(refname).cloned()
         }
 

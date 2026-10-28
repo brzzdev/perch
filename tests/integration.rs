@@ -4135,6 +4135,33 @@ fn wt_rm_dot_refuses_commits_its_unfetched_upstream_lacks() {
     assert!(path.exists(), "worktree must survive: {}", path.display());
 }
 
+#[test]
+fn wt_rm_dot_keeps_the_warning_when_the_remote_is_unreachable() {
+    let (bare, parent, work) = setup_with_parent();
+    let path = add_worktree(&work, &parent, "feature");
+    commit_in(&path, "new.txt", "pushed work");
+    push_and_unfetch(&path, "feature");
+    let missing = bare.path().join("missing");
+    git(
+        &work,
+        &["remote", "set-url", "origin", missing.to_str().unwrap()],
+    );
+
+    let output = perch_args(&path, &["wt", "rm", "."]);
+
+    assert!(
+        !output.status.success(),
+        "an unanswered server proves nothing; stderr: {}",
+        stderr_str(&output)
+    );
+    assert!(
+        stderr_str(&output).contains("its upstream is not fetched"),
+        "got: {}",
+        stderr_str(&output)
+    );
+    assert!(path.exists(), "worktree must survive: {}", path.display());
+}
+
 /// `--force` on `.` must finish the job: no worktree *and* no leftover branch.
 #[test]
 fn wt_rm_dot_force_leaves_no_branch_behind() {

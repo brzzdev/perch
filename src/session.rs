@@ -68,9 +68,10 @@ pub(crate) fn output_detached(command: &mut Command) -> std::io::Result<Output> 
         })
     });
     let mut stdout = Vec::new();
-    if let Some(mut pipe) = child.stdout.take() {
-        pipe.read_to_end(&mut stdout)?;
-    }
+    let read = child
+        .stdout
+        .take()
+        .map_or(Ok(0), |mut pipe| pipe.read_to_end(&mut stdout));
     let stderr = stderr
         .and_then(|reader| reader.join().ok())
         .unwrap_or_default();
@@ -78,6 +79,8 @@ pub(crate) fn output_detached(command: &mut Command) -> std::io::Result<Output> 
     let _signalling = signalling();
     FOREGROUND_GROUP.store(0, Ordering::SeqCst);
     let status = child.wait()?;
+    // A failed read waits for the reap, so the group never outlives the child.
+    read?;
     Ok(Output {
         status,
         stdout,

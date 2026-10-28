@@ -4175,6 +4175,78 @@ fn wt_rm_dot_rewrites_the_upstream_url_once_as_the_push_did() {
     assert!(!local_branch_exists(&work, "feature"));
 }
 
+/// A relative URL names a different server from each worktree. Main's holds the
+/// tip the branch's own server lacks, so a proof asked there would pass.
+#[test]
+fn wt_rm_dot_keeps_the_warning_when_the_upstream_url_rewrites_to_a_relative_path() {
+    let (_bare, parent, work) = setup_with_parent();
+    let path = add_worktree(&work, &parent, "feature");
+    let own_server = path.parent().unwrap().join("server.git");
+    let main_server = parent.path().join("server.git");
+    for server in [&own_server, &main_server] {
+        git(&work, &["init", "--bare", server.to_str().unwrap()]);
+    }
+    git(&work, &["config", "remote.origin.url", "alias:"]);
+    git(&work, &["config", "url.../server.git.insteadOf", "alias:"]);
+    commit_in(&path, "new.txt", "pushed work");
+    push_and_unfetch(&path, "feature");
+    commit_in(&path, "later.txt", "work only main's server holds");
+    git(&path, &["push", main_server.to_str().unwrap(), "feature"]);
+
+    let output = perch_args(&path, &["wt", "rm", "."]);
+
+    assert!(
+        !output.status.success(),
+        "a URL that resolves per directory proves nothing; stderr: {}",
+        stderr_str(&output)
+    );
+    assert!(
+        stderr_str(&output).contains("its upstream is not fetched"),
+        "got: {}",
+        stderr_str(&output)
+    );
+    assert!(path.exists(), "worktree must survive: {}", path.display());
+}
+
+/// The worktree's own `insteadOf` sends its pushes elsewhere. Main's server holds
+/// the tip the branch's own server lacks, so a proof asked there would pass.
+#[test]
+fn wt_rm_dot_keeps_the_warning_when_a_worktree_rewrites_the_upstream_url() {
+    let (bare, parent, work) = setup_with_parent();
+    let elsewhere = TempDir::new().unwrap();
+    git(elsewhere.path(), &["init", "--bare"]);
+    let path = add_worktree(&work, &parent, "feature");
+    git(&work, &["config", "core.repositoryFormatVersion", "1"]);
+    git(&work, &["config", "extensions.worktreeConfig", "true"]);
+    git(
+        &path,
+        &[
+            "config",
+            "--worktree",
+            &format!("url.{}.insteadOf", elsewhere.path().to_str().unwrap()),
+            bare.path().to_str().unwrap(),
+        ],
+    );
+    commit_in(&path, "new.txt", "pushed work");
+    push_and_unfetch(&path, "feature");
+    commit_in(&path, "later.txt", "work only main's server holds");
+    git(&work, &["push", bare.path().to_str().unwrap(), "feature"]);
+
+    let output = perch_args(&path, &["wt", "rm", "."]);
+
+    assert!(
+        !output.status.success(),
+        "main's server is not the branch's upstream; stderr: {}",
+        stderr_str(&output)
+    );
+    assert!(
+        stderr_str(&output).contains("its upstream is not fetched"),
+        "got: {}",
+        stderr_str(&output)
+    );
+    assert!(path.exists(), "worktree must survive: {}", path.display());
+}
+
 /// `push -u <url>` records the URL itself as the remote, which no refspec maps.
 #[test]
 fn wt_rm_dot_deletes_a_branch_pushed_to_a_url() {

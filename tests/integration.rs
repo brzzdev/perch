@@ -3479,8 +3479,8 @@ fn br_rm_upstream_refuses_commits_its_unfetched_upstream_lacks() {
     assert!(remote_branch_tip(work.path(), "origin", "feature").is_some());
 }
 
-/// `GIT_CONFIG` names a file `git config` reads alone, which `ls-remote` and
-/// `push` ignore, so it must not choose what they delete.
+/// `GIT_CONFIG` names a file only `git config` reads; the config in force
+/// decides the upstream.
 #[test]
 fn br_rm_upstream_ignores_an_upstream_only_git_config_names() {
     let (_bare, work) = setup();

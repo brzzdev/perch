@@ -3,7 +3,7 @@
 use std::io::Read;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Output, Stdio};
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 /// Makes the child lead a new session. That takes it out of the invoking
@@ -30,8 +30,13 @@ pub(crate) fn detach(command: &mut Command) {
 /// The process group of the command [`output_detached`] is running, or `0`.
 static FOREGROUND_GROUP: AtomicI32 = AtomicI32::new(0);
 
-/// Held while that group is killed, and while its leader is reaped, so a kill
-/// can never name a group id the kernel has since handed to someone else.
+/// Whether [`end_foreground`] has run, after which nothing more is started:
+/// the process is exiting, and a command started now would outlive it.
+static ENDED: AtomicBool = AtomicBool::new(false);
+
+/// Held while that group is killed, while its leader is reaped, and while a
+/// command is started, so a kill can never name a group id the kernel has
+/// since handed to someone else, and a start can never slip past the end.
 static REAPING: Mutex<()> = Mutex::new(());
 
 fn reaping() -> MutexGuard<'static, ()> {
@@ -49,6 +54,9 @@ pub(crate) fn output_detached(command: &mut Command) -> std::io::Result<Output> 
         .stderr(Stdio::piped());
     let mut child = {
         let _reaping = reaping();
+        if ENDED.load(Ordering::SeqCst) {
+            return Err(std::io::ErrorKind::Interrupted.into());
+        }
         let child = command.spawn()?;
         FOREGROUND_GROUP.store(i32::try_from(child.id()).unwrap_or(0), Ordering::SeqCst);
         child
@@ -78,10 +86,12 @@ pub(crate) fn output_detached(command: &mut Command) -> std::io::Result<Output> 
     })
 }
 
-/// Kills whatever [`output_detached`] is running, for a caller about to exit
-/// without unwinding. It only ever reads, so there is no lock to let it clear.
+/// Kills whatever [`output_detached`] is running, and refuses anything it
+/// would start afterwards, for a caller about to exit without unwinding. It
+/// only ever reads, so there is no lock to let it clear.
 pub(crate) fn end_foreground() {
     let _reaping = reaping();
+    ENDED.store(true, Ordering::SeqCst);
     let group = FOREGROUND_GROUP.swap(0, Ordering::SeqCst);
     if group != 0 {
         // SAFETY: plain signal delivery to a process group this process created.
@@ -123,8 +133,10 @@ mod tests {
 
     use super::*;
 
+    /// One test, because ending is for good: a second test running after it
+    /// could start nothing.
     #[test]
-    fn end_foreground_kills_a_detached_command_that_is_still_running() {
+    fn end_foreground_kills_the_running_command_and_refuses_the_next() {
         let ender = std::thread::spawn(|| {
             while FOREGROUND_GROUP.load(Ordering::SeqCst) == 0 {
                 std::thread::sleep(Duration::from_millis(10));
@@ -138,5 +150,12 @@ mod tests {
         ender.join().unwrap();
         assert!(!output.status.success(), "the kill should end it");
         assert!(started.elapsed() < Duration::from_secs(10));
+
+        let next = output_detached(&mut Command::new("true"));
+        assert_eq!(
+            next.map(|_| ()).unwrap_err().kind(),
+            std::io::ErrorKind::Interrupted,
+            "nothing starts once the process is ending"
+        );
     }
 }

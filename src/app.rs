@@ -117,11 +117,14 @@ pub(crate) fn run_invocation(invocation: Invocation) -> AppResult<()> {
     }
 }
 
-/// End any background work this process started, for a caller about to exit
-/// without unwinding — the Ctrl-C handler, which `process::exit`s and so runs
-/// no destructor. A no-op where nothing is running.
+/// End any work this process started in a session of its own, which a
+/// terminal's Ctrl-C does not reach, for a caller about to exit without
+/// unwinding — the Ctrl-C handler, which `process::exit`s and so runs no
+/// destructor. A no-op where nothing is running.
 pub fn terminate_background_work() {
     prefetch::terminate_active();
+    #[cfg(unix)]
+    crate::session::end_foreground();
 }
 
 /// Run the private detached reclamation mode when requested by a child process.

@@ -106,18 +106,19 @@ pub enum UpstreamInspection {
     Removable(RemoteBranch),
 }
 
-/// The same-named, explicitly configured upstream of `branch`, whether or not
-/// a fetch refspec maps it. No fallback remote is guessed: a fetch default is
-/// not authority to delete a shared ref.
-#[must_use]
-pub fn same_named_upstream(branch: &str) -> Option<UpstreamRef> {
-    let config_output = read_upstream_config();
-    let upstream = configured_upstreams(&config_output).remove(branch)?;
-    // Same-named: the upstream's ref on the remote spells the local one.
-    (upstream.merge.strip_prefix("refs/heads/") == Some(branch)).then(|| UpstreamRef {
-        remote: upstream.remote.to_string(),
-        branch: branch.to_string(),
-    })
+/// The same-named, explicitly configured upstream of `branch`. No fallback
+/// remote is guessed: a fetch default is not authority to delete a shared ref.
+pub fn same_named_upstream(branch: &str) -> AppResult<Option<UpstreamRef>> {
+    let config_output = read_upstream_config()?;
+    let Some(upstream) = configured_upstreams(&config_output).remove(branch) else {
+        return Ok(None);
+    };
+    Ok(
+        (upstream.merge.strip_prefix("refs/heads/") == Some(branch)).then(|| UpstreamRef {
+            remote: upstream.remote.to_string(),
+            branch: branch.to_string(),
+        }),
+    )
 }
 
 /// Reads an upstream from the server rather than trusting a possibly stale
@@ -777,7 +778,7 @@ fn stale_from(
 /// ground, as long as the anchor it was cut from was level with what it tracks.
 ///
 /// Where a branch is published under a name of its own, neither anchor ground
-/// applies, whether or not a fetch refspec maps its upstream.
+/// applies.
 /// Whether the anchor holds its work is a question about two remote branches,
 /// and no local ref answers it. Such a branch waits for its upstream to be
 /// deleted, as a rebased or squashed one does — neither is an ancestor of the
@@ -797,7 +798,7 @@ pub fn stale_branches(remote: &str) -> AppResult<Vec<StaleBranch>> {
     let keep = kept_branches(remote);
 
     let refs_output = read_branch_refs()?;
-    let config_output = read_upstream_config();
+    let config_output = read_upstream_config().unwrap_or_default();
     let refs = branch_refs(&refs_output);
     let unfetched: HashSet<&str> = unfetched_upstreams(&refs, &config_output)
         .into_keys()
@@ -1045,15 +1046,17 @@ pub enum Unmerged {
 }
 
 /// Every `branch.<name>.remote` and `.merge` entry, NUL-separated. A repo with
-/// none makes `--get-regexp` exit 1, and it reads as empty.
-fn read_upstream_config() -> String {
-    run(&[
+/// none makes `--get-regexp` exit 1 silently, and it reads as empty.
+fn read_upstream_config() -> AppResult<String> {
+    match run(&[
         "config",
         "-z",
         "--get-regexp",
         r"^branch\..*\.(remote|merge)$",
-    ])
-    .unwrap_or_default()
+    ]) {
+        Err(Error::Git { message, .. }) if message.is_empty() => Ok(String::new()),
+        result => result,
+    }
 }
 
 /// A branch's upstream on a server, as config names it.
@@ -1106,14 +1109,14 @@ fn unfetched_upstreams<'a>(
 ) -> HashMap<&'a str, UnfetchedUpstream> {
     configured_upstreams(config_output)
         .into_iter()
-        .filter_map(|(branch, upstream)| {
+        .filter_map(|(branch, configured)| {
             let r = refs.get(branch).filter(|r| r.upstream_branch.is_empty())?;
-            let upstream = UnfetchedUpstream {
+            let unfetched = UnfetchedUpstream {
                 branch_tip: r.tip.to_string(),
-                merge: upstream.merge.to_string(),
-                remote: upstream.remote.to_string(),
+                merge: configured.merge.to_string(),
+                remote: configured.remote.to_string(),
             };
-            Some((branch, upstream))
+            Some((branch, unfetched))
         })
         .collect()
 }
@@ -1133,7 +1136,7 @@ fn unfetched_upstreams<'a>(
 pub fn unmerged_branches(dir: Option<&Path>) -> AppResult<Refusals> {
     let merged_output = run_in(dir, &["branch", "--format=%(refname:short)", "--merged"])?;
     let refs_output = read_branch_refs()?;
-    let config_output = read_upstream_config();
+    let config_output = read_upstream_config().unwrap_or_default();
     let refs = branch_refs(&refs_output);
     let unfetched = unfetched_upstreams(&refs, &config_output);
     Ok(unmerged_from(&merged_output, &refs, &unfetched))

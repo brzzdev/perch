@@ -3441,14 +3441,42 @@ fn br_rm_upstream_deletes_an_unfetched_same_named_upstream() {
     git(work.path(), &["branch", "feature"]);
     push_and_unfetch(work.path(), "feature");
 
-    let output = perch_args(
+    let output = drive_enter_confirmation(
         work.path(),
-        &["br", "rm", "--upstream", "feature", "--force"],
+        &["br", "rm", "feature", "--upstream"],
+        "Delete upstream origin/feature too?",
     );
 
-    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
     assert!(!local_branch_exists(work.path(), "feature"));
     assert_eq!(remote_branch_tip(work.path(), "origin", "feature"), None);
+    assert!(
+        output.contains("deleted upstream origin/feature"),
+        "output: {output}"
+    );
+}
+
+#[test]
+fn br_rm_upstream_refuses_commits_its_unfetched_upstream_lacks() {
+    let (_bare, work) = setup();
+    git(work.path(), &["branch", "feature"]);
+    push_and_unfetch(work.path(), "feature");
+    git(work.path(), &["switch", "feature"]);
+    git(
+        work.path(),
+        &["commit", "--allow-empty", "-m", "unpushed work"],
+    );
+    git(work.path(), &["switch", "main"]);
+
+    let output = perch_args(work.path(), &["br", "rm", "--upstream", "feature"]);
+
+    assert!(!output.status.success());
+    assert!(
+        stderr_str(&output).contains("its upstream is not fetched"),
+        "stderr: {}",
+        stderr_str(&output)
+    );
+    assert!(local_branch_exists(work.path(), "feature"));
+    assert!(remote_branch_tip(work.path(), "origin", "feature").is_some());
 }
 
 #[test]

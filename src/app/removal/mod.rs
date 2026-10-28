@@ -584,7 +584,18 @@ fn prepare_upstream(
 ) -> AppResult<UpstreamPreparation> {
     let requested = interest == UpstreamInterest::Requested;
     let named = source == ChoiceSource::Named;
-    let Some(upstream) = git::same_named_upstream(branch) else {
+    let upstream = match git::same_named_upstream(branch) {
+        Ok(upstream) => upstream,
+        Err(error) if requested && named => return Err(error),
+        Err(error) if requested => return Ok(UpstreamPreparation::Failure(error.to_string())),
+        Err(error) => {
+            return Ok(UpstreamPreparation::Notice(format!(
+                "{} could not read the upstream of {branch}: {error}; offering local removal only",
+                warn(),
+            )));
+        }
+    };
+    let Some(upstream) = upstream else {
         if requested && named {
             return Err(Error::NoRemovableUpstream {
                 branch: branch.to_string(),

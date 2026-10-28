@@ -702,6 +702,25 @@ fn merged_tracked_branch_waits_for_its_upstream_to_go() {
     );
 }
 
+#[test]
+fn unfetched_published_branch_waits_for_its_upstream_to_go() {
+    let (_bare, work) = setup();
+    git(work.path(), &["branch", "feature"]);
+    push_and_unfetch(work.path(), "feature");
+    git(
+        work.path(),
+        &["commit", "--allow-empty", "-m", "advance main"],
+    );
+
+    let _cwd = cwd_at(work.path());
+    let stale = stale_names("origin");
+
+    assert!(
+        !stale.contains(&"feature".to_string()),
+        "a configured upstream is published though no refspec maps it, got: {stale:?}"
+    );
+}
+
 /// The other half of the same ambiguity: a branch pushed before any work was
 /// done on it. Judging it by its tip would offer it the moment you switched
 /// away — and, being the branch just left, pre-tick it.
@@ -3414,6 +3433,22 @@ fn br_rm_upstream_deletes_an_explicit_same_named_upstream() {
         "the upstream deletion should be reported; got: {}",
         stderr_str(&output)
     );
+}
+
+#[test]
+fn br_rm_upstream_deletes_an_unfetched_same_named_upstream() {
+    let (_bare, work) = setup();
+    git(work.path(), &["branch", "feature"]);
+    push_and_unfetch(work.path(), "feature");
+
+    let output = perch_args(
+        work.path(),
+        &["br", "rm", "--upstream", "feature", "--force"],
+    );
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(!local_branch_exists(work.path(), "feature"));
+    assert_eq!(remote_branch_tip(work.path(), "origin", "feature"), None);
 }
 
 #[test]

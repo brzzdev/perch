@@ -725,7 +725,7 @@ pub struct StaleBranch {
 /// anchor stands the merged rule down, leaving only deleted upstreams.
 fn stale_from(
     refs: &HashMap<&str, BranchRef<'_>>,
-    unfetched: &HashMap<&str, UnfetchedUpstream>,
+    unfetched: &HashSet<&str>,
     merged: &str,
     anchor: Option<&Anchor<'_>>,
 ) -> Vec<StaleBranch> {
@@ -741,7 +741,7 @@ fn stale_from(
     if let Some(anchor) = anchor {
         stale.extend(merged.lines().filter_map(|name| {
             // Published under a name of its own, though git cannot see where.
-            if unfetched.contains_key(name) {
+            if unfetched.contains(name) {
                 return None;
             }
             let ground = refs
@@ -799,7 +799,9 @@ pub fn stale_branches(remote: &str) -> AppResult<Vec<StaleBranch>> {
     let refs_output = read_branch_refs()?;
     let config_output = read_upstream_config();
     let refs = branch_refs(&refs_output);
-    let unfetched = unfetched_upstreams(&refs, &config_output);
+    let unfetched: HashSet<&str> = unfetched_upstreams(&refs, &config_output)
+        .into_keys()
+        .collect();
 
     let resolved = merged_anchor(remote);
     let (merged, anchor_tip) = match &resolved {
@@ -2077,7 +2079,7 @@ mod tests {
         Anchor, Ground, StaleBranch, Unmerged, branch_refs, last_recursion_is_off, parse_track,
         stale_from, unmerged_from,
     };
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     /// Git reads both keys into one setting, so a later `submodule.recurse`
     /// overrides an earlier `fetch.recurseSubmodules`, and the reverse.
@@ -2151,7 +2153,7 @@ mod tests {
             branch: "main",
             tip: anchor_tip,
         };
-        let mut got = stale_from(&refs, &HashMap::new(), merged, Some(&anchor));
+        let mut got = stale_from(&refs, &HashSet::new(), merged, Some(&anchor));
         got.sort_by(|a, b| a.name.cmp(&b.name));
         got
     }
@@ -2319,7 +2321,7 @@ mod tests {
     fn without_an_anchor_the_merged_list_is_ignored() {
         let refs_output = head_refs(&[("scratch", "bbb", "", "")]);
         let refs = branch_refs(&refs_output);
-        let got = stale_from(&refs, &HashMap::new(), "scratch", None);
+        let got = stale_from(&refs, &HashSet::new(), "scratch", None);
         assert!(got.is_empty(), "no anchor, no merged rule, got: {got:?}");
     }
 

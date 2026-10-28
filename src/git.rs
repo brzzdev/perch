@@ -1261,12 +1261,8 @@ pub fn equivalent_branches(
 
 /// Unfetched branches whose upstream the server holds at the branch's own tip:
 /// what `-d` would accept were the upstream fetched. A remote that cannot be
-/// reached proves nothing.
-///
-/// The remote's URL is read here, where its `branch.<name>` config was, since
-/// per-worktree config can point one remote name at different servers. The
-/// URL is asked from `dir` now and on the re-check, after this worktree may
-/// have gone, so a URL that resolves per directory proves nothing.
+/// reached proves nothing, and nor does a URL that resolves per directory,
+/// since it is asked from `dir`.
 #[must_use]
 pub fn server_proven_branches(
     dir: Option<&Path>,
@@ -1282,7 +1278,7 @@ pub fn server_proven_branches(
 
     let mut proven = HashMap::new();
     for (remote, branches) in by_remote {
-        let Some(url) = remote_url(None, remote).filter(|url| names_one_repository(url)) else {
+        let Some(url) = upstream_url(remote).filter(|url| names_one_repository(url)) else {
             continue;
         };
         let refnames: Vec<&str> = branches.iter().map(|(_, u)| u.merge.as_str()).collect();
@@ -1308,8 +1304,7 @@ pub fn server_proven_branches(
 }
 
 /// Where each of `refnames` stands on the server `remote` names, by remote
-/// name or URL. A ref the server lacks
-/// is absent from the map. Nobody is asked for credentials, so a remote that
+/// name or URL. A ref the server lacks is absent from the map. Nobody is asked for credentials, so a remote that
 /// needs them fails instead.
 fn server_tips(
     dir: Option<&Path>,
@@ -1333,6 +1328,15 @@ fn server_tips(
         .filter(|(_, found)| refnames.contains(found))
         .map(|(oid, found)| (found.to_string(), oid.to_string()))
         .collect())
+}
+
+/// The URL `branch.<name>.remote` names, read in the same directory as that
+/// config, where per-worktree config can point one remote name elsewhere. It
+/// may be a URL already, which `--get-url` passes through.
+fn upstream_url(remote: &str) -> Option<String> {
+    run(&["ls-remote", "--get-url", remote])
+        .ok()
+        .map(|url| url.trim().to_string())
 }
 
 pub(crate) fn proof_ref_tip(dir: Option<&Path>, against: &ProofRef) -> Option<String> {

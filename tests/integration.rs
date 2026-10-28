@@ -4112,8 +4112,7 @@ fn wt_rm_dot_deletes_a_branch_its_unfetched_upstream_holds() {
     );
 }
 
-/// With `extensions.worktreeConfig`, one remote name can point each worktree
-/// at a different server. The upstream is asked where the worktree pushed it.
+/// Per-worktree config points `origin` at a different server in each worktree.
 #[test]
 fn wt_rm_dot_asks_the_server_its_own_worktree_pushed_to() {
     let (bare, parent, work) = setup_with_parent();
@@ -4144,6 +4143,23 @@ fn wt_rm_dot_asks_the_server_its_own_worktree_pushed_to() {
         !local_branch_exists(&work, "feature"),
         "the worktree's own server holds every commit, so the branch should go"
     );
+}
+
+/// `push -u <url>` records the URL itself as the remote, which no refspec maps.
+#[test]
+fn wt_rm_dot_deletes_a_branch_pushed_to_a_url() {
+    let (bare, parent, work) = setup_with_parent();
+    let path = add_worktree(&work, &parent, "feature");
+    commit_in(&path, "new.txt", "pushed work");
+    git(
+        &path,
+        &["push", "-u", bare.path().to_str().unwrap(), "feature"],
+    );
+
+    let output = perch_args(&path, &["wt", "rm", "."]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(!local_branch_exists(&work, "feature"));
 }
 
 #[test]

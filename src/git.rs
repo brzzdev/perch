@@ -1278,7 +1278,7 @@ pub fn server_proven_branches(
 
     let mut proven = HashMap::new();
     for (remote, branches) in by_remote {
-        let Some(url) = upstream_url(remote).filter(|url| names_one_repository(url)) else {
+        let Some(url) = upstream_url(dir, remote) else {
             continue;
         };
         let refnames: Vec<&str> = branches.iter().map(|(_, u)| u.merge.as_str()).collect();
@@ -1330,20 +1330,32 @@ fn server_tips(
         .collect())
 }
 
-/// The URL `branch.<name>.remote` names, read in the same directory as that
-/// config, where per-worktree config can point one remote name elsewhere. It
-/// is the URL as configured, before `insteadOf`: `ls-remote` rewrites it once,
-/// as the push did, where a rewritten one would be rewritten again. A remote
-/// that is no configured name is a URL already. Git fetches from the first of
-/// several.
-fn upstream_url(remote: &str) -> Option<String> {
+/// The URL `remote` names as configured, before `insteadOf`, read where its
+/// `branch.<name>` config was, and only where `ls-remote` from `dir` rewrites
+/// it to the one server git contacts from here, and that server is the same
+/// repository from any directory.
+fn upstream_url(dir: Option<&Path>, remote: &str) -> Option<String> {
     let key = format!("remote.{remote}.url");
-    let configured = run(&["config", "--get-all", &key]).ok();
-    let url = match configured.as_deref().and_then(|urls| urls.lines().next()) {
-        Some(url) => url,
-        None => remote,
+    let url = match run(&["config", "--get-all", &key]) {
+        Ok(urls) => configured_url(&urls)?.to_string(),
+        Err(_) => remote.to_string(),
     };
-    Some(url.to_string()).filter(|url| !url.is_empty())
+    let contacted = |dir, remote: &str| {
+        run_in(dir, &["ls-remote", "--get-url", "--", remote])
+            .ok()
+            .map(|url| url.trim().to_string())
+    };
+    let here = contacted(None, remote)?;
+    if contacted(dir, &url)? != here || !names_one_repository(&here) {
+        return None;
+    }
+    Some(url)
+}
+
+/// The URL git fetches from among a remote's `url` values: the first after the
+/// last empty one, which clears those before it.
+fn configured_url(urls: &str) -> Option<&str> {
+    urls.lines().rev().take_while(|url| !url.is_empty()).last()
 }
 
 pub(crate) fn proof_ref_tip(dir: Option<&Path>, against: &ProofRef) -> Option<String> {
@@ -2428,6 +2440,14 @@ mod tests {
         );
         assert_eq!(branch_config_key("remote.origin.url"), None);
         assert_eq!(branch_config_key("branch.autosetupmerge"), None);
+    }
+
+    #[test]
+    fn an_empty_url_clears_the_ones_before_it() {
+        use super::configured_url;
+        assert_eq!(configured_url("a\nb\n"), Some("a"));
+        assert_eq!(configured_url("a\n\nb\nc\n"), Some("b"));
+        assert_eq!(configured_url("a\n\n"), None);
     }
 
     #[test]

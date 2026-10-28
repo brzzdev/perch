@@ -43,7 +43,9 @@ impl Risk {
         }
         match self.unmerged {
             Some(git::Unmerged::Ahead(n)) => markers.push(marker::Marker::Unmerged(Some(n))),
-            Some(git::Unmerged::NoUpstream) => markers.push(marker::Marker::Unmerged(None)),
+            Some(git::Unmerged::NoUpstream | git::Unmerged::Unfetched) => {
+                markers.push(marker::Marker::Unmerged(None));
+            }
             None => {}
         }
         marker::join(&markers)
@@ -914,6 +916,7 @@ fn assess_stale(request: StaleRequest) -> Assessment {
     let judgement = BranchJudgement::read(
         main.as_deref(),
         &remote,
+        ServerProof::Skip,
         request
             .stale
             .iter()
@@ -1037,11 +1040,29 @@ fn stale_ground_label(ground: git::Ground) -> &'static str {
     }
 }
 
+/// Whether an unfetched upstream is asked of its server.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ServerProof {
+    Ask,
+    Skip,
+}
+
+impl ServerProof {
+    fn for_target(target: Option<&str>) -> Self {
+        if target.is_some() {
+            Self::Ask
+        } else {
+            Self::Skip
+        }
+    }
+}
+
 /// The branch half of each row's *Risk*: whether `git branch -d` would refuse
-/// it, and the proof that refusing costs nothing where it is *Equivalent*.
+/// it, and the proof that refusing costs nothing where it is *Equivalent* or
+/// its unfetched upstream already holds it.
 #[derive(Default)]
 struct BranchJudgement {
-    equivalent: HashMap<String, git::Proof>,
+    proven: HashMap<String, git::Proof>,
     unmerged: HashMap<String, git::Unmerged>,
 }
 
@@ -1050,24 +1071,33 @@ impl BranchJudgement {
     fn read<'a>(
         main: Option<&Path>,
         remote: &str,
+        server: ServerProof,
         deletable: impl Iterator<Item = &'a str>,
     ) -> Self {
-        let unmerged = git::unmerged_branches(main).unwrap_or_default();
+        let git::Refusals {
+            unfetched,
+            unmerged,
+        } = git::unmerged_branches(main).unwrap_or_default();
         let candidates: Vec<&str> = deletable
             .filter(|name| unmerged.contains_key(*name))
             .collect();
-        let equivalent = git::equivalent_branches(main, remote, &candidates);
-        Self {
-            equivalent,
-            unmerged,
+        let mut proven = git::equivalent_branches(main, remote, &candidates);
+        if server == ServerProof::Ask {
+            let unproven: Vec<_> = candidates
+                .into_iter()
+                .filter(|name| !proven.contains_key(*name))
+                .filter_map(|name| Some((name, unfetched.get(name)?)))
+                .collect();
+            proven.extend(git::server_proven_branches(main, &unproven));
         }
+        Self { proven, unmerged }
     }
 
     fn of(&self, branch: Option<&str>) -> (Option<git::Unmerged>, Option<git::Proof>) {
         let Some(branch) = branch else {
             return (None, None);
         };
-        match self.equivalent.get(branch) {
+        match self.proven.get(branch) {
             Some(proof) => (None, Some(proof.clone())),
             None => (self.unmerged.get(branch).copied(), None),
         }
@@ -1092,6 +1122,7 @@ fn assess_branches(request: BranchRequest) -> AppResult<Assessment> {
     let judgement = BranchJudgement::read(
         Some(&main),
         &remote,
+        ServerProof::for_target(request.target.as_deref()),
         request.branches.iter().map(String::as_str).filter(|name| {
             reachable(name)
                 && request.current.as_deref() != Some(*name)
@@ -1255,6 +1286,7 @@ fn build_worktree_assessment(
     let judgement = BranchJudgement::read(
         Some(&main),
         &remote,
+        ServerProof::for_target(request.target.as_deref()),
         removable
             .iter()
             .enumerate()
@@ -1497,10 +1529,9 @@ impl Report<'_> {
 /// exactly as the key source drives the interactive pickers; [`GitSteps`] is the
 /// real implementation.
 trait Steps {
-    /// What `refname` points at *now* — asked to check a proof still covers what
-    /// it was established on, so it must read the repo rather than anything
-    /// remembered.
-    fn resolve(&mut self, refname: &str) -> Option<String>;
+    /// What a proof was made against holds *now*, read from the repo or server
+    /// rather than remembered.
+    fn proof_ref_tip(&mut self, against: &git::ProofRef) -> Option<String>;
 
     fn delete_branch(
         &mut self,
@@ -1564,8 +1595,8 @@ impl GitSteps {
 }
 
 impl Steps for GitSteps {
-    fn resolve(&mut self, refname: &str) -> Option<String> {
-        git::resolve(self.main.as_deref(), refname)
+    fn proof_ref_tip(&mut self, against: &git::ProofRef) -> Option<String> {
+        git::proof_ref_tip(self.main.as_deref(), against)
     }
 
     fn delete_branch(
@@ -1678,7 +1709,7 @@ fn remove<'a>(
         let outcome = match &license.branch {
             BranchLicense::Outright => steps.delete_branch(branch, Forcing::Forced),
             BranchLicense::Proven(proof)
-                if steps.resolve(&proof.anchor_ref).as_ref() == Some(&proof.anchor_tip) =>
+                if steps.proof_ref_tip(&proof.against).as_ref() == Some(&proof.against_tip) =>
             {
                 match steps.delete_branch_at(branch, &proof.tip)? {
                     Some(outcome) => Ok(outcome),
@@ -2393,8 +2424,8 @@ mod tests {
     #[test]
     fn equivalent_stale_branch_keeps_its_proof_without_an_unmerged_risk() {
         let proof = git::Proof {
-            anchor_ref: "refs/heads/main".to_string(),
-            anchor_tip: "def".to_string(),
+            against: git::ProofRef::Local("refs/heads/main".to_string()),
+            against_tip: "def".to_string(),
             tip: "abc".to_string(),
         };
         let assessment = build_stale_assessment(
@@ -2410,7 +2441,7 @@ mod tests {
             ),
             None,
             &BranchJudgement {
-                equivalent: HashMap::from([("shipped".to_string(), proof.clone())]),
+                proven: HashMap::from([("shipped".to_string(), proof.clone())]),
                 unmerged: HashMap::from([("shipped".to_string(), git::Unmerged::NoUpstream)]),
             },
             |_| false,
@@ -2510,14 +2541,15 @@ mod tests {
 
     fn proof() -> git::Proof {
         git::Proof {
-            anchor_ref: ANCHOR_REF.to_string(),
-            anchor_tip: PROVEN_ANCHOR.to_string(),
+            against: git::ProofRef::Local(ANCHOR_REF.to_string()),
+            against_tip: PROVEN_ANCHOR.to_string(),
             tip: PROVEN_TIP.to_string(),
         }
     }
 
     impl Steps for FakeSteps {
-        fn resolve(&mut self, refname: &str) -> Option<String> {
+        fn proof_ref_tip(&mut self, against: &git::ProofRef) -> Option<String> {
+            let (git::ProofRef::Local(refname) | git::ProofRef::Server { refname, .. }) = against;
             self.refs.get(refname).cloned()
         }
 
@@ -2543,7 +2575,11 @@ mod tests {
             branch: &str,
             expected: &str,
         ) -> AppResult<Option<git::BranchDeleteOutcome>> {
-            let hit = self.resolve(&format!("refs/heads/{branch}")).as_deref() == Some(expected);
+            let hit = self
+                .refs
+                .get(&format!("refs/heads/{branch}"))
+                .map(String::as_str)
+                == Some(expected);
             self.calls.push(Call::DeleteBranchAt { hit });
             Ok(hit.then(|| self.branch.clone()))
         }

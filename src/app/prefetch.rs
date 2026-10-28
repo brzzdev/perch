@@ -9,6 +9,8 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use super::{report_fetch_failure, spinner};
+#[cfg(unix)]
+use crate::session::wait_for_exit;
 use crate::{AppResult, git};
 
 /// How long git gets to act on SIGTERM before the group is killed outright.
@@ -115,7 +117,7 @@ impl FetchContext {
         });
         !config_resolves_per_directory
             && !environment_resolves_per_directory()
-            && self.url.as_deref().is_some_and(names_one_repository)
+            && self.url.as_deref().is_some_and(git::names_one_repository)
     }
 }
 
@@ -187,42 +189,6 @@ impl FetchedRemote {
             && !git::has_submodules(dir)
             && self.context.names_one_repository(remote)
             && FetchContext::read(Some(dir), remote) == self.context
-    }
-}
-
-/// The `scheme://` URLs git fetches itself, or through the helpers it ships.
-/// Git matches these case-sensitively; any other scheme goes to a
-/// `git-remote-<scheme>` found on `PATH`.
-const BUILT_IN_SCHEMES: [&str; 9] = [
-    "file", "ftp", "ftps", "git", "git+ssh", "http", "https", "ssh", "ssh+git",
-];
-
-/// Whether `url` names the same repository whichever directory git fetches it
-/// from, by git's own reading of a URL. A URL in one of the
-/// [`BUILT_IN_SCHEMES`], an absolute path and scp-style `host:path` do. A
-/// relative path does not, since git resolves it against the directory it runs
-/// in. Nor can a URL for any other helper be trusted to, whether written
-/// `<transport>::<address>` or `<scheme>://<address>`: the helper, `ext::`
-/// included, is free to read the address as a path relative to where it runs.
-fn names_one_repository(url: &str) -> bool {
-    // A leading run of scheme characters, as git reads a transport name.
-    let scheme = url
-        .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')))
-        .unwrap_or(url.len());
-    let rest = &url[scheme..];
-    if scheme > 0 && rest.starts_with("::") {
-        return false;
-    }
-    if rest.starts_with("://") {
-        return BUILT_IN_SCHEMES.contains(&&url[..scheme]);
-    }
-    if url.starts_with('/') {
-        return true;
-    }
-    // A `:` before any `/` makes it scp-style, and anything else local.
-    match (url.find(':'), url.find('/')) {
-        (Some(colon), slash) => slash.is_none_or(|slash| colon < slash),
-        (None, _) => false,
     }
 }
 
@@ -423,34 +389,6 @@ fn end_group(group: i32) {
 enum Signal {
     Kill,
     Term,
-}
-
-/// Blocks until the fetch has exited, leaving it unreaped — `WNOWAIT` reports
-/// the exit without consuming it. Reaping is what frees a pid for reuse, and
-/// [`ACTIVE_GROUP`] still names this one, so the caller clears that first and
-/// reaps second. What the wait reports is discarded: the caller reads the
-/// status from the reap.
-#[cfg(unix)]
-fn wait_for_exit(child: &Child) {
-    let pid: libc::id_t = child.id();
-    loop {
-        let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::uninit();
-        // SAFETY: `info` is a live, aligned allocation of exactly the
-        // `siginfo_t` the call writes, and nothing reads it afterwards.
-        let waited = unsafe {
-            libc::waitid(
-                libc::P_PID,
-                pid,
-                info.as_mut_ptr(),
-                libc::WEXITED | libc::WNOWAIT,
-            )
-        };
-        // A signal landing mid-wait is not an answer about the child.
-        if waited == 0 || std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted
-        {
-            return;
-        }
-    }
 }
 
 #[cfg(unix)]

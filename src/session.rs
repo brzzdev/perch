@@ -1,7 +1,10 @@
 //! Starting a child process in a session of its own.
 
+use std::io::Read;
 use std::os::unix::process::CommandExt;
-use std::process::Command;
+use std::process::{Child, Command, Output, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 /// Makes the child lead a new session. That takes it out of the invoking
 /// session, so a manager sweeping that session on close cannot reach it
@@ -21,5 +24,137 @@ pub(crate) fn detach(command: &mut Command) {
             }
             Ok(())
         });
+    }
+}
+
+/// The process group of the command [`output_detached`] is running, or `0`.
+static FOREGROUND_GROUP: AtomicI32 = AtomicI32::new(0);
+
+/// Whether [`end_foreground`] has run, after which nothing more is started:
+/// the process is exiting, and a command started now would outlive it.
+static ENDED: AtomicBool = AtomicBool::new(false);
+
+/// Orders a command's start and reap against [`end_foreground`], so its kill
+/// never names a reused group id and no start slips in after it.
+static SIGNALLING: Mutex<()> = Mutex::new(());
+
+fn signalling() -> MutexGuard<'static, ()> {
+    SIGNALLING.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Runs `command` to completion, as [`Command::output`] does, but leading a
+/// session of its own, so it has no terminal to prompt on. A terminal's
+/// Ctrl-C no longer reaches it, so [`end_foreground`] has to.
+pub(crate) fn output_detached(command: &mut Command) -> std::io::Result<Output> {
+    detach(command);
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = {
+        let _signalling = signalling();
+        if ENDED.load(Ordering::SeqCst) {
+            return Err(std::io::ErrorKind::Interrupted.into());
+        }
+        let child = command.spawn()?;
+        FOREGROUND_GROUP.store(i32::try_from(child.id()).unwrap_or(0), Ordering::SeqCst);
+        child
+    };
+    let stderr = child.stderr.take().map(|mut pipe| {
+        std::thread::spawn(move || {
+            let mut buffer = Vec::new();
+            let _ = pipe.read_to_end(&mut buffer);
+            buffer
+        })
+    });
+    let mut stdout = Vec::new();
+    if let Some(mut pipe) = child.stdout.take() {
+        pipe.read_to_end(&mut stdout)?;
+    }
+    let stderr = stderr
+        .and_then(|reader| reader.join().ok())
+        .unwrap_or_default();
+    wait_for_exit(&child);
+    let _signalling = signalling();
+    FOREGROUND_GROUP.store(0, Ordering::SeqCst);
+    let status = child.wait()?;
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+/// Kills whatever [`output_detached`] is running, and refuses anything it
+/// would start afterwards, for a caller about to exit without unwinding. A
+/// read holds no lock, so SIGKILL leaves nothing behind.
+pub(crate) fn end_foreground() {
+    let _signalling = signalling();
+    ENDED.store(true, Ordering::SeqCst);
+    let group = FOREGROUND_GROUP.swap(0, Ordering::SeqCst);
+    if group != 0 {
+        // SAFETY: plain signal delivery to a process group this process created.
+        unsafe { libc::kill(-group, libc::SIGKILL) };
+    }
+}
+
+/// Blocks until `child` has exited, leaving it unreaped — `WNOWAIT` reports
+/// the exit without consuming it. Reaping is what frees a pid for reuse, so a
+/// caller that has published the pid as a group to signal clears that first
+/// and reaps second. What the wait reports is discarded: the caller reads the
+/// status from the reap.
+pub(crate) fn wait_for_exit(child: &Child) {
+    let pid: libc::id_t = child.id();
+    loop {
+        let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::uninit();
+        // SAFETY: `info` is a live, aligned allocation of exactly the
+        // `siginfo_t` the call writes, and nothing reads it afterwards.
+        let waited = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid,
+                info.as_mut_ptr(),
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        };
+        // A signal landing mid-wait is not an answer about the child.
+        if waited == 0 || std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted
+        {
+            return;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    use super::*;
+
+    /// One test, because ending is for good: a second test running after it
+    /// could start nothing.
+    #[test]
+    fn end_foreground_kills_the_running_command_and_refuses_the_next() {
+        let ender = std::thread::spawn(|| {
+            while FOREGROUND_GROUP.load(Ordering::SeqCst) == 0 {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            end_foreground();
+        });
+        let started = Instant::now();
+
+        let output = output_detached(Command::new("sleep").arg("60")).unwrap();
+
+        ender.join().unwrap();
+        assert!(!output.status.success(), "the kill should end it");
+        assert!(started.elapsed() < Duration::from_secs(10));
+
+        let next = output_detached(&mut Command::new("true"));
+        assert_eq!(
+            next.unwrap_err().kind(),
+            std::io::ErrorKind::Interrupted,
+            "nothing starts once the process is ending"
+        );
     }
 }

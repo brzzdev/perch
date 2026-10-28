@@ -59,6 +59,12 @@ pub(crate) fn describe(risk: Risk, subject: &str, path: &Path) -> Vec<String> {
         Some(git::Unmerged::NoUpstream) => {
             lines.push(format!("{subject} has unmerged commits and no upstream"));
         }
+        Some(git::Unmerged::Unfetched) => {
+            lines.push(format!(
+                "{subject} has unmerged commits; its upstream is not fetched, and the remote \
+                 did not confirm it holds them"
+            ));
+        }
         None => {}
     }
     lines

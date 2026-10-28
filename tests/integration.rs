@@ -4073,6 +4073,175 @@ fn wt_rm_dot_sees_its_own_branch_as_unmerged() {
     assert!(path.exists(), "worktree must survive: {}", path.display());
 }
 
+/// Push `branch` with an upstream, then narrow the fetch refspec to `main`
+/// as a single-branch clone has it. The upstream stays configured, but git maps
+/// it to no local ref and so reports none.
+fn push_and_unfetch(dir: &Path, branch: &str) {
+    git(dir, &["push", "-u", "origin", branch]);
+    git(
+        dir,
+        &[
+            "config",
+            "--replace-all",
+            "remote.origin.fetch",
+            "+refs/heads/main:refs/remotes/origin/main",
+        ],
+    );
+    git(
+        dir,
+        &["update-ref", "-d", &format!("refs/remotes/origin/{branch}")],
+    );
+}
+
+/// `-d` falls back to HEAD for an upstream git cannot see, so it refuses a
+/// branch whose every commit is on the server. The server is asked instead.
+#[test]
+fn wt_rm_dot_deletes_a_branch_its_unfetched_upstream_holds() {
+    let (_bare, parent, work) = setup_with_parent();
+    let path = add_worktree(&work, &parent, "feature");
+    commit_in(&path, "new.txt", "pushed work");
+    push_and_unfetch(&path, "feature");
+
+    let output = perch_args(&path, &["wt", "rm", "."]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(!path.exists(), "worktree should be removed");
+    assert!(
+        !local_branch_exists(&work, "feature"),
+        "the server holds every commit, so the branch should go"
+    );
+}
+
+/// Per-worktree config points `origin` at a different server in each worktree.
+#[test]
+fn wt_rm_dot_asks_the_server_its_own_worktree_pushed_to() {
+    let (bare, parent, work) = setup_with_parent();
+    let elsewhere = TempDir::new().unwrap();
+    git(elsewhere.path(), &["init", "--bare"]);
+    let path = add_worktree(&work, &parent, "feature");
+    git(&work, &["config", "core.repositoryFormatVersion", "1"]);
+    git(&work, &["config", "extensions.worktreeConfig", "true"]);
+    git(&work, &["config", "--unset", "remote.origin.url"]);
+    for (dir, url) in [(&work, bare.path()), (&path, elsewhere.path())] {
+        git(
+            dir,
+            &[
+                "config",
+                "--worktree",
+                "remote.origin.url",
+                url.to_str().unwrap(),
+            ],
+        );
+    }
+    commit_in(&path, "new.txt", "pushed elsewhere");
+    push_and_unfetch(&path, "feature");
+
+    let output = perch_args(&path, &["wt", "rm", "."]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(
+        !local_branch_exists(&work, "feature"),
+        "the worktree's own server holds every commit, so the branch should go"
+    );
+}
+
+/// Git rewrites a URL by `insteadOf` once, never chaining one rule into the next.
+#[test]
+fn wt_rm_dot_rewrites_the_upstream_url_once_as_the_push_did() {
+    let (bare, parent, work) = setup_with_parent();
+    let elsewhere = TempDir::new().unwrap();
+    git(elsewhere.path(), &["init", "--bare"]);
+    let bare_url = bare.path().to_str().unwrap();
+    git(&work, &["config", "remote.origin.url", "alias:"]);
+    git(
+        &work,
+        &["config", &format!("url.{bare_url}.insteadOf"), "alias:"],
+    );
+    git(
+        &work,
+        &[
+            "config",
+            &format!("url.{}.insteadOf", elsewhere.path().to_str().unwrap()),
+            bare_url,
+        ],
+    );
+    let path = add_worktree(&work, &parent, "feature");
+    commit_in(&path, "new.txt", "pushed work");
+    push_and_unfetch(&path, "feature");
+
+    let output = perch_args(&path, &["wt", "rm", "."]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(!local_branch_exists(&work, "feature"));
+}
+
+/// `push -u <url>` records the URL itself as the remote, which no refspec maps.
+#[test]
+fn wt_rm_dot_deletes_a_branch_pushed_to_a_url() {
+    let (bare, parent, work) = setup_with_parent();
+    let path = add_worktree(&work, &parent, "feature");
+    commit_in(&path, "new.txt", "pushed work");
+    git(
+        &path,
+        &["push", "-u", bare.path().to_str().unwrap(), "feature"],
+    );
+
+    let output = perch_args(&path, &["wt", "rm", "."]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(!local_branch_exists(&work, "feature"));
+}
+
+#[test]
+fn wt_rm_dot_refuses_commits_its_unfetched_upstream_lacks() {
+    let (_bare, parent, work) = setup_with_parent();
+    let path = add_worktree(&work, &parent, "feature");
+    commit_in(&path, "new.txt", "pushed work");
+    push_and_unfetch(&path, "feature");
+    commit_in(&path, "later.txt", "unpushed work");
+
+    let output = perch_args(&path, &["wt", "rm", "."]);
+
+    assert!(
+        !output.status.success(),
+        "unpushed work should be flagged; stderr: {}",
+        stderr_str(&output)
+    );
+    assert!(
+        stderr_str(&output).contains("its upstream is not fetched"),
+        "should say why the upstream could not answer; got: {}",
+        stderr_str(&output)
+    );
+    assert!(path.exists(), "worktree must survive: {}", path.display());
+}
+
+#[test]
+fn wt_rm_dot_keeps_the_warning_when_the_remote_is_unreachable() {
+    let (bare, parent, work) = setup_with_parent();
+    let path = add_worktree(&work, &parent, "feature");
+    commit_in(&path, "new.txt", "pushed work");
+    push_and_unfetch(&path, "feature");
+    let missing = bare.path().join("missing");
+    git(
+        &work,
+        &["remote", "set-url", "origin", missing.to_str().unwrap()],
+    );
+
+    let output = perch_args(&path, &["wt", "rm", "."]);
+
+    assert!(
+        !output.status.success(),
+        "an unanswered server proves nothing; stderr: {}",
+        stderr_str(&output)
+    );
+    assert!(
+        stderr_str(&output).contains("its upstream is not fetched"),
+        "got: {}",
+        stderr_str(&output)
+    );
+    assert!(path.exists(), "worktree must survive: {}", path.display());
+}
+
 /// `--force` on `.` must finish the job: no worktree *and* no leftover branch.
 #[test]
 fn wt_rm_dot_force_leaves_no_branch_behind() {

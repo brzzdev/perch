@@ -430,6 +430,42 @@ pub fn remote_url(dir: Option<&Path>, remote: &str) -> Option<String> {
         .map(|url| url.trim().to_string())
 }
 
+/// The `scheme://` URLs git fetches itself, or through the helpers it ships.
+/// Git matches these case-sensitively; any other scheme goes to a
+/// `git-remote-<scheme>` found on `PATH`.
+const BUILT_IN_SCHEMES: [&str; 9] = [
+    "file", "ftp", "ftps", "git", "git+ssh", "http", "https", "ssh", "ssh+git",
+];
+
+/// Whether `url` names the same repository whichever directory git fetches it
+/// from, by git's own reading of a URL. A URL in one of the
+/// [`BUILT_IN_SCHEMES`], an absolute path and scp-style `host:path` do. A
+/// relative path does not, since git resolves it against the directory it runs
+/// in. Nor can a URL for any other helper be trusted to, whether written
+/// `<transport>::<address>` or `<scheme>://<address>`: the helper, `ext::`
+/// included, is free to read the address as a path relative to where it runs.
+pub(crate) fn names_one_repository(url: &str) -> bool {
+    // A leading run of scheme characters, as git reads a transport name.
+    let scheme = url
+        .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')))
+        .unwrap_or(url.len());
+    let rest = &url[scheme..];
+    if scheme > 0 && rest.starts_with("::") {
+        return false;
+    }
+    if rest.starts_with("://") {
+        return BUILT_IN_SCHEMES.contains(&&url[..scheme]);
+    }
+    if url.starts_with('/') {
+        return true;
+    }
+    // A `:` before any `/` makes it scp-style, and anything else local.
+    match (url.find(':'), url.find('/')) {
+        (Some(colon), slash) => slash.is_none_or(|slash| colon < slash),
+        (None, _) => false,
+    }
+}
+
 /// Every config entry in force in `dir`, in the order git reads them. The
 /// order is kept because it carries precedence: a scalar setting takes its
 /// last value, so the same entries listed in another order can mean something
@@ -1156,10 +1192,10 @@ pub struct Proof {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProofRef {
     Local(String),
-    /// A branch as `remote`'s server holds it.
+    /// A branch as the server at `url` holds it.
     Server {
         refname: String,
-        remote: String,
+        url: String,
     },
 }
 
@@ -1226,6 +1262,11 @@ pub fn equivalent_branches(
 /// Unfetched branches whose upstream the server holds at the branch's own tip:
 /// what `-d` would accept were the upstream fetched. A remote that cannot be
 /// reached proves nothing.
+///
+/// The remote's URL is read here, where its `branch.<name>` config was, since
+/// per-worktree config can point one remote name at different servers. The
+/// URL is asked from `dir` now and on the re-check, after this worktree may
+/// have gone, so a URL that resolves per directory proves nothing.
 #[must_use]
 pub fn server_proven_branches(
     dir: Option<&Path>,
@@ -1241,8 +1282,11 @@ pub fn server_proven_branches(
 
     let mut proven = HashMap::new();
     for (remote, branches) in by_remote {
+        let Some(url) = remote_url(None, remote).filter(|url| names_one_repository(url)) else {
+            continue;
+        };
         let refnames: Vec<&str> = branches.iter().map(|(_, u)| u.merge.as_str()).collect();
-        let Ok(server) = server_tips(dir, remote, &refnames) else {
+        let Ok(server) = server_tips(dir, &url, &refnames) else {
             continue;
         };
         for (name, upstream) in branches {
@@ -1252,7 +1296,7 @@ pub fn server_proven_branches(
             let proof = Proof {
                 against: ProofRef::Server {
                     refname: upstream.merge.clone(),
-                    remote: remote.to_string(),
+                    url: url.clone(),
                 },
                 against_tip: upstream.branch_tip.clone(),
                 tip: upstream.branch_tip.clone(),
@@ -1263,7 +1307,8 @@ pub fn server_proven_branches(
     proven
 }
 
-/// Where each of `refnames` stands on `remote`'s server. A ref the server lacks
+/// Where each of `refnames` stands on the server `remote` names, by remote
+/// name or URL. A ref the server lacks
 /// is absent from the map. Nobody is asked for credentials, so a remote that
 /// needs them fails instead.
 fn server_tips(
@@ -1293,8 +1338,8 @@ fn server_tips(
 pub(crate) fn proof_ref_tip(dir: Option<&Path>, against: &ProofRef) -> Option<String> {
     match against {
         ProofRef::Local(refname) => resolve(dir, refname),
-        ProofRef::Server { refname, remote } => {
-            server_tips(dir, remote, &[refname]).ok()?.remove(refname)
+        ProofRef::Server { refname, url } => {
+            server_tips(dir, url, &[refname]).ok()?.remove(refname)
         }
     }
 }

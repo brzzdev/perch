@@ -4112,6 +4112,40 @@ fn wt_rm_dot_deletes_a_branch_its_unfetched_upstream_holds() {
     );
 }
 
+/// With `extensions.worktreeConfig`, one remote name can point each worktree
+/// at a different server. The upstream is asked where the worktree pushed it.
+#[test]
+fn wt_rm_dot_asks_the_server_its_own_worktree_pushed_to() {
+    let (bare, parent, work) = setup_with_parent();
+    let elsewhere = TempDir::new().unwrap();
+    git(elsewhere.path(), &["init", "--bare"]);
+    let path = add_worktree(&work, &parent, "feature");
+    git(&work, &["config", "core.repositoryFormatVersion", "1"]);
+    git(&work, &["config", "extensions.worktreeConfig", "true"]);
+    git(&work, &["config", "--unset", "remote.origin.url"]);
+    for (dir, url) in [(&work, bare.path()), (&path, elsewhere.path())] {
+        git(
+            dir,
+            &[
+                "config",
+                "--worktree",
+                "remote.origin.url",
+                url.to_str().unwrap(),
+            ],
+        );
+    }
+    commit_in(&path, "new.txt", "pushed elsewhere");
+    push_and_unfetch(&path, "feature");
+
+    let output = perch_args(&path, &["wt", "rm", "."]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(
+        !local_branch_exists(&work, "feature"),
+        "the worktree's own server holds every commit, so the branch should go"
+    );
+}
+
 #[test]
 fn wt_rm_dot_refuses_commits_its_unfetched_upstream_lacks() {
     let (_bare, parent, work) = setup_with_parent();

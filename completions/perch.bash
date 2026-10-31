@@ -163,14 +163,22 @@ _perch_completions() {
   case "$pos" in
     1)
       COMPREPLY=()
-      _perch_reply "$cur" < <(printf '%s\n' br wt; _perch_offers)
+      _perch_reply "$cur" < <(printf '%s\n' br shell wt; _perch_offers)
       ;;
-    # Only the two verbs read a second word. `perch <branch>` has taken its
+    # Only the command words read a second word. `perch <branch>` has taken its
     # target by here, and the dispatcher ignores whatever follows it.
     2)
       COMPREPLY=()
       if [[ "$verb" == "br" ]]; then
         _perch_reply "$cur" < <(printf '%s\n' rm; _perch_offers br)
+      elif [[ "$verb" == "shell" ]]; then
+        _perch_reply "$cur" < <(printf '%s\n' init install)
+      fi
+      ;;
+    3)
+      COMPREPLY=()
+      if [[ "$verb" == "shell" && "$subverb" == "init" ]]; then
+        _perch_reply "$cur" < <(printf '%s\n' bash fish zsh)
       fi
       ;;
   esac

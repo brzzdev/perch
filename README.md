@@ -32,14 +32,17 @@ cd "perch-$TARGET"
 # The binary
 mkdir -p ~/.local/bin && mv perch ~/.local/bin/
 
-# Shell integration — required for worktree `cd` hand-off (see below)
-mkdir -p ~/.config/perch && cp shell/* ~/.config/perch/
-
 # Completions, for zsh
 mkdir -p ~/.zsh/completions && cp completions/_perch ~/.zsh/completions/
 ```
 
-Make sure `~/.local/bin` is on your `PATH`, then add the shell integration line to your rc — see [Shell integration](#shell-integration-required-for-cd) for that and [Shell Completions](#shell-completions) for bash and fish.
+Make sure `~/.local/bin` is on your `PATH`, then load the shell integration — it's required for the worktree `cd` hand-off:
+
+```sh
+perch shell install
+```
+
+See [Shell integration](#shell-integration-required-for-cd) for what that does, and [Shell Completions](#shell-completions) for bash and fish.
 
 The Linux builds are statically linked against musl, so they run on any distribution regardless of its glibc version.
 
@@ -59,7 +62,7 @@ cd perch
 just install
 ```
 
-This builds a release binary and copies it to `~/.local/bin/perch`. Make sure `~/.local/bin` is on your `PATH`.
+This builds a release binary and copies it to `~/.local/bin/perch`. Make sure `~/.local/bin` is on your `PATH`, then run `perch shell install`.
 
 ## Usage
 
@@ -181,20 +184,32 @@ error: feature is checked out at ~/dev/worktrees/repo/feature; run `perch featur
 A child process can't change its parent shell's directory. Worktree commands print their target path on stdout; a small shell function reads that and runs `cd` for you.
 
 ```sh
-just install-shell-integration
-# Then add the printed line to your shell rc (e.g. ~/.zshrc):
-#   source ~/.config/perch/perch.sh
+perch shell install
 ```
 
-Installing from a release tarball? The same files ship in its `shell/` directory — copy them to `~/.config/perch/` and source the one for your shell (`perch.sh` for zsh and bash, `perch.fish` for fish).
+This reads your shell from `$SHELL` and adds one line to its startup file, then tells you which file it changed. Open a new shell, or `source` that file, to pick it up. Running it again finds the line and changes nothing.
 
-On zsh, put the `source` line **after** `compinit`. The wrapper registers the `br` and `wt` completions as it defines those functions, and `compinit` has to have run for it to do so — source it earlier and the two shortcuts work but don't complete.
+| Shell | File | Line |
+| ----- | ---- | ---- |
+| bash | `~/.bashrc` | `eval "$(perch shell init bash)"` |
+| fish | `~/.config/fish/conf.d/perch.fish` (or under `$XDG_CONFIG_HOME`) | `perch shell init fish \| source` |
+| zsh | `~/.zshrc` (or `$ZDOTDIR/.zshrc`) | `eval "$(perch shell init zsh)"` |
+
+`perch shell init <shell>` prints the wrapper script, which is built into the binary, so the wrapper is always the one that matches the `perch` you have. To set it up by hand, add the line from the table yourself.
+
+Upgrading from a copied wrapper? Remove the old `source ~/.config/perch/perch.sh` (or `perch.fish`) line and the `~/.config/perch/` directory, so only the built-in wrapper loads.
+
+On macOS, Terminal and iTerm2 start bash as a login shell, which reads `~/.bash_profile` and not `~/.bashrc`. Make sure your `~/.bash_profile` sources `~/.bashrc`.
+
+fish reads `conf.d` before `config.fish`, so `perch` has to be on your `PATH` by then. `fish_add_path ~/.local/bin` (or Homebrew's `brew shellenv` in an earlier `conf.d` file) does that; a `set -gx PATH` in `config.fish` comes too late.
+
+On zsh the line has to come **after** `compinit`, which is why `perch shell install` appends it to the end of the file. The wrapper registers the `br` and `wt` completions as it defines those functions, and `compinit` has to have run for it to do so — load it earlier and the two shortcuts work but don't complete.
 
 Without the wrapper, `perch wt foo` still creates / finds the worktree and prints its path — you'd just `cd` there manually.
 
 ### `br` and `wt` shortcuts
 
-Sourcing the wrapper also defines `br` and `wt`, so the two verbs are reachable without typing `perch` first:
+Loading the wrapper also defines `br` and `wt`, so the two verbs are reachable without typing `perch` first:
 
 ```sh
 wt feature      # perch wt feature
@@ -204,18 +219,18 @@ br main         # perch br main
 
 They call the `perch` function rather than the binary, so the `cd` hand-off comes with them.
 
-[broot](https://dystroy.org/broot) also installs a `br` function, and whichever is sourced last wins. Set `PERCH_NO_SHORTCUTS` to any non-empty value *before* the `source` line to leave both names alone:
+[broot](https://dystroy.org/broot) also installs a `br` function, and whichever is sourced last wins. Set `PERCH_NO_SHORTCUTS` to any non-empty value *before* the `perch shell init` line to leave both names alone:
 
 ```sh
 # zsh and bash
 PERCH_NO_SHORTCUTS=1
-source ~/.config/perch/perch.sh
+eval "$(perch shell init zsh)"
 ```
 
 ```fish
 # fish
 set -gx PERCH_NO_SHORTCUTS 1
-source ~/.config/perch/perch.fish
+perch shell init fish | source
 ```
 
 It covers the completions too, so nothing offers branch names for someone else's `br` — perch never claims either name unless it also defines it. `just install-completions` won't take a name it doesn't already own either: where a `br` or `wt` completion file is already there, it says so and leaves it.

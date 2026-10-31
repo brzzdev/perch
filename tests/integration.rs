@@ -1,4 +1,5 @@
 use std::assert_matches;
+use std::env;
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs;
@@ -1534,6 +1535,10 @@ fn help_pages_remain_exact_static_text() {
         (
             &["br", "--help"][..],
             include_str!("fixtures/help/branch.txt"),
+        ),
+        (
+            &["shell", "--help"][..],
+            include_str!("fixtures/help/shell.txt"),
         ),
         (
             &["wt", "--help"][..],
@@ -6538,4 +6543,134 @@ fn a_stale_branch_taking_its_worktree_fires_the_removal_hook() {
         format!("removed|wip|{}", resolved.display()),
         "the stale prompt should report the worktree it removed; got: {logged}"
     );
+}
+
+fn perch_shell_install(home: &Path, shell: &str) -> Output {
+    perch_command(home, &["shell", "install"])
+        .env("HOME", home)
+        .env("SHELL", shell)
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("ZDOTDIR")
+        .output()
+        .expect("failed to run perch")
+}
+
+#[test]
+fn shell_install_appends_one_line_and_a_second_run_changes_nothing() {
+    let home = TempDir::new().unwrap();
+    let zshrc = home.path().join(".zshrc");
+    fs::write(&zshrc, "autoload -Uz compinit && compinit").unwrap();
+
+    let first = perch_shell_install(home.path(), "/bin/zsh");
+    assert!(first.status.success(), "stderr: {}", stderr_str(&first));
+    let installed = fs::read_to_string(&zshrc).unwrap();
+    assert_eq!(
+        installed,
+        "autoload -Uz compinit && compinit\neval \"$(perch shell init zsh)\"\n"
+    );
+    assert!(
+        stderr_str(&first).contains("~/.zshrc"),
+        "{}",
+        stderr_str(&first)
+    );
+
+    let second = perch_shell_install(home.path(), "/bin/zsh");
+    assert!(second.status.success(), "stderr: {}", stderr_str(&second));
+    assert!(
+        stderr_str(&second).contains("nothing changed"),
+        "{}",
+        stderr_str(&second)
+    );
+    assert_eq!(fs::read_to_string(&zshrc).unwrap(), installed);
+}
+
+#[test]
+fn shell_install_for_fish_creates_its_conf_d_file() {
+    let home = TempDir::new().unwrap();
+
+    let output = perch_shell_install(home.path(), "/opt/homebrew/bin/fish");
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    let conf = home.path().join(".config/fish/conf.d/perch.fish");
+    assert_eq!(
+        fs::read_to_string(conf).unwrap(),
+        "perch shell init fish | source\n"
+    );
+}
+
+#[test]
+fn shell_install_names_an_unsupported_shell() {
+    let home = TempDir::new().unwrap();
+
+    let output = perch_shell_install(home.path(), "/bin/tcsh");
+
+    assert!(!output.status.success());
+    assert!(
+        stderr_str(&output).contains("'tcsh'"),
+        "{}",
+        stderr_str(&output)
+    );
+    assert_eq!(fs::read_dir(home.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn shell_init_defines_the_wrapper_and_both_shortcuts() {
+    let home = TempDir::new().unwrap();
+    let bin_dir = Path::new(env!("CARGO_BIN_EXE_perch")).parent().unwrap();
+    let path = format!("{}:{}", bin_dir.display(), env::var("PATH").unwrap());
+    for (shell, script) in [
+        (
+            "bash",
+            r#"eval "$(perch shell init bash)"; declare -F perch br wt"#,
+        ),
+        (
+            "fish",
+            "perch shell init fish | source; functions --names | string match -r '^(perch|br|wt)$'",
+        ),
+        (
+            "zsh",
+            r#"eval "$(perch shell init zsh)"; print -l ${(k)functions[(I)(perch|br|wt)]}"#,
+        ),
+    ] {
+        // CI's runner has bash but not fish or zsh.
+        if shell != "bash" && Command::new(shell).arg("--version").output().is_err() {
+            continue;
+        }
+        let output = Command::new(shell)
+            .args(["-c", script])
+            .env("HOME", home.path())
+            .env("PATH", &path)
+            .env_remove("BASH_ENV")
+            .env_remove("PERCH_NO_SHORTCUTS")
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("ZDOTDIR")
+            .output()
+            .unwrap();
+
+        assert!(output.status.success(), "{shell}: {}", stderr_str(&output));
+        let mut defined: Vec<_> = stdout_str(&output)
+            .split_whitespace()
+            .map(str::to_string)
+            .collect();
+        defined.sort_unstable();
+        assert_eq!(defined, ["br", "perch", "wt"], "{shell}");
+    }
+}
+
+#[test]
+fn shell_install_follows_a_zdotdir_that_zshenv_sets_without_exporting() {
+    if Command::new("/bin/zsh").arg("--version").output().is_err() {
+        return;
+    }
+    let home = TempDir::new().unwrap();
+    fs::write(home.path().join(".zshenv"), "ZDOTDIR=$HOME/zsh\n").unwrap();
+
+    let output = perch_shell_install(home.path(), "/bin/zsh");
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert_eq!(
+        fs::read_to_string(home.path().join("zsh/.zshrc")).unwrap(),
+        "eval \"$(perch shell init zsh)\"\n"
+    );
+    assert!(!home.path().join(".zshrc").exists());
 }

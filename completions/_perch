@@ -22,10 +22,11 @@ _perch_offers() {
 }
 
 _perch() {
-  local -a subcommands branch_subs branch_rm_options worktree_subs worktree_options cmdline
+  local -a subcommands branch_subs branch_rm_options shell_subs shells worktree_subs worktree_options cmdline
   local pos
   subcommands=(
     'br:Check a branch out here'
+    'shell:Shell integration'
     'wt:Worktree commands'
   )
   branch_subs=(
@@ -35,6 +36,11 @@ _perch() {
     '--upstream:Also remove explicitly configured same-named upstreams'
     '--force:Skip destructive confirmations'
   )
+  shell_subs=(
+    'init:Print the shell integration script'
+    'install:Add the shell integration to your rc file'
+  )
+  shells=(bash fish zsh)
   worktree_subs=(
     'ls:List worktrees'
     'rm:Remove worktree (also deletes branch)'
@@ -145,6 +151,10 @@ _perch() {
   elif (( pos == 3 )) && [[ "$cmdline[2]" == br ]]; then
     _describe -t subverbs 'branch subverb' branch_subs
     _perch_offers branches 'branch' br
+  elif (( pos == 3 )) && [[ "$cmdline[2]" == shell ]]; then
+    _describe -t shell-commands 'shell command' shell_subs
+  elif (( pos == 4 )) && [[ "$cmdline[2]" == shell && "$cmdline[3]" == init ]]; then
+    _describe -t shells 'shell' shells
   fi
 }
 

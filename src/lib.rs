@@ -59,6 +59,9 @@ pub enum Error {
     #[error("one or more requested removals failed")]
     RemovalFailed,
 
+    #[error("can't install the shell integration: {0}")]
+    ShellInstall(String),
+
     /// A destructive action was declined because its risk could not be shown:
     /// there was no terminal to warn on or ask in, and `--force` wasn't given.
     #[error("{0}")]

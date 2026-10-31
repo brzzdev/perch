@@ -16,6 +16,7 @@ pub(crate) mod picker;
 pub(crate) mod prefetch;
 mod reclamation;
 pub(crate) mod removal;
+mod shell;
 pub mod wt;
 
 use picker::{
@@ -105,6 +106,11 @@ pub(crate) fn run_invocation(invocation: Invocation) -> AppResult<()> {
         Invocation::RemoveBranches(removal) => br::run_rm(&removal),
         Invocation::ListWorktrees => wt::run_ls(),
         Invocation::RemoveWorktrees(removal) => wt::run_rm(&removal),
+        Invocation::InitShell(shell) => {
+            print!("{}", shell.script());
+            Ok(())
+        }
+        Invocation::InstallShell => shell::run_install(),
         Invocation::Help(page) => {
             print!("{}", page.text());
             Ok(())
@@ -809,10 +815,10 @@ fn named_removal_choice(
 /// How to spell `branch` as the argument to a bare `perch`, so that telling
 /// someone to run it actually reaches the branch.
 ///
-/// A branch named after a verb is read as that verb, and `perch wt` opens the
-/// worktree picker rather than going anywhere — so those names need the `--`
-/// escape hatch. Grammar uses the same command facts for this check, invocation
-/// parsing, and completion filtering.
+/// A branch named after a command word is read as that word, and `perch wt`
+/// opens the worktree picker rather than going anywhere — so those names need
+/// the `--` escape hatch. Grammar uses the same command facts for this check,
+/// invocation parsing, and completion filtering.
 pub(crate) fn go_there_argument(branch: &str) -> String {
     let quoted = shell_quote(branch);
     if crate::grammar::needs_top_level_escape(branch) {
@@ -935,9 +941,10 @@ mod tests {
     }
 
     #[test]
-    fn a_branch_named_after_a_verb_is_escaped_past_the_dispatcher() {
+    fn a_branch_named_after_a_command_word_is_escaped_past_the_dispatcher() {
         assert_eq!(go_there_argument("br"), "-- br");
         assert_eq!(go_there_argument("wt"), "-- wt");
+        assert_eq!(go_there_argument("shell"), "-- shell");
     }
 
     #[test]

@@ -5,10 +5,11 @@ Usage: perch [<branch>]       Go to the branch, wherever it lives
                                   Use a custom worktree directory name
 
        perch .                Refresh the current branch from its remote
-       perch -- <branch>      Go to a branch named br/wt
+       perch -- <branch>      Go to a branch named br/shell/wt
        perch br rm [<branch>] Remove local branches
        perch wt ls            List worktrees
        perch wt rm [<branch>|.]
+       perch shell install    Load the shell integration from your rc
 
-With the shell integration sourced, `br` and `wt` stand in for `perch br`
+With the shell integration loaded, `br` and `wt` stand in for `perch br`
 and `perch wt`. Set PERCH_NO_SHORTCUTS to leave both names alone.

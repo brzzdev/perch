@@ -1,0 +1,7 @@
+Usage: perch shell install    Add the shell integration to your rc file
+       perch shell init <bash|fish|zsh>
+                                  Print the shell integration script
+
+install reads your shell from $SHELL and appends one line to ~/.zshrc,
+~/.bashrc or ~/.config/fish/conf.d/perch.fish. Running it again changes
+nothing.

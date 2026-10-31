@@ -128,6 +128,7 @@ end
 # Top-level: subcommands + the branches reachable without `--`.
 complete -c perch -f -n '__fish_is_nth_token 1' -a '(__perch_offers)'
 complete -c perch -f -n '__fish_is_nth_token 1' -a 'br' -d 'Check a branch out here'
+complete -c perch -f -n '__fish_is_nth_token 1' -a 'shell' -d 'Shell integration'
 complete -c perch -f -n '__fish_is_nth_token 1' -a 'wt' -d 'Worktree commands'
 
 # After a `--` that still has a branch to escape: branches, unfiltered. The `--`
@@ -142,6 +143,11 @@ complete -c perch -f -n '__perch_after_double_dash' -a '(__perch_offers --)'
 # named `rm` needs `perch br -- rm`.
 complete -c perch -f -n '__fish_seen_subcommand_from br; and __fish_is_nth_token 2; and not __perch_after_double_dash' -a 'rm' -d 'Remove local branches'
 complete -c perch -f -n '__fish_seen_subcommand_from br; and __fish_is_nth_token 2' -a '(__perch_offers br)'
+
+# After `shell`: its subverbs, then the shells `init` prints a script for.
+complete -c perch -f -n '__fish_seen_subcommand_from shell; and __fish_is_nth_token 2; and not __perch_after_double_dash' -a 'init' -d 'Print the shell integration script'
+complete -c perch -f -n '__fish_seen_subcommand_from shell; and __fish_is_nth_token 2; and not __perch_after_double_dash' -a 'install' -d 'Add the shell integration to your rc file'
+complete -c perch -f -n '__fish_seen_subcommand_from shell; and __fish_is_nth_token 3; and __fish_seen_subcommand_from init' -a 'bash fish zsh'
 
 # After `wt`: subverbs + the branches reachable without `--`. `__fish_is_nth_token`
 # looks past a `--`, so without the guard `perch wt -- ` would offer the subverbs

@@ -2,6 +2,8 @@
 pub(crate) enum Invocation {
     Complete(Completion),
     Help(HelpPage),
+    InitShell(Shell),
+    InstallShell,
     ListWorktrees,
     Navigate(Navigation),
     RemoveBranches(BranchRemoval),
@@ -89,9 +91,30 @@ impl WorktreeRemoval {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Shell {
+    Bash,
+    Fish,
+    Zsh,
+}
+
+impl Shell {
+    pub(crate) const SUPPORTED: &str = "bash, fish or zsh";
+
+    pub(crate) fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "bash" => Some(Self::Bash),
+            "fish" => Some(Self::Fish),
+            "zsh" => Some(Self::Zsh),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum HelpPage {
     Branch,
     Main,
+    Shell,
     Worktree,
 }
 
@@ -100,6 +123,7 @@ impl HelpPage {
         match self {
             Self::Branch => BRANCH_HELP,
             Self::Main => MAIN_HELP,
+            Self::Shell => SHELL_HELP,
             Self::Worktree => WORKTREE_HELP,
         }
     }
@@ -139,7 +163,7 @@ impl Escape {
 impl Position {
     fn eats(self, word: &str) -> bool {
         match self {
-            Self::Bare => parse_verb(word).is_some(),
+            Self::Bare => needs_top_level_escape(word),
             Self::Branch => parse_branch_subverb(word).is_some(),
             Self::Removal | Self::Unfiltered => false,
             Self::Worktree => parse_worktree_subverb(word).is_some(),
@@ -179,6 +203,9 @@ enum GrammarErrorKind {
     #[error("invalid `perch br rm` invocation: {0}")]
     BranchRemoval(String),
 
+    #[error("invalid `perch shell` invocation: {0}")]
+    Shell(String),
+
     #[error("`--no-switch` does not apply to `perch wt {subverb}`")]
     NoSwitchWithSubverb { subverb: String },
 
@@ -200,6 +227,10 @@ enum GrammarErrorKind {
 impl GrammarError {
     fn branch_removal(message: String) -> Self {
         Self(GrammarErrorKind::BranchRemoval(message))
+    }
+
+    fn shell(message: String) -> Self {
+        Self(GrammarErrorKind::Shell(message))
     }
 
     fn worktree_removal(message: String) -> Self {
@@ -233,6 +264,7 @@ pub(crate) fn parse(args: &[String]) -> Result<Invocation, GrammarError> {
         Some("--version" | "-V") => Ok(Invocation::Version),
         Some("--complete") => Ok(branch_completion(Position::Bare)),
         Some("--") => Ok(parse_escaped(args.get(1), Verb::Go)),
+        Some(SHELL_COMMAND) => parse_shell(&args[1..]),
         Some(word) => match parse_verb(word) {
             Some(Verb::Here) => parse_branch(&args[1..]),
             Some(Verb::Worktree) => parse_worktree(&args[1..]),
@@ -243,8 +275,33 @@ pub(crate) fn parse(args: &[String]) -> Result<Invocation, GrammarError> {
     }
 }
 
+const SHELL_COMMAND: &str = "shell";
+
 pub(crate) fn needs_top_level_escape(word: &str) -> bool {
-    parse_verb(word).is_some()
+    parse_verb(word).is_some() || word == SHELL_COMMAND
+}
+
+fn parse_shell(args: &[String]) -> Result<Invocation, GrammarError> {
+    let words: Vec<&str> = args.iter().map(String::as_str).collect();
+    match words.as_slice() {
+        ["--help" | "-h"] => Ok(Invocation::Help(HelpPage::Shell)),
+        ["init", name] => Shell::from_name(name)
+            .map(Invocation::InitShell)
+            .ok_or_else(|| {
+                GrammarError::shell(format!(
+                    "unsupported shell '{name}'; expected {}",
+                    Shell::SUPPORTED
+                ))
+            }),
+        ["init"] => Err(GrammarError::shell(format!(
+            "missing shell; expected {}",
+            Shell::SUPPORTED
+        ))),
+        ["install"] => Ok(Invocation::InstallShell),
+        _ => Err(GrammarError::shell(
+            "expected `init <shell>` or `install`".to_string(),
+        )),
+    }
 }
 
 fn parse_branch(args: &[String]) -> Result<Invocation, GrammarError> {
@@ -477,12 +534,13 @@ const MAIN_HELP: &str = concat!(
     "                                  Use a custom worktree directory name\n",
     "\n",
     "       perch .                Refresh the current branch from its remote\n",
-    "       perch -- <branch>      Go to a branch named br/wt\n",
+    "       perch -- <branch>      Go to a branch named br/shell/wt\n",
     "       perch br rm [<branch>] Remove local branches\n",
     "       perch wt ls            List worktrees\n",
     "       perch wt rm [<branch>|.]\n",
+    "       perch shell install    Load the shell integration from your rc\n",
     "\n",
-    "With the shell integration sourced, `br` and `wt` stand in for `perch br`\n",
+    "With the shell integration loaded, `br` and `wt` stand in for `perch br`\n",
     "and `perch wt`. Set PERCH_NO_SHORTCUTS to leave both names alone.\n",
 );
 
@@ -495,6 +553,16 @@ const BRANCH_HELP: &str = concat!(
     "Options:\n",
     "      --upstream  Also offer the branch's same-named upstream for removal\n",
     "      --force     Skip destructive confirmations\n",
+);
+
+const SHELL_HELP: &str = concat!(
+    "Usage: perch shell install    Add the shell integration to your rc file\n",
+    "       perch shell init <bash|fish|zsh>\n",
+    "                                  Print the shell integration script\n",
+    "\n",
+    "install reads your shell from $SHELL and appends one line to ~/.zshrc,\n",
+    "~/.bashrc or ~/.config/fish/conf.d/perch.fish. Running it again changes\n",
+    "nothing.\n",
 );
 
 const WORKTREE_HELP: &str = concat!(
@@ -728,8 +796,34 @@ mod tests {
     }
 
     #[test]
+    fn parses_shell_integration_invocations() {
+        assert_eq!(
+            parse(&args(&["shell", "init", "fish"])),
+            Ok(Invocation::InitShell(Shell::Fish))
+        );
+        assert_eq!(
+            parse(&args(&["shell", "install"])),
+            Ok(Invocation::InstallShell)
+        );
+        assert_eq!(
+            parse(&args(&["--", "shell"])),
+            Ok(navigate(Verb::Go, Some("shell")))
+        );
+    }
+
+    #[test]
+    fn shell_init_names_an_unsupported_shell() {
+        let error = parse(&args(&["shell", "init", "tcsh"])).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "invalid `perch shell` invocation: unsupported shell 'tcsh'; expected bash, fish or zsh"
+        );
+    }
+
+    #[test]
     fn completion_filters_only_words_eaten_at_its_position() {
-        let candidates = args(&["br", "wt", "ls", "rm", "list", "remove", "topic"]);
+        let candidates = args(&["br", "shell", "wt", "ls", "rm", "list", "remove", "topic"]);
         let Invocation::Complete(bare) = parse(&args(&["--complete"])).unwrap() else {
             panic!("expected completion");
         };
@@ -743,7 +837,7 @@ mod tests {
         };
         assert_eq!(
             worktree.render(candidates.iter().map(String::as_str)),
-            "br\nwt\ntopic\n"
+            "br\nshell\nwt\ntopic\n"
         );
     }
 }

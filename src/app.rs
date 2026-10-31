@@ -16,6 +16,7 @@ pub(crate) mod picker;
 pub(crate) mod prefetch;
 mod reclamation;
 pub(crate) mod removal;
+mod shell;
 pub mod wt;
 
 use picker::{
@@ -105,6 +106,11 @@ pub(crate) fn run_invocation(invocation: Invocation) -> AppResult<()> {
         Invocation::RemoveBranches(removal) => br::run_rm(&removal),
         Invocation::ListWorktrees => wt::run_ls(),
         Invocation::RemoveWorktrees(removal) => wt::run_rm(&removal),
+        Invocation::InitShell(shell) => {
+            shell::run_init(shell);
+            Ok(())
+        }
+        Invocation::InstallShell => shell::run_install(),
         Invocation::Help(page) => {
             print!("{}", page.text());
             Ok(())
@@ -938,6 +944,7 @@ mod tests {
     fn a_branch_named_after_a_verb_is_escaped_past_the_dispatcher() {
         assert_eq!(go_there_argument("br"), "-- br");
         assert_eq!(go_there_argument("wt"), "-- wt");
+        assert_eq!(go_there_argument("shell"), "-- shell");
     }
 
     #[test]

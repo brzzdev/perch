@@ -59,25 +59,6 @@ install-completions:
       echo "Unsupported shell: $SHELL" && exit 1 ;; \
   esac
 
-# Install the shell wrapper function (required for worktree cd hand-off).
-install-shell-integration:
-  #!/usr/bin/env sh
-  mkdir -p ~/.config/perch
-  case "$(basename "$SHELL")" in \
-    zsh|bash) \
-      cp shell/perch.sh ~/.config/perch/perch.sh && \
-      echo "Installed shell integration to ~/.config/perch/perch.sh" && \
-      echo "Add to your shell rc:" && \
-      echo "  source ~/.config/perch/perch.sh" ;; \
-    fish) \
-      cp shell/perch.fish ~/.config/perch/perch.fish && \
-      echo "Installed shell integration to ~/.config/perch/perch.fish" && \
-      echo "Add to ~/.config/fish/conf.d/perch.fish:" && \
-      echo "  source ~/.config/perch/perch.fish" ;; \
-    *) \
-      echo "Unsupported shell: $SHELL" && exit 1 ;; \
-  esac
-
 # Build a release binary.
 build-release:
   cargo build --release

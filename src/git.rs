@@ -1422,7 +1422,7 @@ pub(crate) fn proof_ref_tip(dir: Option<&Path>, against: &ProofRef) -> Option<St
 ///   the same files does too and it falls back to the patch route.
 /// - [`merge_adds_nothing`] asks whether merging the tip would leave the anchor
 ///   as it is. That answers a rebase-merge or a squash the anchor has since
-///   edited around, which the other two miss.
+///   edited around, which the others miss.
 ///
 /// `anchor` is a resolved commit, not a ref name, so every question is asked of
 /// the same anchor the [`Proof`] will record. Every step is a question, so a git
@@ -1583,14 +1583,14 @@ fn merge_adds_nothing(
         if config.is_empty() {
             return None;
         }
-        // Configured drivers shadow built-ins, so `merge=unset` may not be `-merge`.
+        // Any configured driver may discard, and it shadows a built-in of its name.
         let custom_drivers: HashSet<&str> = config
             .iter()
             .filter_map(|entry| config_key(entry).strip_prefix("merge.")?.rsplit_once('.'))
             .map(|(name, _)| name)
             .collect();
         let may_discard = |driver: &str| driver == "union" || custom_drivers.contains(driver);
-        // It applies to every path the attributes leave unspecified.
+        // `merge.default` applies to every path the attributes leave unspecified.
         if last_config_entry(&config, &["merge.default"])
             .is_some_and(|entry| config_value(entry).is_none_or(may_discard))
         {
@@ -1603,6 +1603,7 @@ fn merge_adds_nothing(
                 .trim(),
         )
         .join("perch-no-index");
+        // A file there would be read as the index.
         if no_index.exists() {
             return None;
         }

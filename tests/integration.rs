@@ -6811,10 +6811,7 @@ fn br_rm_refuses_a_branch_whose_merge_would_add_something() {
     let (_bare, work) = setup();
     land_two_edits(work.path(), Landing::FirstCommitOnly);
 
-    let output = perch_args(work.path(), &["br", "rm", "feature"]);
-
-    assert!(!output.status.success());
-    assert!(local_branch_exists(work.path(), "feature"));
+    assert_br_rm_refuses_feature(work.path(), "first commit only");
 }
 
 /// A conflict is an inconclusive proof, not a failure to report.
@@ -6925,20 +6922,6 @@ fn a_union_merge_attribute_proves_nothing() {
     assert_br_rm_refuses_feature(work.path(), "union");
 }
 
-/// The merge reads no attributes from the index, so `-merge` staged but missing
-/// from the worktree leaves `f.txt` to `merge.default` there.
-#[test]
-fn a_default_merge_driver_proves_nothing_under_a_staged_attribute() {
-    let (_bare, work) = setup();
-    fs::write(work.path().join(".gitattributes"), "f.txt -merge\n").unwrap();
-    git(work.path(), &["add", ".gitattributes"]);
-    unlanded_edit_under_a_keeping_driver(work.path(), "keep");
-    git(work.path(), &["config", "merge.default", "keep"]);
-    fs::remove_file(work.path().join(".gitattributes")).unwrap();
-
-    assert_br_rm_refuses_feature(work.path(), "staged -merge");
-}
-
 /// With renames on, `main`'s rename would carry the branch's edit to `c.txt`,
 /// whose attribute `check-attr` was never asked about.
 #[test]
@@ -6981,7 +6964,7 @@ fn a_criss_cross_binary_resolution_is_not_proven() {
     ] {
         git(work.path(), &["checkout", "-b", branch, from]);
         let _ = Command::new("git")
-            .args(["merge", other])
+            .args(["merge", "--no-commit", other])
             .current_dir(work.path())
             .output();
         write_bin(bytes);
@@ -6994,21 +6977,25 @@ fn a_criss_cross_binary_resolution_is_not_proven() {
     assert_br_rm_refuses_feature(work.path(), "criss-cross");
 }
 
-/// A staged root `-merge` missing from the worktree would answer `check-attr`
-/// from the index, hiding the global `keep` the merge falls through to.
+/// A `-merge` committed but missing from the worktree would answer `check-attr`
+/// from the index, which the merge never reads, so it falls through to `keep`.
 #[test]
-fn a_staged_attribute_cannot_hide_an_inherited_driver() {
-    let (_bare, work) = setup();
-    fs::write(work.path().join(".gitattributes"), "f.txt -merge\n").unwrap();
-    git(work.path(), &["add", ".gitattributes"]);
-    unlanded_edit_under_a_keeping_driver(work.path(), "keep");
-    let global = work.path().join(".git").join("global-attributes");
-    fs::write(&global, "f.txt merge=keep\n").unwrap();
-    git(
-        work.path(),
-        &["config", "core.attributesFile", global.to_str().unwrap()],
-    );
-    fs::remove_file(work.path().join(".gitattributes")).unwrap();
+fn an_attribute_missing_from_the_worktree_hides_no_driver() {
+    for fallback in ["core.attributesFile", "merge.default"] {
+        let (_bare, work) = setup();
+        fs::write(work.path().join(".gitattributes"), "f.txt -merge\n").unwrap();
+        git(work.path(), &["add", ".gitattributes"]);
+        unlanded_edit_under_a_keeping_driver(work.path(), "keep");
+        let value = if fallback == "merge.default" {
+            "keep".to_string()
+        } else {
+            let global = work.path().join(".git").join("global-attributes");
+            fs::write(&global, "f.txt merge=keep\n").unwrap();
+            global.to_str().unwrap().to_string()
+        };
+        git(work.path(), &["config", fallback, &value]);
+        fs::remove_file(work.path().join(".gitattributes")).unwrap();
 
-    assert_br_rm_refuses_feature(work.path(), "staged -merge over a global keep");
+        assert_br_rm_refuses_feature(work.path(), fallback);
+    }
 }

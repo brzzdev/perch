@@ -846,11 +846,10 @@ pub fn hook_command(event: &str) -> Option<String> {
     }
 }
 
-/// The `perch.copy` entries: paths, relative to the repository root, to clone
-/// into each new worktree.
+/// Every value of the multi-valued config `key`, empty when it's unset.
 #[must_use]
-pub(crate) fn copy_paths() -> Vec<String> {
-    run(&["config", "--get-all", "perch.copy"])
+pub(crate) fn config_values(key: &str) -> Vec<String> {
+    run(&["config", "--get-all", key])
         .map(|o| o.lines().map(String::from).collect())
         .unwrap_or_default()
 }
@@ -868,9 +867,7 @@ pub(crate) fn default_branch(remote: &str) -> Option<String> {
 /// keeping is about the sweep and nothing else, so nothing that draws a picker
 /// or removes a named branch may consult it. See ADR 0011.
 fn kept_branches(remote: &str) -> HashSet<String> {
-    let mut kept: HashSet<String> = run(&["config", "--get-all", "perch.keep"])
-        .map(|o| o.lines().map(String::from).collect())
-        .unwrap_or_default();
+    let mut kept: HashSet<String> = config_values("perch.keep").into_iter().collect();
     if let Some(default) = default_branch(remote) {
         kept.insert(default);
     }

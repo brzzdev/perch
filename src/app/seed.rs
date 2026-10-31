@@ -15,7 +15,7 @@ use crate::git;
 /// `worktree`. Every failure is a warning: the worktree is usable without its
 /// caches, only slower to build.
 pub(crate) fn seed(main: &Path, worktree: &Path) {
-    for entry in git::copy_paths() {
+    for entry in git::config_values("perch.copy") {
         if let Err(reason) = seed_one(main, worktree, &entry) {
             eprintln!("{} not copying {entry}: {reason}", warn());
         }
@@ -35,15 +35,8 @@ fn seed_one(main: &Path, worktree: &Path, entry: &str) -> Result<(), String> {
     if destination.symlink_metadata().is_ok() {
         return Err("it already exists in the new worktree".into());
     }
-    let parent = destination.parent().unwrap_or(worktree);
-    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    // A tracked symlink on the way would otherwise put the clone outside the worktree.
-    let inside = parent
-        .canonicalize()
-        .and_then(|parent| Ok(parent.starts_with(worktree.canonicalize()?)))
-        .map_err(|e| e.to_string())?;
-    if !inside {
-        return Err("its parent leads outside the worktree".into());
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
 
     let (spinner, _cursor) = spinner(format!("Cloning {entry}…"));
@@ -57,9 +50,10 @@ fn seed_one(main: &Path, worktree: &Path, entry: &str) -> Result<(), String> {
 
 /// A relative path with no `..`, so joined onto either worktree it stays inside.
 fn stays_inside(path: &Path) -> bool {
-    path.components()
-        .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
-        && path.components().any(|c| matches!(c, Component::Normal(_)))
+    path.file_name().is_some()
+        && path
+            .components()
+            .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
 }
 
 fn remove_partial(destination: &Path) {
@@ -77,24 +71,7 @@ fn reason(error: &io::Error) -> String {
     if error.kind() == io::ErrorKind::CrossesDevices {
         return "the new worktree is on another volume, which copy-on-write cannot reach".into();
     }
-    if cannot_clone(error) {
-        return "this filesystem cannot clone copy-on-write".into();
-    }
     error.to_string()
-}
-
-#[cfg(unix)]
-fn cannot_clone(error: &io::Error) -> bool {
-    // Linux has one value for ENOTSUP and EOPNOTSUPP; macOS has two.
-    error.kind() == io::ErrorKind::Unsupported
-        || error
-            .raw_os_error()
-            .is_some_and(|code| [libc::ENOTSUP, libc::EOPNOTSUPP, libc::ENOTTY].contains(&code))
-}
-
-#[cfg(not(unix))]
-fn cannot_clone(error: &io::Error) -> bool {
-    error.kind() == io::ErrorKind::Unsupported
 }
 
 /// APFS clones a whole directory tree in one call, symlinks included as links.

@@ -1,6 +1,6 @@
 # Proof of equivalence is a license
 
-> [ADR 0012](./0012-equivalence-answers-every-removal.md) adds a third route: an anchor that already reaches the branch's tip proves it, which proves an untouched branch too. Every other consequence stands.
+> [ADR 0012](./0012-equivalence-answers-every-removal.md) adds a route ahead of the others: an anchor that already reaches the branch's tip proves it, which proves an untouched branch too. Every other consequence stands.
 
 A squash-merged branch is unmerged by every test git offers: its commits are not ancestors of the
 anchor, so `git branch -d` refuses it and the picker draws `↑N` over work that already landed. The
@@ -24,7 +24,7 @@ explicit `--force`, which [ADR 0001](./0001-warned-means-forceable.md) did not a
 
 ## How it is proven
 
-Two routes, and either proves it, because work lands in two shapes and neither test sees both:
+Three routes, and any one proves it, because work lands in more shapes than one test sees (ancestry, from ADR 0012, comes before all three):
 
 - **The patch already landed.** The branch's whole diff over its merge-base is synthesised as one
   commit and handed to `git cherry`, which answers by patch id. This survives the anchor moving on
@@ -43,11 +43,26 @@ Two routes, and either proves it, because work lands in two shapes and neither t
   rename reported as its destination alone would hide the deletion of its source. Blind to how the
   work arrived, so a rebase-merge or a scattered cherry-pick answers it; broken by any later edit to
   those files, which is why it cannot stand alone. A branch that touched nothing has no paths to
-  compare and is proven by neither route. *Every* diff either route reads — the exact comparison
+  compare and is proven by none of the three. *Every* diff a route reads — the exact comparison
   included — is asked for in terms configuration cannot narrow: submodules unignored, no textconv,
   no external driver. A proof read from a diff the repository chose to shrink is a branch deleted
   for work the anchor never took, and an "exact" comparison of what a driver renders is not exact
   at all.
+- **Merging would add nothing.** `git merge-tree --write-tree` merges the tip into the anchor without
+  touching a worktree. If that merge is clean and its tree is exactly the anchor's, the branch holds
+  nothing a merge would keep, so deleting it loses nothing. This answers the shapes the other two
+  routes miss: a rebase-merge, or a squash, that the anchor has since edited around in the same files.
+  It is tried after them, never instead of them. A branch the anchor took and then partly reverted is
+  proven only by the patch route, because merging it again would bring the reverted half back. A merge
+  driver can make a merge add nothing by throwing away the branch's side: an `ours`-style driver, or
+  `union` keeping a line the branch deleted. So a path the branch touched whose `merge` attribute
+  names a driver, or a `merge.default` that names one for every path, proves nothing on this route.
+  `-merge` selects the built-in binary driver, which conflicts rather than picking a side, so it is
+  allowed. Rename detection is off for the simulation so that every content merge happens at a path
+  the branch touched, which is where the attributes were checked. Renormalisation is off too, so a
+  branch whose change was only line endings cannot merge away. A conflict, any other failure, or a git
+  older than 2.38 (which has no `--write-tree`) is an inconclusive proof. Like the other routes, this
+  one asks about the same pair of resolved commits the proof records.
 
 ## Consequences
 

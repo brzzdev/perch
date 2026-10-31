@@ -1408,6 +1408,9 @@ pub(crate) fn proof_ref_tip(dir: Option<&Path>, against: &ProofRef) -> Option<St
 ///   identically in the anchor. That is blind to how the work got there, so a
 ///   rebase-merge or a scattered cherry-pick answers it, but any later edit to
 ///   the same files does too and it falls back to the patch route.
+/// - [`merge_adds_nothing`] asks whether merging the tip would leave the anchor
+///   as it is. That answers a rebase-merge or a squash the anchor has since
+///   edited around, which the other two miss.
 ///
 /// `anchor` is a resolved commit, not a ref name, so every question is asked of
 /// the same anchor the [`Proof`] will record. Every step is a question, so a git
@@ -1422,7 +1425,11 @@ fn equivalent_to(dir: Option<&Path>, anchor: &str, tip: &str) -> bool {
     else {
         return false;
     };
-    patch_landed(dir, anchor, tip, &base) || content_present(dir, anchor, tip, &base)
+    patch_landed(dir, anchor, tip, &base)
+        || touched_paths(dir, &base, tip).is_some_and(|touched| {
+            content_present(dir, anchor, tip, &touched)
+                || merge_adds_nothing(dir, anchor, tip, &touched)
+        })
 }
 
 /// Whether the anchor already carries the branch's patch.
@@ -1503,12 +1510,11 @@ fn verbatim_patch_id(dir: Option<&Path>, command: &str, rest: &[&str]) -> Option
 /// shrunken diff is a branch deleted for work the anchor never took.
 const UNSHRINKABLE: [&str; 3] = ["--ignore-submodules=none", "--no-textconv", "--no-ext-diff"];
 
-/// Whether every path the branch touched since the merge-base now reads
-/// byte-identically in the anchor. A branch that touched nothing proves nothing
-/// — the whole-tree comparison a missing pathspec would run is exactly the
-/// "trivially equivalent" answer ADR 0005 refuses, so an empty list is a `false`
-/// and never a `git diff` without paths.
-fn content_present(dir: Option<&Path>, anchor: &str, tip: &str, base: &str) -> bool {
+/// Every path the branch touched since the merge-base, or `None` where that
+/// can't be read faithfully. A branch that touched nothing proves nothing — the
+/// whole-tree comparison a missing pathspec would run is exactly the "trivially
+/// equivalent" answer ADR 0005 refuses, so an empty list is a `None` too.
+fn touched_paths(dir: Option<&Path>, base: &str, tip: &str) -> Option<Vec<String>> {
     // `-z` because git otherwise quotes paths that need it, and a quoted path is
     // not the path. `--no-renames` because a rename is reported as its
     // destination alone, which would drop the source — a deletion the branch
@@ -1517,20 +1523,25 @@ fn content_present(dir: Option<&Path>, anchor: &str, tip: &str, base: &str) -> b
     let mut listing_args = vec!["diff"];
     listing_args.extend(UNSHRINKABLE);
     listing_args.extend(["--name-only", "--no-renames", "-z", base, tip]);
-    let Ok(listing) = run_in(dir, &listing_args) else {
-        return false;
-    };
+    let listing = run_in(dir, &listing_args).ok()?;
     // A path perch cannot read is a path it cannot compare: `run_in` decodes
     // lossily, and a mangled path matches nothing as a pathspec — which `git
     // diff --quiet` reports as no difference, proving the branch on an empty
     // comparison. Refuse the whole answer rather than a silent subset.
     if listing.contains('\u{fffd}') {
-        return false;
+        return None;
     }
-    let touched: Vec<&str> = listing.split('\0').filter(|p| !p.is_empty()).collect();
-    if touched.is_empty() {
-        return false;
-    }
+    let touched: Vec<String> = listing
+        .split('\0')
+        .filter(|p| !p.is_empty())
+        .map(str::to_string)
+        .collect();
+    (!touched.is_empty()).then_some(touched)
+}
+
+/// Whether every path the branch touched now reads byte-identically in the
+/// anchor.
+fn content_present(dir: Option<&Path>, anchor: &str, tip: &str, touched: &[String]) -> bool {
     // `--literal-pathspecs` because these are filenames, not patterns, and `--`
     // does not disable pathspec magic: a file literally named `:(exclude)x`
     // would otherwise cancel the comparison of `x` and prove the branch on what
@@ -1538,10 +1549,61 @@ fn content_present(dir: Option<&Path>, anchor: &str, tip: &str, base: &str) -> b
     let mut args = vec!["--literal-pathspecs", "diff"];
     args.extend(UNSHRINKABLE);
     args.extend(["--quiet", tip, anchor, "--"]);
-    args.extend(touched);
+    args.extend(touched.iter().map(String::as_str));
     // A difference exits 1, which `run_in` reports as an error — and a branch
     // whose files read differently is exactly the branch this cannot prove.
     run_in(dir, &args).is_ok()
+}
+
+/// Whether merging `tip` into the anchor would leave the anchor's tree exactly
+/// as it is, so deleting the branch loses nothing a merge would have kept.
+///
+/// A merge driver can make a merge add nothing by discarding the branch's side
+/// — `merge=ours`-style drivers, `union` dropping a deletion — so a touched path
+/// whose `merge` attribute names a driver, or a `merge.default` naming one for
+/// every path, proves nothing. `-merge` is safe: it selects the built-in binary
+/// driver, which conflicts rather than choose a side. Rename detection is off
+/// so that every content merge happens at a path the branch touched, where the
+/// attribute check has looked; renormalisation is off so that a branch whose
+/// change was only line endings cannot merge away. A conflict exits 1, and a
+/// git before 2.38 has no `--write-tree`; either proves nothing.
+fn merge_adds_nothing(dir: Option<&Path>, anchor: &str, tip: &str, touched: &[String]) -> bool {
+    let merges = || {
+        let default_driver =
+            run_in(dir, &["config", "--default", "", "--get", "merge.default"]).ok()?;
+        if !default_driver.trim().is_empty() {
+            return None;
+        }
+        let mut attr_args = vec!["check-attr", "-z", "merge", "--"];
+        attr_args.extend(touched.iter().map(String::as_str));
+        let attrs = run_in(dir, &attr_args).ok()?;
+        // `-z` output is `<path> NUL merge NUL <value> NUL` per path.
+        if !attrs
+            .split('\0')
+            .skip(2)
+            .step_by(3)
+            .all(|value| matches!(value, "unspecified" | "unset"))
+        {
+            return None;
+        }
+        let merged = run_in(
+            dir,
+            &[
+                "-c",
+                "merge.renames=false",
+                "-c",
+                "merge.renormalize=false",
+                "merge-tree",
+                "--write-tree",
+                anchor,
+                tip,
+            ],
+        )
+        .ok()?;
+        let anchor_tree = rev_parse(dir, &format!("{anchor}^{{tree}}")).ok()?;
+        Some(merged.lines().next()? == anchor_tree)
+    };
+    merges().unwrap_or(false)
 }
 
 /// What `refname` points at, or `None` where it doesn't resolve. A ref that is

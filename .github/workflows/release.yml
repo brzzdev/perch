@@ -10,6 +10,7 @@ on:
         required: true
 
 permissions:
+  actions: write
   contents: write
 
 env:
@@ -71,6 +72,8 @@ jobs:
       # anything goes public; --generate-notes only seeds a starting point.
       # A rebuild of an existing tag replaces its assets instead of failing,
       # and --verify-tag keeps a mistyped dispatch input from inventing a tag.
+      # Rebuilt archives carry new checksums, and asset uploads fire no release
+      # event, so a rebuild of a published release re-points the formula itself.
       - name: Draft the release
         env:
           GH_REPO: ${{ github.repository }}
@@ -78,6 +81,9 @@ jobs:
         run: |
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" artifacts/* --clobber
+            if [ "$(gh release view "$TAG" --json isDraft --jq .isDraft)" = false ]; then
+              gh workflow run homebrew.yml -f tag="$TAG"
+            fi
           else
             gh release create "$TAG" artifacts/* \
               --title "$TAG" \

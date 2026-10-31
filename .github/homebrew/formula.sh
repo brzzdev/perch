@@ -4,7 +4,8 @@ set -eu
 
 version="$1"
 sums="$2"
-release="https://github.com/brzzdev/perch/releases/download/v$version"
+repo="https://github.com/brzzdev/perch"
+release="$repo/releases/download/v$version"
 
 archive() {
   file="perch-$1.tar.gz"
@@ -26,7 +27,7 @@ linux_intel="$(archive x86_64-unknown-linux-musl)"
 cat <<FORMULA
 class Perch < Formula
   desc "Interactive Git branch and worktree switcher with merged-branch cleanup"
-  homepage "https://github.com/brzzdev/perch"
+  homepage "$repo"
   license "MIT"
 
   on_macos do

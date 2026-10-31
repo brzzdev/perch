@@ -1,10 +1,11 @@
 name: Homebrew
 
 # Releases are drafted and published by hand, and a draft's archives can't be
-# downloaded, so the formula follows publication rather than the tag.
+# downloaded, so the formula follows publication rather than the tag. `released`
+# also covers a prerelease promoted later, and never fires for a prerelease.
 on:
   release:
-    types: [published]
+    types: [released]
   workflow_dispatch:
     inputs:
       tag:
@@ -21,7 +22,6 @@ env:
 
 jobs:
   formula:
-    if: ${{ !github.event.release.prerelease }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -36,6 +36,14 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # Only the latest release may own the formula, so a dispatch for an
+          # old tag or a prerelease, or a late publish of an older line, can't
+          # downgrade it.
+          latest="$(gh release view --json tagName --jq .tagName)"
+          if [ "$TAG" != "$latest" ]; then
+            echo "error: $TAG is not the latest release ($latest)" >&2
+            exit 1
+          fi
           gh release download "$TAG" --pattern SHA256SUMS
           mkdir -p tap/Formula
           .github/homebrew/formula.sh "${TAG#v}" SHA256SUMS > tap/Formula/perch.rb

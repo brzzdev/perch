@@ -9,7 +9,7 @@ Usage: perch [<branch>]       Go to the branch, wherever it lives
        perch br rm [<branch>] Remove local branches
        perch wt ls            List worktrees
        perch wt rm [<branch>|.]
-       perch shell install    Load the shell integration from your rc
+       perch shell install    Add the shell integration to your rc file
 
 With the shell integration loaded, `br` and `wt` stand in for `perch br`
 and `perch wt`. Set PERCH_NO_SHORTCUTS to leave both names alone.

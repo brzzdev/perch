@@ -203,9 +203,6 @@ enum GrammarErrorKind {
     #[error("invalid `perch br rm` invocation: {0}")]
     BranchRemoval(String),
 
-    #[error("invalid `perch shell` invocation: {0}")]
-    Shell(String),
-
     #[error("`--no-switch` does not apply to `perch wt {subverb}`")]
     NoSwitchWithSubverb { subverb: String },
 
@@ -216,6 +213,9 @@ enum GrammarErrorKind {
         word: &'static str,
         keep: &'static str,
     },
+
+    #[error("invalid `perch shell` invocation: {0}")]
+    Shell(String),
 
     #[error("invalid `perch wt rm` invocation: {0}")]
     WorktreeRemoval(String),
@@ -264,10 +264,10 @@ pub(crate) fn parse(args: &[String]) -> Result<Invocation, GrammarError> {
         Some("--version" | "-V") => Ok(Invocation::Version),
         Some("--complete") => Ok(branch_completion(Position::Bare)),
         Some("--") => Ok(parse_escaped(args.get(1), Verb::Go)),
-        Some(word) => match parse_command(word) {
-            Some(Command::Branch) => parse_branch(&args[1..]),
-            Some(Command::Shell) => parse_shell(&args[1..]),
-            Some(Command::Worktree) => parse_worktree(&args[1..]),
+        Some(word) => match parse_command_word(word) {
+            Some(CommandWord::Branch) => parse_branch(&args[1..]),
+            Some(CommandWord::Shell) => parse_shell(&args[1..]),
+            Some(CommandWord::Worktree) => parse_worktree(&args[1..]),
             None => Ok(navigate(Verb::Go, Some(word))),
         },
         None => Ok(navigate(Verb::Go, None)),
@@ -275,7 +275,7 @@ pub(crate) fn parse(args: &[String]) -> Result<Invocation, GrammarError> {
 }
 
 pub(crate) fn needs_top_level_escape(word: &str) -> bool {
-    parse_command(word).is_some()
+    parse_command_word(word).is_some()
 }
 
 fn parse_shell(args: &[String]) -> Result<Invocation, GrammarError> {
@@ -493,17 +493,17 @@ fn branch_completion(position: Position) -> Invocation {
 }
 
 #[derive(Clone, Copy)]
-enum Command {
+enum CommandWord {
     Branch,
     Shell,
     Worktree,
 }
 
-fn parse_command(word: &str) -> Option<Command> {
+fn parse_command_word(word: &str) -> Option<CommandWord> {
     match word {
-        "br" => Some(Command::Branch),
-        "shell" => Some(Command::Shell),
-        "wt" => Some(Command::Worktree),
+        "br" => Some(CommandWord::Branch),
+        "shell" => Some(CommandWord::Shell),
+        "wt" => Some(CommandWord::Worktree),
         _ => None,
     }
 }
@@ -534,7 +534,7 @@ const MAIN_HELP: &str = concat!(
     "       perch br rm [<branch>] Remove local branches\n",
     "       perch wt ls            List worktrees\n",
     "       perch wt rm [<branch>|.]\n",
-    "       perch shell install    Load the shell integration from your rc\n",
+    "       perch shell install    Add the shell integration to your rc file\n",
     "\n",
     "With the shell integration loaded, `br` and `wt` stand in for `perch br`\n",
     "and `perch wt`. Set PERCH_NO_SHORTCUTS to leave both names alone.\n",
@@ -552,13 +552,13 @@ const BRANCH_HELP: &str = concat!(
 );
 
 const SHELL_HELP: &str = concat!(
-    "Usage: perch shell install    Add the shell integration to your rc file\n",
-    "       perch shell init <bash|fish|zsh>\n",
+    "Usage: perch shell init <bash|fish|zsh>\n",
     "                                  Print the shell integration script\n",
+    "       perch shell install    Add the shell integration to your rc file\n",
     "\n",
-    "install reads your shell from $SHELL and appends one line to ~/.zshrc,\n",
-    "~/.bashrc or ~/.config/fish/conf.d/perch.fish. Running it again changes\n",
-    "nothing.\n",
+    "install reads your shell from $SHELL and appends one line to ~/.zshrc\n",
+    "(under $ZDOTDIR if set), ~/.bashrc, or ~/.config/fish/conf.d/perch.fish\n",
+    "(under $XDG_CONFIG_HOME if set). Running it again changes nothing.\n",
 );
 
 const WORKTREE_HELP: &str = concat!(

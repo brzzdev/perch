@@ -6615,6 +6615,7 @@ fn shell_install_names_an_unsupported_shell() {
 
 #[test]
 fn shell_init_defines_the_wrapper_and_both_shortcuts() {
+    let home = TempDir::new().unwrap();
     let bin_dir = Path::new(env!("CARGO_BIN_EXE_perch")).parent().unwrap();
     let path = format!("{}:{}", bin_dir.display(), env::var("PATH").unwrap());
     for (shell, script) in [
@@ -6636,8 +6637,12 @@ fn shell_init_defines_the_wrapper_and_both_shortcuts() {
         }
         let output = Command::new(shell)
             .args(["-c", script])
+            .env("HOME", home.path())
             .env("PATH", &path)
+            .env_remove("BASH_ENV")
             .env_remove("PERCH_NO_SHORTCUTS")
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("ZDOTDIR")
             .output()
             .unwrap();
 

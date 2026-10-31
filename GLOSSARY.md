@@ -88,6 +88,10 @@ _Avoid_: Cleanup (reserved for the stale-branch prompt), Removal, deletion
 
 ### Targets
 
+**Command word**:
+A word the top level reads before it would read a branch name: the *Verb*s `br` and `wt`, and `shell`, which sets up the shell integration and goes nowhere. A branch named after one is reached with `perch -- <name>`. See [ADR 0014](./docs/adr/0014-shell-is-a-command-word.md).
+_Avoid_: Subcommand, verb (reserved for the navigation intents)
+
 **Verb**:
 Which of three navigation intents a command carries: bare `perch` goes to the branch wherever it lives, `br` checks it out in the worktree you're in, `wt` gives it one of its own. The verb decides what happens to a *Held* branch and nothing else, since git leaves exactly one move legal in every other case. That holds in the *Catalogue* too: all three verbs draw the same list, and the only row any of them differs over is a held one. See [ADR 0007](./docs/adr/0007-three-verbs-one-per-intent.md) and [ADR 0008](./docs/adr/0008-one-list-whichever-verb-is-picking.md).
 _Avoid_: Mode, action
@@ -105,7 +109,7 @@ The final directory component reserved for a branch's new worktree. It normally 
 _Avoid_: Worktree name, branch name, path, folder
 
 **Subverb**:
-A word a *Verb* reads before it reads a branch name. `br` reads `rm`; `wt` reads `ls` and `rm`, plus the retired `list` and `remove`, which are refused rather than taken for branches. Collision is positional: `--` is needed after `br` for a colliding branch, after `wt` for either a colliding branch or a *Worktree directory name* that looks like a subverb or option, and at the top level for a branch matching a *Verb*. Everywhere else the bare name reaches the branch, so `perch list`, `perch br list` and `perch br wt` all work as written.
+A word a *Verb* reads before it reads a branch name. `br` reads `rm`; `wt` reads `ls` and `rm`, plus the retired `list` and `remove`, which are refused rather than taken for branches. Collision is positional: `--` is needed after `br` for a colliding branch, after `wt` for either a colliding branch or a *Worktree directory name* that looks like a subverb or option, and at the top level for a branch matching a *Command word*. Everywhere else the bare name reaches the branch, so `perch list`, `perch br list` and `perch br wt` all work as written.
 _Avoid_: Subcommand (reserved for the *Verb*), flag, option
 
 **Grammar**:

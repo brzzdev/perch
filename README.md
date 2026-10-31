@@ -197,6 +197,12 @@ This reads your shell from `$SHELL` and adds one line to its startup file, then 
 
 `perch shell init <shell>` prints the wrapper script, which is built into the binary, so the wrapper is always the one that matches the `perch` you have. To set it up by hand, add the line from the table yourself.
 
+Upgrading from a copied wrapper? Remove the old `source ~/.config/perch/perch.sh` (or `perch.fish`) line and the `~/.config/perch/` directory, so only the built-in wrapper loads.
+
+On macOS, Terminal and iTerm2 start bash as a login shell, which reads `~/.bash_profile` and not `~/.bashrc`. Make sure your `~/.bash_profile` sources `~/.bashrc`.
+
+fish reads `conf.d` before `config.fish`, so `perch` has to be on your `PATH` by then. `fish_add_path ~/.local/bin` (or Homebrew's `brew shellenv` in an earlier `conf.d` file) does that; a `set -gx PATH` in `config.fish` comes too late.
+
 On zsh the line has to come **after** `compinit`, which is why `perch shell install` appends it to the end of the file. The wrapper registers the `br` and `wt` completions as it defines those functions, and `compinit` has to have run for it to do so — load it earlier and the two shortcuts work but don't complete.
 
 Without the wrapper, `perch wt foo` still creates / finds the worktree and prints its path — you'd just `cd` there manually.

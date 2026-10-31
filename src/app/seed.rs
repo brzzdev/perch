@@ -10,26 +10,40 @@ use crate::git;
 /// Clones each `perch.copy` path that exists in `main` into the same place in
 /// `worktree`, warning about each one it can't.
 pub(crate) fn seed(main: &Path, worktree: &Path) {
+    let mut seeded: Vec<PathBuf> = Vec::new();
     for entry in git::config_values("perch.copy") {
-        if let Err(reason) = seed_one(main, worktree, &entry) {
-            eprintln!("{} not copying {entry}: {reason}", warn());
+        let Some(relative) = inside_path(&entry) else {
+            eprintln!(
+                "{} not copying {entry}: it is not a path inside the repository",
+                warn()
+            );
+            continue;
+        };
+        // Config scopes repeat entries, and a nested one arrived with its parent.
+        if seeded.iter().any(|done| relative.starts_with(done)) {
+            continue;
+        }
+        match seed_one(main, worktree, &relative) {
+            Ok(()) => seeded.push(relative),
+            Err(reason) => eprintln!("{} not copying {entry}: {reason}", warn()),
         }
     }
 }
 
-fn seed_one(main: &Path, worktree: &Path, entry: &str) -> Result<(), String> {
-    let relative = inside_path(entry).ok_or("it is not a path inside the repository")?;
-    let source = main.join(&relative);
-    if source.symlink_metadata().is_err() {
-        return Ok(());
+fn seed_one(main: &Path, worktree: &Path, relative: &Path) -> Result<(), String> {
+    let source = main.join(relative);
+    match source.symlink_metadata() {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.to_string()),
+        Ok(_) => {}
     }
-    let created = first_missing(worktree, &relative)?;
-    let destination = worktree.join(&relative);
+    let created = first_missing(worktree, relative)?;
+    let destination = worktree.join(relative);
     if let Some(parent) = destination.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
 
-    let (spinner, _cursor) = spinner(format!("Cloning {entry}…"));
+    let (spinner, _cursor) = spinner(format!("Cloning {}…", relative.display()));
     let result = clone_tree(&source, &destination);
     spinner.finish_and_clear();
     result.map_err(|error| {
@@ -91,7 +105,8 @@ fn reason(error: &io::Error) -> String {
 }
 
 /// APFS clones a whole directory tree in one call, symlinks included as links.
-/// clonefile(2) steers directories to copyfile(3), which clones file by file.
+/// clonefile(2) points directories at copyfile(3) instead, but that clones file
+/// by file, which on a `target/` is the slow path this exists to avoid.
 #[cfg(target_os = "macos")]
 fn clone_tree(source: &Path, destination: &Path) -> io::Result<()> {
     use std::ffi::CString;
@@ -116,7 +131,9 @@ fn clone_tree(source: &Path, destination: &Path) -> io::Result<()> {
 fn clone_tree(source: &Path, destination: &Path) -> io::Result<()> {
     use std::fs::{self, File, OpenOptions};
     use std::os::fd::AsRawFd;
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, symlink};
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt, symlink};
+
+    const OWNER_RWX: u32 = 0o700;
 
     let metadata = source.symlink_metadata()?;
     let file_type = metadata.file_type();
@@ -124,8 +141,11 @@ fn clone_tree(source: &Path, destination: &Path) -> io::Result<()> {
         return symlink(fs::read_link(source)?, destination);
     }
     if file_type.is_dir() {
-        // Left writable, so a failure part-way can still remove what was cloned.
-        fs::create_dir(destination)?;
+        // Owner rwx on top of the source's mode, so a failure part-way can still
+        // remove what was cloned.
+        fs::DirBuilder::new()
+            .mode(metadata.permissions().mode() | OWNER_RWX)
+            .create(destination)?;
         for entry in fs::read_dir(source)? {
             let entry = entry?;
             clone_tree(&entry.path(), &destination.join(entry.file_name()))?;

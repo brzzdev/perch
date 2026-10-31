@@ -6466,7 +6466,7 @@ fn configure_cache_to_copy(work: &Path) {
     fs::create_dir(&target).unwrap();
     fs::write(target.join("dep.rlib"), "built\n").unwrap();
     std::os::unix::fs::symlink("dep.rlib", target.join("link")).unwrap();
-    for entry in ["target/", "../escape", "missing", "file.txt"] {
+    for entry in ["../escape", "file.txt", "missing", "target/"] {
         git(work, &["config", "--add", "perch.copy", entry]);
     }
 }

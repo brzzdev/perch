@@ -392,15 +392,9 @@ pub fn submodule_fetch_switched_off(dir: &Path) -> bool {
 /// the value where it has one. A key with no value is true, and `on-demand` is
 /// no boolean at all.
 fn last_recursion_is_off(entries: &[String]) -> bool {
-    let Some(last) = entries.iter().rfind(|entry| {
-        matches!(
-            config_key(entry),
-            "fetch.recursesubmodules" | "submodule.recurse"
-        )
-    }) else {
-        return false;
-    };
-    let Some((_, value)) = last.split_once('\n') else {
+    let Some(value) = last_config_entry(entries, &["fetch.recursesubmodules", "submodule.recurse"])
+        .and_then(config_value)
+    else {
         return false;
     };
     matches!(
@@ -412,6 +406,19 @@ fn last_recursion_is_off(entries: &[String]) -> bool {
 /// The key of a [`config_entries`] entry.
 fn config_key(entry: &str) -> &str {
     entry.split_once('\n').map_or(entry, |(key, _)| key)
+}
+
+/// The value of a [`config_entries`] entry, `None` for a key set without one.
+fn config_value(entry: &str) -> Option<&str> {
+    entry.split_once('\n').map(|(_, value)| value)
+}
+
+/// The last of `entries` that sets any of `keys`, which is the one git obeys.
+fn last_config_entry<'a>(entries: &'a [String], keys: &[&str]) -> Option<&'a str> {
+    entries
+        .iter()
+        .rfind(|entry| keys.contains(&config_key(entry)))
+        .map(String::as_str)
 }
 
 /// The URL `remote` fetches from, as resolved in `dir`. The same remote name
@@ -1433,7 +1440,7 @@ fn equivalent_to(dir: Option<&Path>, anchor: &str, tip: &str) -> bool {
     patch_landed(dir, anchor, tip, &base)
         || touched_paths(dir, &base, tip).is_some_and(|touched| {
             content_present(dir, anchor, tip, &touched)
-                || merge_adds_nothing(dir, anchor, tip, &touched)
+                || merge_adds_nothing(dir, anchor, tip, &base, &touched)
         })
 }
 
@@ -1563,44 +1570,45 @@ fn content_present(dir: Option<&Path>, anchor: &str, tip: &str, touched: &[Strin
 /// Whether merging `tip` into the anchor would leave the anchor's tree exactly
 /// as it is. A merge driver could get there by discarding the branch's side, so
 /// one that may run on any touched path proves nothing; ADR 0005 has the limits.
-fn merge_adds_nothing(dir: Option<&Path>, anchor: &str, tip: &str, touched: &[String]) -> bool {
+fn merge_adds_nothing(
+    dir: Option<&Path>,
+    anchor: &str,
+    tip: &str,
+    base: &str,
+    touched: &[String],
+) -> bool {
     let adds_nothing = || {
         let config = config_entries(dir);
         // A repository's config is never empty, so this is a failed read.
         if config.is_empty() {
             return None;
         }
-        // Git looks a driver name up among `merge.<name>.*` before its built-ins,
-        // and `check-attr` prints a literal `merge=unset` exactly as it prints
-        // `-merge`, so every name is judged by what it could select.
+        // Configured drivers shadow built-ins, so `merge=unset` may not be `-merge`.
         let custom_drivers: HashSet<&str> = config
             .iter()
             .filter_map(|entry| config_key(entry).strip_prefix("merge.")?.rsplit_once('.'))
             .map(|(name, _)| name)
             .collect();
-        let discards = |driver: &str| driver == "union" || custom_drivers.contains(driver);
-        let default_discards = config
-            .iter()
-            .rfind(|entry| config_key(entry) == "merge.default")
-            .is_some_and(|entry| {
-                entry
-                    .split_once('\n')
-                    .is_none_or(|(_, name)| discards(name))
-            });
+        let may_discard = |driver: &str| driver == "union" || custom_drivers.contains(driver);
+        // The merge reads no attributes from the index, so a path `check-attr`
+        // answers for there is unspecified to it and takes the default driver.
+        if last_config_entry(&config, &["merge.default"])
+            .is_some_and(|entry| config_value(entry).is_none_or(may_discard))
+        {
+            return None;
+        }
         let mut attr_args = vec!["check-attr", "-z", "merge", "--"];
         attr_args.extend(touched.iter().map(String::as_str));
         let attrs = run_in(dir, &attr_args).ok()?;
         // `-z` output is `<path> NUL merge NUL <value> NUL` per path.
-        if attrs
-            .split('\0')
-            .skip(2)
-            .step_by(3)
-            .any(|value| discards(value) || (value == "unspecified" && default_discards))
-        {
+        if attrs.split('\0').skip(2).step_by(3).any(may_discard) {
             return None;
         }
         // Renames off keeps every content merge at a path the attributes were
-        // checked for; renormalising could merge a line-ending change away.
+        // checked for; renormalising could merge a line-ending change away. The
+        // base is the one `touched` was read from, not a virtual one built from
+        // criss-cross bases, where a binary file's conflict resolves silently.
+        let merge_base = format!("--merge-base={base}");
         let merged = run_in(
             dir,
             &[
@@ -1610,6 +1618,7 @@ fn merge_adds_nothing(dir: Option<&Path>, anchor: &str, tip: &str, touched: &[St
                 "merge.renormalize=false",
                 "merge-tree",
                 "--write-tree",
+                &merge_base,
                 anchor,
                 tip,
             ],

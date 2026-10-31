@@ -24,7 +24,8 @@ explicit `--force`, which [ADR 0001](./0001-warned-means-forceable.md) did not a
 
 ## How it is proven
 
-Three routes, and any one proves it, because work lands in more shapes than one test sees:
+Three routes besides that one, and any one proves it, because work lands in more shapes than one test
+sees:
 
 - **The patch already landed.** The branch's whole diff over its merge-base is synthesised as one
   commit and handed to `git cherry`, which answers by patch id. This survives the anchor moving on
@@ -43,7 +44,7 @@ Three routes, and any one proves it, because work lands in more shapes than one 
   rename reported as its destination alone would hide the deletion of its source. Blind to how the
   work arrived, so a rebase-merge or a scattered cherry-pick answers it; broken by any later edit to
   those files, which is why it cannot stand alone. A branch that touched nothing has no paths to
-  compare and is proven by none of the three. *Every* diff a route reads — the exact comparison
+  compare and is proven by none of these three. *Every* diff a route reads — the exact comparison
   included — is asked for in terms configuration cannot narrow: submodules unignored, no textconv,
   no external driver. A proof read from a diff the repository chose to shrink is a branch deleted
   for work the anchor never took, and an "exact" comparison of what a driver renders is not exact
@@ -58,14 +59,19 @@ Three routes, and any one proves it, because work lands in more shapes than one 
   again would bring the reverted half back. A merge driver can make a merge add nothing by throwing
   away the branch's side: an `ours`-style driver, or `union` keeping a line the branch deleted. So a
   path the branch touched proves nothing on this route where its `merge` attribute could select
-  `union` or any driver the config defines, and an unattributed path likewise where `merge.default`
+  `union` or any driver the config defines, and no branch is proven by it where `merge.default`
   could. The attribute's value is judged by name, because git looks names up among the configured
   drivers before its built-ins, and `check-attr` prints a literal `merge=unset` exactly as it prints
-  `-merge`. Rename detection is off for the simulation so that every content merge happens at a path
+  `-merge`. The default is refused outright rather than per path, because the simulated merge reads
+  no attributes from the index: a `.gitattributes` staged but missing from the worktree is seen by
+  `check-attr` and not by the merge, which gives that path the default driver. Rename detection is off for the simulation so that every content merge happens at a path
   the branch touched, which is where the attributes were checked. Renormalisation is off too, so a
-  branch whose change was only line endings cannot merge away. A conflict, any other failure, or a
-  git older than 2.38 (which has no `--write-tree`) is an inconclusive proof. Like the other routes,
-  this one asks about the same pair of resolved commits the proof records.
+  branch whose change was only line endings cannot merge away. The merge is pinned to the one
+  merge-base the touched paths were read from: left to itself, a criss-cross history merges its
+  bases into a virtual one, and there a binary file's conflict resolves to the older side without a
+  word. A conflict, any other failure, or a git older than 2.40 (which has no `--merge-base` for
+  `merge-tree`) is an inconclusive proof. Like the other routes, this one asks about the same pair of
+  resolved commits the proof records.
 
 ## Consequences
 

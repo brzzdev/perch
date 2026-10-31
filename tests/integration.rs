@@ -6917,3 +6917,74 @@ fn a_union_merge_attribute_proves_nothing() {
 
     assert_br_rm_refuses_feature(work.path(), "union");
 }
+
+/// The merge reads no attributes from the index, so `-merge` staged but missing
+/// from the worktree leaves `f.txt` to `merge.default` there.
+#[test]
+fn a_default_merge_driver_proves_nothing_under_a_staged_attribute() {
+    let (_bare, work) = setup();
+    fs::write(work.path().join(".gitattributes"), "f.txt -merge\n").unwrap();
+    git(work.path(), &["add", ".gitattributes"]);
+    unlanded_edit_under_a_keeping_driver(work.path(), "keep");
+    git(work.path(), &["config", "merge.default", "keep"]);
+    fs::remove_file(work.path().join(".gitattributes")).unwrap();
+
+    assert_br_rm_refuses_feature(work.path(), "staged -merge");
+}
+
+/// With renames on, `main`'s rename would carry the branch's edit to `c.txt`,
+/// whose attribute `check-attr` was never asked about.
+#[test]
+fn a_driver_on_a_path_the_anchor_renamed_proves_nothing() {
+    let (_bare, work) = setup();
+    let lines: String = (1..=20).map(|n| n.to_string() + "\n").collect();
+    fs::write(work.path().join("f.txt"), lines).unwrap();
+    git(work.path(), &["add", "f.txt"]);
+    git(work.path(), &["commit", "-m", "twenty lines"]);
+    git(work.path(), &["checkout", "-b", "feature"]);
+    edit_line(work.path(), 5, "5b");
+    git(work.path(), &["commit", "-am", "edit five"]);
+    git(work.path(), &["checkout", "main"]);
+    edit_line(work.path(), 15, "15m");
+    git(work.path(), &["mv", "f.txt", "c.txt"]);
+    git(work.path(), &["commit", "-am", "rename and edit fifteen"]);
+    git(work.path(), &["push", "origin", "main"]);
+    git(work.path(), &["config", "merge.keep.driver", "true"]);
+    fs::write(work.path().join(".gitattributes"), "c.txt merge=keep\n").unwrap();
+
+    assert_br_rm_refuses_feature(work.path(), "renamed");
+}
+
+/// Two merge bases: left to merge them itself, `merge-tree` builds a virtual
+/// base in which the binary conflict resolves to the root's `X0` unremarked, and
+/// `feature`'s own resolution, also `X0`, then reads as no change at all.
+#[test]
+fn a_criss_cross_binary_resolution_is_not_proven() {
+    let (_bare, work) = setup();
+    let write_bin = |bytes: &[u8]| fs::write(work.path().join("p.bin"), bytes).unwrap();
+    write_bin(b"X0\0");
+    git(work.path(), &["add", "p.bin"]);
+    git(work.path(), &["commit", "-m", "root"]);
+    for (branch, bytes) in [("b1", b"X1\0"), ("b2", b"X2\0")] {
+        git(work.path(), &["checkout", "-b", branch, "main"]);
+        write_bin(bytes);
+        git(work.path(), &["commit", "-am", branch]);
+    }
+    for (branch, from, other, bytes) in [
+        ("feature", "b2", "b1", b"X0\0"),
+        ("anchor", "b1", "b2", b"X1\0"),
+    ] {
+        git(work.path(), &["checkout", "-b", branch, from]);
+        let _ = Command::new("git")
+            .args(["merge", other])
+            .current_dir(work.path())
+            .output();
+        write_bin(bytes);
+        git(work.path(), &["commit", "-am", &format!("merge {other}")]);
+    }
+    git(work.path(), &["checkout", "main"]);
+    git(work.path(), &["reset", "--hard", "anchor"]);
+    git(work.path(), &["push", "origin", "main"]);
+
+    assert_br_rm_refuses_feature(work.path(), "criss-cross");
+}

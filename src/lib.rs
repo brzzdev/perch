@@ -1,4 +1,5 @@
 pub mod app;
+mod forge;
 pub mod git;
 mod grammar;
 #[cfg(unix)]
@@ -36,6 +37,27 @@ pub enum Error {
         app::go_there_argument(branch)
     )]
     HeldByWorktree { branch: String, path: String },
+
+    #[error("{reference}: {message}")]
+    Forge {
+        reference: forge::Reference,
+        message: String,
+    },
+
+    #[error("{reference} needs `{}`", reference.cli())]
+    ForgeCliMissing { reference: forge::Reference },
+
+    #[error("{reference}'s branch {branch} is not on origin; it may have been deleted on merge")]
+    ForgeHeadMissing {
+        reference: forge::Reference,
+        branch: String,
+    },
+
+    #[error("{reference} comes from a fork, which perch does not check out yet")]
+    ForkRequest { reference: forge::Reference },
+
+    #[error("`{0}` is not a request number; expected pr:<number> or mr:<number>")]
+    InvalidForgeReference(String),
 
     #[error("{branch} is checked out at {path}; {hint}")]
     HeldForRemoval {

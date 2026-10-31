@@ -6,7 +6,7 @@ use console::{Key, StyledObject, Term, style};
 use indicatif::ProgressBar;
 
 use crate::grammar::{Invocation, Navigation, Verb, WorktreeDirectoryName};
-use crate::{AppResult, Error, git};
+use crate::{AppResult, Error, forge, git};
 
 pub mod br;
 pub mod complete;
@@ -170,19 +170,22 @@ fn run_verb(verb: Verb, target: Option<&str>) -> AppResult<()> {
     // from this same worktree, and a *Held* one with submodules is never covered.
     let prefetch = (target.is_some() || is_interactive()).then(|| Prefetch::start(&remote));
 
-    let target = if let Some(name) = target {
-        name.to_string()
+    let (target, reference) = if let Some(name) = target {
+        branch_named(name)?
     } else {
         let listed = live_worktrees()?;
         let Some(picked) = select_branch(old_branch.as_deref(), &remote, &listed, verb)? else {
             return Ok(());
         };
-        picked
+        (picked, None)
     };
 
     // Joined before the *Held* check and any stash, so both see the fetched
     // refs, and an interrupt here leaves before anything is touched.
     let fetched = prefetch.map(Prefetch::join).transpose()?;
+    if let Some(reference) = reference {
+        forge::ensure_head_exists(reference, &target)?;
+    }
 
     // Read the worktrees again rather than reusing what the picker was drawn
     // from: that snapshot was taken before it opened, and the picker then sat
@@ -244,6 +247,21 @@ fn run_verb(verb: Verb, target: Option<&str>) -> AppResult<()> {
     }
 
     result
+}
+
+/// The branch a navigation argument names: the argument itself, or the head
+/// branch of the request `pr:<n>` or `mr:<n>` names, alongside that request.
+pub(crate) fn branch_named(argument: &str) -> AppResult<(String, Option<forge::Reference>)> {
+    let Some(reference) = forge::Reference::parse(argument)? else {
+        return Ok((argument.to_string(), None));
+    };
+    let branch = {
+        let (spinner, _cursor) = spinner(format!("Looking up {reference}…"));
+        let branch = reference.head_branch();
+        spinner.finish_and_clear();
+        branch?
+    };
+    Ok((branch, Some(reference)))
 }
 
 /// Pop the auto-stash and report the outcome — a clean restore, a conflict to

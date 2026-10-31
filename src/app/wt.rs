@@ -13,7 +13,7 @@ use super::{
     select_removal_locals, spinner, warn,
 };
 use crate::grammar::{ShellHandoff, Verb, WorktreeRemoval};
-use crate::{AppResult, Error, git};
+use crate::{AppResult, Error, forge, git};
 
 enum Action {
     UseExisting(git::Worktree),
@@ -67,18 +67,22 @@ pub(crate) fn run(
     let prefetch = ((target.is_some() || super::is_interactive()) && !has_submodules)
         .then(|| Prefetch::start(&remote));
 
-    let (branch, existence) = if let Some(name) = target {
-        (name.to_string(), Existence::MayCreate)
+    let (branch, existence, reference) = if let Some(name) = target {
+        let (branch, reference) = super::branch_named(name)?;
+        (branch, Existence::MayCreate, reference)
     } else {
-        let Some(picked) = select(&listed, current_branch.as_deref(), &remote)? else {
+        let Some((branch, existence)) = select(&listed, current_branch.as_deref(), &remote)? else {
             return Ok(());
         };
-        picked
+        (branch, existence, None)
     };
 
     // Joined before the worktrees are read again below, so a slow join cannot
     // make that snapshot stale in its turn.
     let fetched = prefetch.map(Prefetch::join).transpose()?;
+    if let Some(reference) = reference {
+        forge::ensure_head_exists(reference, &branch)?;
+    }
 
     // Read the worktrees again before deciding what the branch needs: the list
     // above was drawn before the picker opened, and it then sat waiting on a

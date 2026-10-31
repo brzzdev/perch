@@ -7099,3 +7099,222 @@ fn an_attribute_missing_from_the_worktree_hides_no_driver() {
         assert_br_rm_refuses_feature(work.path(), fallback);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Pull request targets
+// ---------------------------------------------------------------------------
+
+/// A `PATH` that finds `cli` first, as a script answering `query` with `answer`
+/// on stdout and anything else as a forge error.
+fn forge_path(cli: &str, query: &str, answer: &str) -> (TempDir, OsString) {
+    let bin = TempDir::new().unwrap();
+    let script = bin.path().join(cli);
+    fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\n\
+             case \"$*\" in\n\
+             \"{query}\"*) printf '%s\\n' '{answer}' ;;\n\
+             *) echo 'no pull requests found' >&2; exit 1 ;;\n\
+             esac\n"
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    let mut path = OsString::from(bin.path());
+    path.push(":");
+    path.push(std::env::var_os("PATH").unwrap());
+    (bin, path)
+}
+
+fn perch_with_path(dir: &Path, args: &[&str], path: &OsString) -> Output {
+    perch_command(dir, args)
+        .env("PATH", path)
+        .env("PERCH_NO_HOOKS", "1")
+        .output()
+        .expect("failed to run perch")
+}
+
+/// A same-repo pull request on `bare` whose head is `feat/x`, unfetched here.
+fn publish_pull_request_head(bare: &Path) {
+    let other = clone_bare(bare);
+    git(other.path(), &["switch", "-c", "feat/x"]);
+    commit_in(other.path(), "x.txt", "on feat/x");
+    git(other.path(), &["push", "origin", "feat/x"]);
+}
+
+fn gh_pr_view(bare: &Path, number: u32) -> String {
+    format!("pr view {number} --repo {}", bare.display())
+}
+
+#[test]
+fn wt_pr_creates_then_reuses_a_worktree_tracking_the_head_branch() {
+    let (bare, parent, work) = setup_with_parent();
+    publish_pull_request_head(bare.path());
+    let (_bin, path) = forge_path("gh", &gh_pr_view(bare.path(), 7), "false feat/x");
+
+    let first = perch_with_path(&work, &["wt", "pr:7"], &path);
+
+    assert!(first.status.success(), "stderr: {}", stderr_str(&first));
+    let worktree = parent.path().join("worktrees").join("repo").join("feat/x");
+    let upstream = git(&worktree, &["rev-parse", "--abbrev-ref", "@{upstream}"]);
+    assert_eq!(stdout_str(&upstream).trim(), "origin/feat/x");
+
+    let second = perch_with_path(&work, &["wt", "pr:7"], &path);
+
+    assert!(second.status.success(), "stderr: {}", stderr_str(&second));
+    assert_eq!(stdout_str(&second), stdout_str(&first));
+    let list = git(&work, &["worktree", "list", "--porcelain"]);
+    assert_eq!(stdout_str(&list).matches("refs/heads/feat/x").count(), 1);
+}
+
+#[test]
+fn wt_pr_takes_an_explicit_directory_name() {
+    let (bare, parent, work) = setup_with_parent();
+    publish_pull_request_head(bare.path());
+    let (_bin, path) = forge_path("gh", &gh_pr_view(bare.path(), 7), "false feat/x");
+
+    let output = perch_with_path(&work, &["wt", "7", "pr:7"], &path);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    let worktree = parent.path().join("worktrees").join("repo").join("7");
+    let branch = git(&worktree, &["branch", "--show-current"]);
+    assert_eq!(stdout_str(&branch).trim(), "feat/x");
+}
+
+#[test]
+fn br_pr_checks_the_head_branch_out_in_place() {
+    let (bare, work) = setup();
+    publish_pull_request_head(bare.path());
+    let (_bin, path) = forge_path("gh", &gh_pr_view(bare.path(), 7), "false feat/x");
+
+    let output = perch_with_path(work.path(), &["br", "pr:7"], &path);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    let upstream = git(work.path(), &["rev-parse", "--abbrev-ref", "@{upstream}"]);
+    assert_eq!(stdout_str(&upstream).trim(), "origin/feat/x");
+}
+
+#[test]
+fn perch_pr_goes_to_the_worktree_holding_the_head_branch() {
+    let (bare, parent, work) = setup_with_parent();
+    publish_pull_request_head(bare.path());
+    let (_bin, path) = forge_path("gh", &gh_pr_view(bare.path(), 7), "false feat/x");
+
+    let in_place = perch_with_path(&work, &["pr:7"], &path);
+
+    assert!(
+        in_place.status.success(),
+        "stderr: {}",
+        stderr_str(&in_place)
+    );
+    let branch = git(&work, &["branch", "--show-current"]);
+    assert_eq!(stdout_str(&branch).trim(), "feat/x");
+
+    git(&work, &["switch", "main"]);
+    let worktree = parent.path().join("worktrees").join("repo").join("feat/x");
+    git(
+        &work,
+        &["worktree", "add", worktree.to_str().unwrap(), "feat/x"],
+    );
+
+    let handed_off = perch_with_path(&work, &["pr:7"], &path);
+
+    assert!(
+        handed_off.status.success(),
+        "stderr: {}",
+        stderr_str(&handed_off)
+    );
+    assert_eq!(
+        Path::new(stdout_str(&handed_off).trim())
+            .canonicalize()
+            .unwrap(),
+        worktree.canonicalize().unwrap()
+    );
+    let branch = git(&work, &["branch", "--show-current"]);
+    assert_eq!(stdout_str(&branch).trim(), "main");
+}
+
+#[test]
+fn wt_mr_asks_glab_for_the_head_branch() {
+    let (bare, parent, work) = setup_with_parent();
+    publish_pull_request_head(bare.path());
+    let query = format!("mr view 4 --repo {}", bare.path().display());
+    let (_bin, path) = forge_path("glab", &query, "false feat/x");
+
+    let output = perch_with_path(&work, &["wt", "mr:4"], &path);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    let worktree = parent.path().join("worktrees").join("repo").join("feat/x");
+    let upstream = git(&worktree, &["rev-parse", "--abbrev-ref", "@{upstream}"]);
+    assert_eq!(stdout_str(&upstream).trim(), "origin/feat/x");
+}
+
+#[test]
+fn wt_pr_from_a_fork_is_refused_without_creating_anything() {
+    let (bare, parent, work) = setup_with_parent();
+    let (_bin, path) = forge_path("gh", &gh_pr_view(bare.path(), 7), "true main");
+
+    let output = perch_with_path(&work, &["wt", "pr:7"], &path);
+
+    assert!(!output.status.success());
+    assert!(
+        stderr_str(&output).contains("pr:7 comes from a fork, which perch does not check out yet"),
+        "stderr: {}",
+        stderr_str(&output)
+    );
+    assert!(!parent.path().join("worktrees").exists());
+}
+
+#[test]
+fn wt_pr_without_gh_names_it() {
+    let (_bare, work) = setup();
+    let git_path = Command::new("sh")
+        .args(["-c", "command -v git"])
+        .output()
+        .unwrap();
+    let bin = TempDir::new().unwrap();
+    std::os::unix::fs::symlink(stdout_str(&git_path).trim(), bin.path().join("git")).unwrap();
+
+    let output = perch_with_path(work.path(), &["wt", "pr:1"], &bin.path().into());
+
+    assert!(!output.status.success());
+    assert!(
+        stderr_str(&output).contains("pr:1 needs `gh`"),
+        "stderr: {}",
+        stderr_str(&output)
+    );
+}
+
+#[test]
+fn wt_pr_surfaces_the_forges_own_error() {
+    let (bare, work) = setup();
+    let (_bin, path) = forge_path("gh", &gh_pr_view(bare.path(), 7), "false feat/x");
+
+    let output = perch_with_path(work.path(), &["wt", "pr:8"], &path);
+
+    assert!(!output.status.success());
+    assert!(
+        stderr_str(&output).contains("pr:8: no pull requests found"),
+        "stderr: {}",
+        stderr_str(&output)
+    );
+}
+
+/// A merged request's head is often deleted with it; treated as a typed name
+/// it would become a fresh branch off the default.
+#[test]
+fn wt_pr_whose_head_is_gone_creates_nothing() {
+    let (bare, parent, work) = setup_with_parent();
+    let (_bin, path) = forge_path("gh", &gh_pr_view(bare.path(), 7), "false feat/x");
+
+    let output = perch_with_path(&work, &["wt", "pr:7"], &path);
+
+    assert!(!output.status.success());
+    assert!(
+        stderr_str(&output).contains("pr:7's branch feat/x is not on origin"),
+        "stderr: {}",
+        stderr_str(&output)
+    );
+    assert!(!parent.path().join("worktrees").exists());
+}

@@ -6774,3 +6774,328 @@ fn shell_install_follows_a_zdotdir_that_zshenv_sets_without_exporting() {
     );
     assert!(!home.path().join(".zshrc").exists());
 }
+
+/// How `feature`'s two edits to `f.txt` reach `main` in [`land_two_edits`].
+#[derive(Clone, Copy, Debug)]
+enum Landing {
+    FirstCommitOnly,
+    RebaseMergeThenEdit,
+    SquashThenRevertHalf,
+    SquashWithAnExtraHunk,
+}
+
+fn edit_line(dir: &Path, line: usize, text: &str) {
+    let path = dir.join("f.txt");
+    let mut lines: Vec<String> = fs::read_to_string(&path)
+        .unwrap()
+        .lines()
+        .map(String::from)
+        .collect();
+    lines[line - 1] = text.to_string();
+    fs::write(&path, lines.join("\n") + "\n").unwrap();
+}
+
+/// `feature` edits lines 2 and 4 of `f.txt` in two commits, `main` moves on by
+/// an unrelated commit, and the work lands as `landing` says. Then the branch's
+/// upstream is deleted, as a forge does on merge.
+fn land_two_edits(work: &Path, landing: Landing) {
+    fs::write(work.join("f.txt"), "1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n").unwrap();
+    git(work, &["add", "f.txt"]);
+    git(work, &["commit", "-m", "ten lines"]);
+    git(work, &["push", "origin", "main"]);
+
+    git(work, &["checkout", "-b", "feature"]);
+    edit_line(work, 2, "2b");
+    git(work, &["commit", "-am", "edit two"]);
+    edit_line(work, 4, "4b");
+    git(work, &["commit", "-am", "edit four"]);
+    git(work, &["push", "-u", "origin", "feature"]);
+
+    git(work, &["checkout", "main"]);
+    commit_in(work, "unrelated.txt", "unrelated");
+    match landing {
+        Landing::FirstCommitOnly => {
+            git(work, &["cherry-pick", "-x", "feature~1"]);
+        }
+        Landing::RebaseMergeThenEdit => {
+            rebase_merge_upstream(work, "feature");
+            edit_line(work, 9, "9m");
+            git(work, &["commit", "-am", "edit nine"]);
+            git(work, &["push", "origin", "main"]);
+            return;
+        }
+        Landing::SquashThenRevertHalf => {
+            git(work, &["merge", "--squash", "feature"]);
+            git(work, &["commit", "-m", "squash feature"]);
+            edit_line(work, 4, "4");
+            git(work, &["commit", "-am", "revert edit four"]);
+        }
+        Landing::SquashWithAnExtraHunk => {
+            git(work, &["merge", "--squash", "feature"]);
+            edit_line(work, 9, "9m");
+            git(work, &["commit", "-am", "squash feature and edit nine"]);
+        }
+    }
+    git(work, &["push", "origin", "main"]);
+    git(work, &["push", "origin", "--delete", "feature"]);
+    git(work, &["fetch", "--prune", "origin"]);
+}
+
+const LANDED_AND_EDITED_AROUND: [Landing; 2] =
+    [Landing::RebaseMergeThenEdit, Landing::SquashWithAnExtraHunk];
+
+/// Work that landed and was then edited around in the same file escapes the
+/// patch and content routes; merging the branch would still add nothing.
+#[test]
+fn br_rm_deletes_a_branch_whose_merge_would_add_nothing() {
+    for landing in LANDED_AND_EDITED_AROUND {
+        let (_bare, work) = setup();
+        land_two_edits(work.path(), landing);
+
+        let output = perch_args(work.path(), &["br", "rm", "feature"]);
+
+        assert!(
+            output.status.success(),
+            "{landing:?}: stderr: {}",
+            stderr_str(&output)
+        );
+        assert!(!local_branch_exists(work.path(), "feature"), "{landing:?}");
+    }
+}
+
+#[test]
+fn the_cleanup_prompt_draws_no_marker_where_a_merge_would_add_nothing() {
+    for landing in LANDED_AND_EDITED_AROUND {
+        let (_bare, work) = setup();
+        land_two_edits(work.path(), landing);
+        git(work.path(), &["branch", "dest", "main"]);
+
+        let text = cleanup_prompt(work.path(), "dest", "feature");
+
+        assert!(!text.contains('↑'), "{landing:?}: {text}");
+        assert!(!local_branch_exists(work.path(), "feature"), "{landing:?}");
+    }
+}
+
+#[test]
+fn the_wt_rm_picker_draws_no_marker_where_a_merge_would_add_nothing() {
+    for landing in LANDED_AND_EDITED_AROUND {
+        let (_bare, parent, work) = setup_with_parent();
+        land_two_edits(&work, landing);
+        let path = parent.path().join("worktrees").join("repo").join("feature");
+        git(
+            &work,
+            &["worktree", "add", path.to_str().unwrap(), "feature"],
+        );
+
+        let text = String::from_utf8_lossy_owned(drive_multi_select_prompt(
+            &work,
+            &["wt", "rm"],
+            "feature",
+            false,
+            || {},
+        ));
+
+        assert!(!text.contains('↑'), "{landing:?}: {text}");
+        assert!(
+            !path.exists(),
+            "{landing:?}: worktree dir should be removed"
+        );
+        assert!(!local_branch_exists(&work, "feature"), "{landing:?}");
+    }
+}
+
+/// Merging a branch whose second commit never landed adds that commit's hunk.
+#[test]
+fn br_rm_refuses_a_branch_whose_merge_would_add_something() {
+    let (_bare, work) = setup();
+    land_two_edits(work.path(), Landing::FirstCommitOnly);
+
+    assert_br_rm_refuses_feature(work.path(), "first commit only");
+}
+
+/// A conflict is an inconclusive proof, not a failure to report.
+#[test]
+fn a_conflicting_merge_leaves_the_branch_unproven_and_says_nothing_of_it() {
+    let (_bare, work) = setup();
+    land_two_edits(work.path(), Landing::FirstCommitOnly);
+    edit_line(work.path(), 4, "4m");
+    git(work.path(), &["commit", "-am", "edit four the other way"]);
+    git(work.path(), &["push", "origin", "main"]);
+
+    let output = perch_args(work.path(), &["br", "rm", "feature"]);
+
+    assert!(!output.status.success());
+    assert!(local_branch_exists(work.path(), "feature"));
+    let stderr = stderr_str(&output);
+    assert_eq!(stderr.lines().count(), 1, "only the refusal: {stderr}");
+}
+
+/// Merging again would bring the reverted half back, so only the patch route
+/// proves this one.
+#[test]
+fn br_rm_still_deletes_a_squash_the_anchor_half_reverted() {
+    let (_bare, work) = setup();
+    land_two_edits(work.path(), Landing::SquashThenRevertHalf);
+
+    let output = perch_args(work.path(), &["br", "rm", "feature"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(!local_branch_exists(work.path(), "feature"));
+}
+
+/// Commits `f.txt` as `lines`, then lets `feature` and `main` each change it
+/// their own way, and publishes `main`.
+fn fork_f(work: &Path, lines: &str, on_feature: impl FnOnce(), on_main: impl FnOnce()) {
+    fs::write(work.join("f.txt"), lines).unwrap();
+    git(work, &["add", "f.txt"]);
+    git(work, &["commit", "-m", "f.txt"]);
+    git(work, &["checkout", "-b", "feature"]);
+    on_feature();
+    git(work, &["commit", "-am", "feature's change"]);
+    git(work, &["checkout", "main"]);
+    on_main();
+    git(work, &["commit", "-am", "main's change"]);
+    git(work, &["push", "origin", "main"]);
+}
+
+/// `feature` edits line 2 of `f.txt`, which `main` never takes, while `main`
+/// edits line 4 and configures `driver`, a merge driver that always keeps
+/// `main`'s side.
+fn unlanded_edit_under_a_keeping_driver(work: &Path, driver: &str) {
+    fork_f(
+        work,
+        "1\n2\n3\n4\n5\n",
+        || edit_line(work, 2, "2b"),
+        || edit_line(work, 4, "4m"),
+    );
+    git(work, &["config", &format!("merge.{driver}.driver"), "true"]);
+}
+
+fn assert_br_rm_refuses_feature(work: &Path, case: &str) {
+    let output = perch_args(work, &["br", "rm", "feature"]);
+
+    assert!(!output.status.success(), "{case}");
+    assert!(local_branch_exists(work, "feature"), "{case}");
+}
+
+/// `check-attr` prints a literal `merge=unset` exactly as it prints `-merge`.
+#[test]
+fn a_merge_attribute_naming_a_driver_proves_nothing() {
+    for driver in ["keep", "unset"] {
+        let (_bare, work) = setup();
+        unlanded_edit_under_a_keeping_driver(work.path(), driver);
+        fs::write(
+            work.path().join(".gitattributes"),
+            format!("f.txt merge={driver}\n"),
+        )
+        .unwrap();
+
+        assert_br_rm_refuses_feature(work.path(), driver);
+    }
+}
+
+/// An empty `merge.default` names the driver `merge..driver` defines.
+#[test]
+fn a_default_merge_driver_proves_nothing() {
+    for driver in ["keep", ""] {
+        let (_bare, work) = setup();
+        unlanded_edit_under_a_keeping_driver(work.path(), driver);
+        git(work.path(), &["config", "merge.default", driver]);
+
+        assert_br_rm_refuses_feature(work.path(), driver);
+    }
+}
+
+/// `union` keeps `main`'s line where the branch deleted it.
+#[test]
+fn a_union_merge_attribute_proves_nothing() {
+    let (_bare, work) = setup();
+    fork_f(
+        work.path(),
+        "1\n2\n3\n",
+        || fs::write(work.path().join("f.txt"), "1\n3\n").unwrap(),
+        || edit_line(work.path(), 2, "2m"),
+    );
+    fs::write(work.path().join(".gitattributes"), "f.txt merge=union\n").unwrap();
+
+    assert_br_rm_refuses_feature(work.path(), "union");
+}
+
+/// With renames on, `main`'s rename would carry the branch's edit to `c.txt`,
+/// whose attribute `check-attr` was never asked about.
+#[test]
+fn a_driver_on_a_path_the_anchor_renamed_proves_nothing() {
+    let (_bare, work) = setup();
+    let lines: String = (1..=20).map(|n| n.to_string() + "\n").collect();
+    fork_f(
+        work.path(),
+        &lines,
+        || edit_line(work.path(), 5, "5b"),
+        || {
+            edit_line(work.path(), 15, "15m");
+            git(work.path(), &["mv", "f.txt", "c.txt"]);
+        },
+    );
+    git(work.path(), &["config", "merge.keep.driver", "true"]);
+    fs::write(work.path().join(".gitattributes"), "c.txt merge=keep\n").unwrap();
+
+    assert_br_rm_refuses_feature(work.path(), "renamed");
+}
+
+/// Two merge bases: left to merge them itself, `merge-tree` builds a virtual
+/// base in which the binary conflict resolves to the root's `X0` unremarked, and
+/// `feature`'s own resolution, also `X0`, then reads as no change at all.
+#[test]
+fn a_criss_cross_binary_resolution_is_not_proven() {
+    let (_bare, work) = setup();
+    let write_bin = |bytes: &[u8]| fs::write(work.path().join("p.bin"), bytes).unwrap();
+    write_bin(b"X0\0");
+    git(work.path(), &["add", "p.bin"]);
+    git(work.path(), &["commit", "-m", "root"]);
+    for (branch, bytes) in [("b1", b"X1\0"), ("b2", b"X2\0")] {
+        git(work.path(), &["checkout", "-b", branch, "main"]);
+        write_bin(bytes);
+        git(work.path(), &["commit", "-am", branch]);
+    }
+    for (branch, from, other, bytes) in [
+        ("feature", "b2", "b1", b"X0\0"),
+        ("anchor", "b1", "b2", b"X1\0"),
+    ] {
+        git(work.path(), &["checkout", "-b", branch, from]);
+        let _ = Command::new("git")
+            .args(["merge", "--no-commit", other])
+            .current_dir(work.path())
+            .output();
+        write_bin(bytes);
+        git(work.path(), &["commit", "-am", &format!("merge {other}")]);
+    }
+    git(work.path(), &["checkout", "main"]);
+    git(work.path(), &["reset", "--hard", "anchor"]);
+    git(work.path(), &["push", "origin", "main"]);
+
+    assert_br_rm_refuses_feature(work.path(), "criss-cross");
+}
+
+/// A `-merge` committed but missing from the worktree would answer `check-attr`
+/// from the index, which the merge never reads, so it falls through to `keep`.
+#[test]
+fn an_attribute_missing_from_the_worktree_hides_no_driver() {
+    for fallback in ["core.attributesFile", "merge.default"] {
+        let (_bare, work) = setup();
+        fs::write(work.path().join(".gitattributes"), "f.txt -merge\n").unwrap();
+        git(work.path(), &["add", ".gitattributes"]);
+        unlanded_edit_under_a_keeping_driver(work.path(), "keep");
+        let value = if fallback == "merge.default" {
+            "keep".to_string()
+        } else {
+            let global = work.path().join(".git").join("global-attributes");
+            fs::write(&global, "f.txt merge=keep\n").unwrap();
+            global.to_str().unwrap().to_string()
+        };
+        git(work.path(), &["config", fallback, &value]);
+        fs::remove_file(work.path().join(".gitattributes")).unwrap();
+
+        assert_br_rm_refuses_feature(work.path(), fallback);
+    }
+}

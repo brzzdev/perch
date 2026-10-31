@@ -311,6 +311,8 @@ git config --add perch.copy target
 git config --add perch.copy node_modules
 ```
 
+Nothing is cloned unless you list it. To cover every repository, add the entries with `--global` instead: a path a repository doesn't have is skipped silently, a repository's own entries add to the global ones, and a path listed in both is cloned once.
+
 Each path is cloned copy-on-write (APFS `clonefile` on macOS, reflinks on Linux btrfs and XFS), so it takes almost no disk space until a file in it changes. Symlinks are cloned as links. `du` counts a clone at full size; `df` shows what it really cost. Cloning happens before the `created` hook fires, and never when `perch wt` switches into a worktree that already exists.
 
 `perch` never falls back to a byte-for-byte copy. Where a path can't be cloned, because the filesystem can't clone or the worktree sits on another volume, it is skipped with a warning and creation carries on. A path missing from the main checkout is skipped silently. One already in the new worktree, because it is tracked, is left alone with a warning, and one outside the repository (`..`, absolute) is rejected with a warning.

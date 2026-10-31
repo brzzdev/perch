@@ -26,25 +26,23 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Render the formula
-        env:
-          GH_REPO: ${{ github.repository }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release download "$TAG" --pattern SHA256SUMS
-          .github/homebrew/formula.sh "${TAG#v}" SHA256SUMS > perch.rb
-
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: brzzdev/homebrew-tap
           ssh-key: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
           path: tap
 
+      - name: Render the formula
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download "$TAG" --pattern SHA256SUMS
+          mkdir -p tap/Formula
+          .github/homebrew/formula.sh "${TAG#v}" SHA256SUMS > tap/Formula/perch.rb
+
       - name: Push to the tap
         working-directory: tap
         run: |
-          mkdir -p Formula
-          cp ../perch.rb Formula/perch.rb
           git add Formula/perch.rb
           if git diff --cached --quiet; then
             echo "Formula already points at $TAG"

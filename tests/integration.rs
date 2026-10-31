@@ -6847,20 +6847,31 @@ fn br_rm_still_deletes_a_squash_the_anchor_half_reverted() {
     assert!(!local_branch_exists(work.path(), "feature"));
 }
 
+/// Commits `f.txt` as `lines`, then lets `feature` and `main` each change it
+/// their own way, and publishes `main`.
+fn fork_f(work: &Path, lines: &str, on_feature: impl FnOnce(), on_main: impl FnOnce()) {
+    fs::write(work.join("f.txt"), lines).unwrap();
+    git(work, &["add", "f.txt"]);
+    git(work, &["commit", "-m", "f.txt"]);
+    git(work, &["checkout", "-b", "feature"]);
+    on_feature();
+    git(work, &["commit", "-am", "feature's change"]);
+    git(work, &["checkout", "main"]);
+    on_main();
+    git(work, &["commit", "-am", "main's change"]);
+    git(work, &["push", "origin", "main"]);
+}
+
 /// `feature` edits line 2 of `f.txt`, which `main` never takes, while `main`
 /// edits line 4 and configures `driver`, a merge driver that always keeps
 /// `main`'s side.
 fn unlanded_edit_under_a_keeping_driver(work: &Path, driver: &str) {
-    fs::write(work.join("f.txt"), "1\n2\n3\n4\n5\n").unwrap();
-    git(work, &["add", "f.txt"]);
-    git(work, &["commit", "-m", "five lines"]);
-    git(work, &["checkout", "-b", "feature"]);
-    edit_line(work, 2, "2b");
-    git(work, &["commit", "-am", "edit two"]);
-    git(work, &["checkout", "main"]);
-    edit_line(work, 4, "4m");
-    git(work, &["commit", "-am", "edit four"]);
-    git(work, &["push", "origin", "main"]);
+    fork_f(
+        work,
+        "1\n2\n3\n4\n5\n",
+        || edit_line(work, 2, "2b"),
+        || edit_line(work, 4, "4m"),
+    );
     git(work, &["config", &format!("merge.{driver}.driver"), "true"]);
 }
 
@@ -6903,16 +6914,12 @@ fn a_default_merge_driver_proves_nothing() {
 #[test]
 fn a_union_merge_attribute_proves_nothing() {
     let (_bare, work) = setup();
-    fs::write(work.path().join("f.txt"), "1\n2\n3\n").unwrap();
-    git(work.path(), &["add", "f.txt"]);
-    git(work.path(), &["commit", "-m", "three lines"]);
-    git(work.path(), &["checkout", "-b", "feature"]);
-    fs::write(work.path().join("f.txt"), "1\n3\n").unwrap();
-    git(work.path(), &["commit", "-am", "delete two"]);
-    git(work.path(), &["checkout", "main"]);
-    edit_line(work.path(), 2, "2m");
-    git(work.path(), &["commit", "-am", "edit two"]);
-    git(work.path(), &["push", "origin", "main"]);
+    fork_f(
+        work.path(),
+        "1\n2\n3\n",
+        || fs::write(work.path().join("f.txt"), "1\n3\n").unwrap(),
+        || edit_line(work.path(), 2, "2m"),
+    );
     fs::write(work.path().join(".gitattributes"), "f.txt merge=union\n").unwrap();
 
     assert_br_rm_refuses_feature(work.path(), "union");
@@ -6938,17 +6945,15 @@ fn a_default_merge_driver_proves_nothing_under_a_staged_attribute() {
 fn a_driver_on_a_path_the_anchor_renamed_proves_nothing() {
     let (_bare, work) = setup();
     let lines: String = (1..=20).map(|n| n.to_string() + "\n").collect();
-    fs::write(work.path().join("f.txt"), lines).unwrap();
-    git(work.path(), &["add", "f.txt"]);
-    git(work.path(), &["commit", "-m", "twenty lines"]);
-    git(work.path(), &["checkout", "-b", "feature"]);
-    edit_line(work.path(), 5, "5b");
-    git(work.path(), &["commit", "-am", "edit five"]);
-    git(work.path(), &["checkout", "main"]);
-    edit_line(work.path(), 15, "15m");
-    git(work.path(), &["mv", "f.txt", "c.txt"]);
-    git(work.path(), &["commit", "-am", "rename and edit fifteen"]);
-    git(work.path(), &["push", "origin", "main"]);
+    fork_f(
+        work.path(),
+        &lines,
+        || edit_line(work.path(), 5, "5b"),
+        || {
+            edit_line(work.path(), 15, "15m");
+            git(work.path(), &["mv", "f.txt", "c.txt"]);
+        },
+    );
     git(work.path(), &["config", "merge.keep.driver", "true"]);
     fs::write(work.path().join(".gitattributes"), "c.txt merge=keep\n").unwrap();
 
@@ -6987,4 +6992,23 @@ fn a_criss_cross_binary_resolution_is_not_proven() {
     git(work.path(), &["push", "origin", "main"]);
 
     assert_br_rm_refuses_feature(work.path(), "criss-cross");
+}
+
+/// A staged root `-merge` missing from the worktree would answer `check-attr`
+/// from the index, hiding the global `keep` the merge falls through to.
+#[test]
+fn a_staged_attribute_cannot_hide_an_inherited_driver() {
+    let (_bare, work) = setup();
+    fs::write(work.path().join(".gitattributes"), "f.txt -merge\n").unwrap();
+    git(work.path(), &["add", ".gitattributes"]);
+    unlanded_edit_under_a_keeping_driver(work.path(), "keep");
+    let global = work.path().join(".git").join("global-attributes");
+    fs::write(&global, "f.txt merge=keep\n").unwrap();
+    git(
+        work.path(),
+        &["config", "core.attributesFile", global.to_str().unwrap()],
+    );
+    fs::remove_file(work.path().join(".gitattributes")).unwrap();
+
+    assert_br_rm_refuses_feature(work.path(), "staged -merge over a global keep");
 }

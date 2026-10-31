@@ -62,16 +62,17 @@ sees:
   `union` or any driver the config defines, and no branch is proven by it where `merge.default`
   could. The attribute's value is judged by name, because git looks names up among the configured
   drivers before its built-ins, and `check-attr` prints a literal `merge=unset` exactly as it prints
-  `-merge`. The default is refused outright rather than per path, because the simulated merge reads
-  no attributes from the index: a `.gitattributes` staged but missing from the worktree is seen by
-  `check-attr` and not by the merge, which gives that path the default driver. Rename detection is off for the simulation so that every content merge happens at a path
-  the branch touched, which is where the attributes were checked. Renormalisation is off too, so a
-  branch whose change was only line endings cannot merge away. The merge is pinned to the one
-  merge-base the touched paths were read from: left to itself, a criss-cross history merges its
-  bases into a virtual one, and there a binary file's conflict resolves to the older side without a
-  word. A conflict, any other failure, or a git older than 2.40 (which has no `--merge-base` for
-  `merge-tree`) is an inconclusive proof. Like the other routes, this one asks about the same pair of
-  resolved commits the proof records.
+  `-merge`. It is read against an empty index, because the simulated merge reads no attributes from
+  the index: a `.gitattributes` staged but missing from the worktree would otherwise speak to
+  `check-attr` alone, and hide whatever driver the merge inherits instead. `merge.default` is
+  refused outright rather than per path, which is simpler and only ever subtracts. Rename detection
+  is off for the simulation so that every content merge happens at a path the branch touched, which
+  is where the attributes were checked. Renormalisation is off too, so a branch whose change was only
+  line endings cannot merge away. The merge is pinned to the one merge-base the touched paths were
+  read from: left to itself, a criss-cross history merges its bases into a virtual one, and there a
+  binary file's conflict resolves to the older side without a word. A conflict, any other failure,
+  or a git older than 2.40 (which has no `--merge-base` for `merge-tree`) is an inconclusive proof.
+  Like the other routes, this one asks about the same pair of resolved commits the proof records.
 
 ## Consequences
 

@@ -1590,24 +1590,37 @@ fn merge_adds_nothing(
             .map(|(name, _)| name)
             .collect();
         let may_discard = |driver: &str| driver == "union" || custom_drivers.contains(driver);
-        // The merge reads no attributes from the index, so a path `check-attr`
-        // answers for there is unspecified to it and takes the default driver.
+        // It applies to every path the attributes leave unspecified.
         if last_config_entry(&config, &["merge.default"])
             .is_some_and(|entry| config_value(entry).is_none_or(may_discard))
         {
             return None;
         }
-        let mut attr_args = vec!["check-attr", "-z", "merge", "--"];
-        attr_args.extend(touched.iter().map(String::as_str));
-        let attrs = run_in(dir, &attr_args).ok()?;
+        // The merge reads no attributes from the index, so neither may this.
+        let no_index = PathBuf::from(
+            run_in(dir, &["rev-parse", "--absolute-git-dir"])
+                .ok()?
+                .trim(),
+        )
+        .join("perch-no-index");
+        if no_index.exists() {
+            return None;
+        }
+        let attrs = output_text(
+            "check-attr",
+            git_cmd(dir)
+                .args(["check-attr", "-z", "merge", "--"])
+                .args(touched)
+                .env("GIT_INDEX_FILE", &no_index)
+                .output()
+                .ok()?,
+        )
+        .ok()?;
         // `-z` output is `<path> NUL merge NUL <value> NUL` per path.
         if attrs.split('\0').skip(2).step_by(3).any(may_discard) {
             return None;
         }
-        // Renames off keeps every content merge at a path the attributes were
-        // checked for; renormalising could merge a line-ending change away. The
-        // base is the one `touched` was read from, not a virtual one built from
-        // criss-cross bases, where a binary file's conflict resolves silently.
+        // ADR 0005 has why each of these is pinned.
         let merge_base = format!("--merge-base={base}");
         let merged = run_in(
             dir,

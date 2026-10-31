@@ -12,6 +12,17 @@ A fast, interactive Git branch and worktree switcher. Pick a branch, fetch & fas
 
 ## Install
 
+### Homebrew
+
+On macOS or Linux:
+
+```sh
+brew install brzzdev/tap/perch
+perch shell install
+```
+
+This installs the binary and its completions for zsh, bash and fish. `perch shell install` loads the shell integration, which the worktree `cd` hand-off needs — see [Shell integration](#shell-integration-required-for-cd). For completions, Homebrew's own directories have to be on your shell's completion path; see [Homebrew's shell completion guide](https://docs.brew.sh/Shell-Completion).
+
 ### Download a binary
 
 Pick your platform and run:

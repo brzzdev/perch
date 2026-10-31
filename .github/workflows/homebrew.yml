@@ -3,22 +3,18 @@ name: Homebrew
 # Releases are drafted and published by hand, and a draft's archives can't be
 # downloaded, so the formula follows publication rather than the tag. `released`
 # also covers a prerelease promoted later, and never fires for a prerelease.
+#
+# Every run points the formula at the latest release, whatever started it, so a
+# queued run that concurrency replaces loses nothing, and a dispatch re-syncs.
 on:
   release:
     types: [released]
   workflow_dispatch:
-    inputs:
-      tag:
-        description: "Published tag to point the formula at (e.g. v2.8.0)"
-        required: true
 
 permissions:
   contents: read
 
 concurrency: homebrew-tap
-
-env:
-  TAG: ${{ inputs.tag || github.event.release.tag_name }}
 
 jobs:
   formula:
@@ -34,29 +30,24 @@ jobs:
 
       - name: Render the formula
         env:
+          GH_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Only the latest release may own the formula, so a dispatch for an
-          # old tag or a prerelease, or a late publish of an older line, can't
-          # downgrade it.
-          latest="$(gh release view --json tagName --jq .tagName)"
-          if [ "$TAG" != "$latest" ]; then
-            echo "error: $TAG is not the latest release ($latest)" >&2
-            exit 1
-          fi
-          gh release download "$TAG" --pattern SHA256SUMS
+          tag="$(gh release view --json tagName --jq .tagName)"
+          gh release download "$tag" --pattern SHA256SUMS
           mkdir -p tap/Formula
-          .github/homebrew/formula.sh "${TAG#v}" SHA256SUMS > tap/Formula/perch.rb
+          .github/homebrew/formula.sh "${tag#v}" SHA256SUMS > tap/Formula/perch.rb
+          echo "VERSION=${tag#v}" >> "$GITHUB_ENV"
 
       - name: Push to the tap
         working-directory: tap
         run: |
           git add Formula/perch.rb
           if git diff --cached --quiet; then
-            echo "Formula already points at $TAG"
+            echo "Formula already points at $VERSION"
             exit 0
           fi
           git -c user.name="github-actions[bot]" \
             -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
-            commit --quiet -m "perch ${TAG#v}"
+            commit --quiet -m "perch $VERSION"
           git push --quiet

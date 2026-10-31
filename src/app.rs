@@ -817,8 +817,8 @@ fn named_removal_choice(
 ///
 /// A branch named after a command word is read as that word, and `perch wt`
 /// opens the worktree picker rather than going anywhere — so those names need
-/// the `--` escape hatch. Grammar uses the same command facts for this check, invocation
-/// parsing, and completion filtering.
+/// the `--` escape hatch. Grammar uses the same command facts for this check,
+/// invocation parsing, and completion filtering.
 pub(crate) fn go_there_argument(branch: &str) -> String {
     let quoted = shell_quote(branch);
     if crate::grammar::needs_top_level_escape(branch) {

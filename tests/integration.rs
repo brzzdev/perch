@@ -6632,7 +6632,8 @@ fn shell_init_defines_the_wrapper_and_both_shortcuts() {
             r#"eval "$(perch shell init zsh)"; print -l ${(k)functions[(I)(perch|br|wt)]}"#,
         ),
     ] {
-        if Command::new(shell).arg("--version").output().is_err() {
+        // CI's runner has bash but not fish or zsh.
+        if shell != "bash" && Command::new(shell).arg("--version").output().is_err() {
             continue;
         }
         let output = Command::new(shell)
@@ -6658,6 +6659,9 @@ fn shell_init_defines_the_wrapper_and_both_shortcuts() {
 
 #[test]
 fn shell_install_follows_a_zdotdir_that_zshenv_sets_without_exporting() {
+    if Command::new("/bin/zsh").arg("--version").output().is_err() {
+        return;
+    }
     let home = TempDir::new().unwrap();
     fs::write(home.path().join(".zshenv"), "ZDOTDIR=$HOME/zsh\n").unwrap();
 

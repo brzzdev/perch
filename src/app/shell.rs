@@ -17,6 +17,7 @@ impl Shell {
                 .map_or_else(|| home.join(".config"), PathBuf::from)
                 .join("fish/conf.d/perch.fish"),
             Self::Zsh => zsh_dotdir(shell_path)
+                .or_else(|| non_empty_var("ZDOTDIR").map(PathBuf::from))
                 .unwrap_or_else(|| home.to_path_buf())
                 .join(".zshrc"),
         }
@@ -44,17 +45,17 @@ pub(crate) fn run_install() -> AppResult<()> {
         non_empty_var("HOME").ok_or_else(|| Error::ShellInstall("$HOME is not set".into()))?;
     let home = Path::new(&home);
     let rc = shell.rc_file(home, &shell_path);
-    let shown = display_path(&rc);
+    let rc_display = display_path(&rc);
     let line = shell.rc_line();
 
-    let appended =
-        append_once(&rc, line).map_err(|error| Error::ShellInstall(format!("{shown}: {error}")))?;
+    let appended = append_once(&rc, line)
+        .map_err(|error| Error::ShellInstall(format!("{rc_display}: {error}")))?;
     if !appended {
-        eprintln!("perch is already loaded from {shown}; nothing changed");
+        eprintln!("perch is already loaded from {rc_display}; nothing changed");
         return Ok(());
     }
 
-    eprintln!("Added `{line}` to {shown}");
+    eprintln!("Added `{line}` to {rc_display}");
     eprintln!(
         "Open a new shell, or run `source {}`, to pick it up.",
         source_argument(&rc, home)

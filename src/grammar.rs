@@ -492,7 +492,6 @@ fn branch_completion(position: Position) -> Invocation {
     })
 }
 
-#[derive(Clone, Copy)]
 enum CommandWord {
     Branch,
     Shell,
@@ -556,9 +555,9 @@ const SHELL_HELP: &str = concat!(
     "                                  Print the shell integration script\n",
     "       perch shell install    Add the shell integration to your rc file\n",
     "\n",
-    "install reads your shell from $SHELL and appends one line to ~/.zshrc\n",
-    "(under $ZDOTDIR if set), ~/.bashrc, or ~/.config/fish/conf.d/perch.fish\n",
-    "(under $XDG_CONFIG_HOME if set). Running it again changes nothing.\n",
+    "install reads your shell from $SHELL and appends one line to ~/.bashrc,\n",
+    "~/.config/fish/conf.d/perch.fish (under $XDG_CONFIG_HOME if set), or\n",
+    "~/.zshrc (under $ZDOTDIR if set). Running it again changes nothing.\n",
 );
 
 const WORKTREE_HELP: &str = concat!(

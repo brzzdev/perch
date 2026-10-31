@@ -2,6 +2,6 @@ Usage: perch shell init <bash|fish|zsh>
                                   Print the shell integration script
        perch shell install    Add the shell integration to your rc file
 
-install reads your shell from $SHELL and appends one line to ~/.zshrc
-(under $ZDOTDIR if set), ~/.bashrc, or ~/.config/fish/conf.d/perch.fish
-(under $XDG_CONFIG_HOME if set). Running it again changes nothing.
+install reads your shell from $SHELL and appends one line to ~/.bashrc,
+~/.config/fish/conf.d/perch.fish (under $XDG_CONFIG_HOME if set), or
+~/.zshrc (under $ZDOTDIR if set). Running it again changes nothing.

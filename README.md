@@ -191,9 +191,9 @@ This reads your shell from `$SHELL` and adds one line to its startup file, then 
 
 | Shell | File | Line |
 | ----- | ---- | ---- |
-| zsh | `~/.zshrc` (or `$ZDOTDIR/.zshrc`) | `eval "$(perch shell init zsh)"` |
 | bash | `~/.bashrc` | `eval "$(perch shell init bash)"` |
 | fish | `~/.config/fish/conf.d/perch.fish` (or under `$XDG_CONFIG_HOME`) | `perch shell init fish \| source` |
+| zsh | `~/.zshrc` (or `$ZDOTDIR/.zshrc`) | `eval "$(perch shell init zsh)"` |
 
 `perch shell init <shell>` prints the wrapper script, which is built into the binary, so the wrapper is always the one that matches the `perch` you have. To set it up by hand, add the line from the table yourself.
 

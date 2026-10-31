@@ -4,7 +4,7 @@ The shell integration used to be two files a user copied to `~/.config/perch/` a
 
 ## Considered options
 
-- **A flag**, such as `perch --shell-init zsh`. It shadows no branch, since a ref can't start with `-`, but setup would read as an option on navigation. `--version` and `--help` are flags because they're about the binary. Setting up the shell is a command with its own subcommands.
+- **A flag**, such as `perch --shell-init zsh`. It shadows no branch, since a ref can't start with `-`, but setup would read as an option on navigation. `--version` and `--help` are flags because they're about the binary. Setting up the shell is a command word with words of its own, `init` and `install`.
 - **Leaving top-level words to the *Verb*s.** [ADR 0007](./0007-three-verbs-one-per-intent.md) declined to guard top-level `worktree` rather than put a branch by that name out of reach. Applied here, that rule would force setup into a separate binary or a flag.
 
 ## Consequences

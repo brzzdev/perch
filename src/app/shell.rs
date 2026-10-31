@@ -1,5 +1,5 @@
 use std::env;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
@@ -9,7 +9,7 @@ use crate::grammar::Shell;
 use crate::{AppResult, Error};
 
 impl Shell {
-    fn script(self) -> &'static str {
+    pub(crate) fn script(self) -> &'static str {
         match self {
             Self::Bash | Self::Zsh => include_str!("../../shell/perch.sh"),
             Self::Fish => include_str!("../../shell/perch.fish"),
@@ -24,7 +24,6 @@ impl Shell {
         }
     }
 
-    /// The file each shell reads at startup, wherever its own variables move it.
     fn rc_file(self, home: &Path) -> PathBuf {
         match self {
             Self::Bash => home.join(".bashrc"),
@@ -36,10 +35,6 @@ impl Shell {
                 .join(".zshrc"),
         }
     }
-}
-
-pub(crate) fn run_init(shell: Shell) {
-    print!("{}", shell.script());
 }
 
 pub(crate) fn run_install() -> AppResult<()> {
@@ -84,14 +79,9 @@ fn login_shell() -> AppResult<Shell> {
         non_empty_var("SHELL").ok_or_else(|| Error::ShellInstall("$SHELL is not set".into()))?;
     let name = Path::new(&path)
         .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
+        .and_then(OsStr::to_str)
         .unwrap_or_default();
-    Shell::from_name(&name).ok_or_else(|| {
-        Error::ShellInstall(format!(
-            "unsupported shell '{name}' (from $SHELL); perch supports {}",
-            Shell::SUPPORTED
-        ))
-    })
+    Shell::parse(name).map_err(|message| Error::ShellInstall(format!("$SHELL: {message}")))
 }
 
 fn non_empty_var(key: &str) -> Option<OsString> {

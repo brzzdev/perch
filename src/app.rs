@@ -107,7 +107,7 @@ pub(crate) fn run_invocation(invocation: Invocation) -> AppResult<()> {
         Invocation::ListWorktrees => wt::run_ls(),
         Invocation::RemoveWorktrees(removal) => wt::run_rm(&removal),
         Invocation::InitShell(shell) => {
-            shell::run_init(shell);
+            print!("{}", shell.script());
             Ok(())
         }
         Invocation::InstallShell => shell::run_install(),

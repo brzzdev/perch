@@ -98,14 +98,14 @@ pub(crate) enum Shell {
 }
 
 impl Shell {
-    pub(crate) const SUPPORTED: &str = "bash, fish or zsh";
-
-    pub(crate) fn from_name(name: &str) -> Option<Self> {
+    pub(crate) fn parse(name: &str) -> Result<Self, String> {
         match name {
-            "bash" => Some(Self::Bash),
-            "fish" => Some(Self::Fish),
-            "zsh" => Some(Self::Zsh),
-            _ => None,
+            "bash" => Ok(Self::Bash),
+            "fish" => Ok(Self::Fish),
+            "zsh" => Ok(Self::Zsh),
+            _ => Err(format!(
+                "unsupported shell '{name}'; expected bash, fish or zsh"
+            )),
         }
     }
 }
@@ -264,39 +264,27 @@ pub(crate) fn parse(args: &[String]) -> Result<Invocation, GrammarError> {
         Some("--version" | "-V") => Ok(Invocation::Version),
         Some("--complete") => Ok(branch_completion(Position::Bare)),
         Some("--") => Ok(parse_escaped(args.get(1), Verb::Go)),
-        Some(SHELL_COMMAND) => parse_shell(&args[1..]),
-        Some(word) => match parse_verb(word) {
-            Some(Verb::Here) => parse_branch(&args[1..]),
-            Some(Verb::Worktree) => parse_worktree(&args[1..]),
-            Some(Verb::Go) => unreachable!("go is the absence of a command word"),
+        Some(word) => match parse_command(word) {
+            Some(Command::Branch) => parse_branch(&args[1..]),
+            Some(Command::Shell) => parse_shell(&args[1..]),
+            Some(Command::Worktree) => parse_worktree(&args[1..]),
             None => Ok(navigate(Verb::Go, Some(word))),
         },
         None => Ok(navigate(Verb::Go, None)),
     }
 }
 
-const SHELL_COMMAND: &str = "shell";
-
 pub(crate) fn needs_top_level_escape(word: &str) -> bool {
-    parse_verb(word).is_some() || word == SHELL_COMMAND
+    parse_command(word).is_some()
 }
 
 fn parse_shell(args: &[String]) -> Result<Invocation, GrammarError> {
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
     match words.as_slice() {
         ["--help" | "-h"] => Ok(Invocation::Help(HelpPage::Shell)),
-        ["init", name] => Shell::from_name(name)
+        ["init", name] => Shell::parse(name)
             .map(Invocation::InitShell)
-            .ok_or_else(|| {
-                GrammarError::shell(format!(
-                    "unsupported shell '{name}'; expected {}",
-                    Shell::SUPPORTED
-                ))
-            }),
-        ["init"] => Err(GrammarError::shell(format!(
-            "missing shell; expected {}",
-            Shell::SUPPORTED
-        ))),
+            .map_err(GrammarError::shell),
         ["install"] => Ok(Invocation::InstallShell),
         _ => Err(GrammarError::shell(
             "expected `init <shell>` or `install`".to_string(),
@@ -504,10 +492,18 @@ fn branch_completion(position: Position) -> Invocation {
     })
 }
 
-fn parse_verb(word: &str) -> Option<Verb> {
+#[derive(Clone, Copy)]
+enum Command {
+    Branch,
+    Shell,
+    Worktree,
+}
+
+fn parse_command(word: &str) -> Option<Command> {
     match word {
-        "br" => Some(Verb::Here),
-        "wt" => Some(Verb::Worktree),
+        "br" => Some(Command::Branch),
+        "shell" => Some(Command::Shell),
+        "wt" => Some(Command::Worktree),
         _ => None,
     }
 }
@@ -804,10 +800,6 @@ mod tests {
         assert_eq!(
             parse(&args(&["shell", "install"])),
             Ok(Invocation::InstallShell)
-        );
-        assert_eq!(
-            parse(&args(&["--", "shell"])),
-            Ok(navigate(Verb::Go, Some("shell")))
         );
     }
 

@@ -393,10 +393,10 @@ pub fn submodule_fetch_switched_off(dir: &Path) -> bool {
 /// no boolean at all.
 fn last_recursion_is_off(entries: &[String]) -> bool {
     let Some(last) = entries.iter().rfind(|entry| {
-        let key = entry
-            .split_once('\n')
-            .map_or(entry.as_str(), |(key, _)| key);
-        matches!(key, "fetch.recursesubmodules" | "submodule.recurse")
+        matches!(
+            config_key(entry),
+            "fetch.recursesubmodules" | "submodule.recurse"
+        )
     }) else {
         return false;
     };
@@ -407,6 +407,11 @@ fn last_recursion_is_off(entries: &[String]) -> bool {
         value.to_ascii_lowercase().as_str(),
         "" | "0" | "false" | "no" | "off"
     )
+}
+
+/// The key of a [`config_entries`] entry.
+fn config_key(entry: &str) -> &str {
+    entry.split_once('\n').map_or(entry, |(key, _)| key)
 }
 
 /// The URL `remote` fetches from, as resolved in `dir`. The same remote name
@@ -1557,30 +1562,40 @@ fn content_present(dir: Option<&Path>, anchor: &str, tip: &str, touched: &[Strin
 
 /// Whether merging `tip` into the anchor would leave the anchor's tree exactly
 /// as it is. A merge driver could get there by discarding the branch's side, so
-/// one named for any touched path proves nothing; ADR 0005 has the limits.
+/// one that may run on any touched path proves nothing; ADR 0005 has the limits.
 fn merge_adds_nothing(dir: Option<&Path>, anchor: &str, tip: &str, touched: &[String]) -> bool {
-    let merges = || {
-        // Only an explicitly empty `merge.default` leaves the built-in text driver.
-        let default_driver = config_entries(dir).into_iter().rfind(|entry| {
-            entry
-                .split_once('\n')
-                .map_or(entry.as_str(), |(key, _)| key)
-                == "merge.default"
-        });
-        if default_driver.is_some_and(|entry| entry != "merge.default\n") {
+    let adds_nothing = || {
+        let config = config_entries(dir);
+        // A repository's config is never empty, so this is a failed read.
+        if config.is_empty() {
             return None;
         }
+        // Git looks a driver name up among `merge.<name>.*` before its built-ins,
+        // and `check-attr` prints a literal `merge=unset` exactly as it prints
+        // `-merge`, so every name is judged by what it could select.
+        let custom_drivers: HashSet<&str> = config
+            .iter()
+            .filter_map(|entry| config_key(entry).strip_prefix("merge.")?.rsplit_once('.'))
+            .map(|(name, _)| name)
+            .collect();
+        let discards = |driver: &str| driver == "union" || custom_drivers.contains(driver);
+        let default_discards = config
+            .iter()
+            .rfind(|entry| config_key(entry) == "merge.default")
+            .is_some_and(|entry| {
+                entry
+                    .split_once('\n')
+                    .is_none_or(|(_, name)| discards(name))
+            });
         let mut attr_args = vec!["check-attr", "-z", "merge", "--"];
         attr_args.extend(touched.iter().map(String::as_str));
         let attrs = run_in(dir, &attr_args).ok()?;
-        // `-z` output is `<path> NUL merge NUL <value> NUL` per path. `unset`
-        // is `-merge`, the built-in binary driver, which conflicts rather than
-        // choosing a side.
-        if !attrs
+        // `-z` output is `<path> NUL merge NUL <value> NUL` per path.
+        if attrs
             .split('\0')
             .skip(2)
             .step_by(3)
-            .all(|value| matches!(value, "unspecified" | "unset"))
+            .any(|value| discards(value) || (value == "unspecified" && default_discards))
         {
             return None;
         }
@@ -1603,7 +1618,7 @@ fn merge_adds_nothing(dir: Option<&Path>, anchor: &str, tip: &str, touched: &[St
         let anchor_tree = resolve(dir, &format!("{anchor}^{{tree}}"))?;
         Some(merged.lines().next()? == anchor_tree)
     };
-    merges().unwrap_or(false)
+    adds_nothing().unwrap_or(false)
 }
 
 /// What `refname` points at, or `None` where it doesn't resolve. A ref that is

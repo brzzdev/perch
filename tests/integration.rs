@@ -6680,6 +6680,7 @@ fn shell_install_follows_a_zdotdir_that_zshenv_sets_without_exporting() {
 enum Landing {
     FirstCommitOnly,
     RebaseMergeThenEdit,
+    SquashThenRevertHalf,
     SquashWithAnExtraHunk,
 }
 
@@ -6722,6 +6723,12 @@ fn land_two_edits(work: &Path, landing: Landing) {
             git(work, &["commit", "-am", "edit nine"]);
             git(work, &["push", "origin", "main"]);
             return;
+        }
+        Landing::SquashThenRevertHalf => {
+            git(work, &["merge", "--squash", "feature"]);
+            git(work, &["commit", "-m", "squash feature"]);
+            edit_line(work, 4, "4");
+            git(work, &["commit", "-am", "revert edit four"]);
         }
         Landing::SquashWithAnExtraHunk => {
             git(work, &["merge", "--squash", "feature"]);
@@ -6827,9 +6834,23 @@ fn a_conflicting_merge_leaves_the_branch_unproven_and_says_nothing_of_it() {
     assert_eq!(stderr.lines().count(), 1, "only the refusal: {stderr}");
 }
 
+/// Merging again would bring the reverted half back, so only the patch route
+/// proves this one.
+#[test]
+fn br_rm_still_deletes_a_squash_the_anchor_half_reverted() {
+    let (_bare, work) = setup();
+    land_two_edits(work.path(), Landing::SquashThenRevertHalf);
+
+    let output = perch_args(work.path(), &["br", "rm", "feature"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(!local_branch_exists(work.path(), "feature"));
+}
+
 /// `feature` edits line 2 of `f.txt`, which `main` never takes, while `main`
-/// edits line 4 and configures a `keep` driver that always keeps `main`'s side.
-fn unlanded_edit_under_a_keep_driver(work: &Path) {
+/// edits line 4 and configures `driver`, a merge driver that always keeps
+/// `main`'s side.
+fn unlanded_edit_under_a_keeping_driver(work: &Path, driver: &str) {
     fs::write(work.join("f.txt"), "1\n2\n3\n4\n5\n").unwrap();
     git(work, &["add", "f.txt"]);
     git(work, &["commit", "-m", "five lines"]);
@@ -6840,29 +6861,59 @@ fn unlanded_edit_under_a_keep_driver(work: &Path) {
     edit_line(work, 4, "4m");
     git(work, &["commit", "-am", "edit four"]);
     git(work, &["push", "origin", "main"]);
-    git(work, &["config", "merge.keep.driver", "true"]);
+    git(work, &["config", &format!("merge.{driver}.driver"), "true"]);
 }
 
+fn assert_br_rm_refuses_feature(work: &Path, case: &str) {
+    let output = perch_args(work, &["br", "rm", "feature"]);
+
+    assert!(!output.status.success(), "{case}");
+    assert!(local_branch_exists(work, "feature"), "{case}");
+}
+
+/// `check-attr` prints a literal `merge=unset` exactly as it prints `-merge`.
 #[test]
 fn a_merge_attribute_naming_a_driver_proves_nothing() {
-    let (_bare, work) = setup();
-    unlanded_edit_under_a_keep_driver(work.path());
-    fs::write(work.path().join(".gitattributes"), "f.txt merge=keep\n").unwrap();
+    for driver in ["keep", "unset"] {
+        let (_bare, work) = setup();
+        unlanded_edit_under_a_keeping_driver(work.path(), driver);
+        fs::write(
+            work.path().join(".gitattributes"),
+            format!("f.txt merge={driver}\n"),
+        )
+        .unwrap();
 
-    let output = perch_args(work.path(), &["br", "rm", "feature"]);
-
-    assert!(!output.status.success());
-    assert!(local_branch_exists(work.path(), "feature"));
+        assert_br_rm_refuses_feature(work.path(), driver);
+    }
 }
 
+/// An empty `merge.default` names the driver `merge..driver` defines.
 #[test]
 fn a_default_merge_driver_proves_nothing() {
+    for driver in ["keep", ""] {
+        let (_bare, work) = setup();
+        unlanded_edit_under_a_keeping_driver(work.path(), driver);
+        git(work.path(), &["config", "merge.default", driver]);
+
+        assert_br_rm_refuses_feature(work.path(), driver);
+    }
+}
+
+/// `union` keeps `main`'s line where the branch deleted it.
+#[test]
+fn a_union_merge_attribute_proves_nothing() {
     let (_bare, work) = setup();
-    unlanded_edit_under_a_keep_driver(work.path());
-    git(work.path(), &["config", "merge.default", "keep"]);
+    fs::write(work.path().join("f.txt"), "1\n2\n3\n").unwrap();
+    git(work.path(), &["add", "f.txt"]);
+    git(work.path(), &["commit", "-m", "three lines"]);
+    git(work.path(), &["checkout", "-b", "feature"]);
+    fs::write(work.path().join("f.txt"), "1\n3\n").unwrap();
+    git(work.path(), &["commit", "-am", "delete two"]);
+    git(work.path(), &["checkout", "main"]);
+    edit_line(work.path(), 2, "2m");
+    git(work.path(), &["commit", "-am", "edit two"]);
+    git(work.path(), &["push", "origin", "main"]);
+    fs::write(work.path().join(".gitattributes"), "f.txt merge=union\n").unwrap();
 
-    let output = perch_args(work.path(), &["br", "rm", "feature"]);
-
-    assert!(!output.status.success());
-    assert!(local_branch_exists(work.path(), "feature"));
+    assert_br_rm_refuses_feature(work.path(), "union");
 }

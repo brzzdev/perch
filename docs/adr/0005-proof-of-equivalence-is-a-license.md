@@ -53,17 +53,19 @@ Three routes, and any one proves it, because work lands in more shapes than one 
   nothing a merge would keep, so deleting it loses nothing. This answers the shapes the other two
   routes miss: a rebase-merge, or a squash, that the anchor has since edited around in the same files.
   It is tried after them, never instead of them. Wherever it can run it also proves everything the
-  content route does, so the content route remains for the paths and gits this one refuses. A branch the anchor took and then partly reverted is
-  proven only by the patch route, because merging it again would bring the reverted half back. A merge
-  driver can make a merge add nothing by throwing away the branch's side: an `ours`-style driver, or
-  `union` keeping a line the branch deleted. So a path the branch touched whose `merge` attribute
-  names a driver, or a `merge.default` that names one for every path, proves nothing on this route.
-  `-merge` selects the built-in binary driver, which conflicts rather than picking a side, so it is
-  allowed. Rename detection is off for the simulation so that every content merge happens at a path
+  content route does, so the content route remains for the paths and gits this one refuses. A branch
+  the anchor took and then partly reverted is proven only by the patch route, because merging it
+  again would bring the reverted half back. A merge driver can make a merge add nothing by throwing
+  away the branch's side: an `ours`-style driver, or `union` keeping a line the branch deleted. So a
+  path the branch touched proves nothing on this route where its `merge` attribute could select
+  `union` or any driver the config defines, and an unattributed path likewise where `merge.default`
+  could. The attribute's value is judged by name, because git looks names up among the configured
+  drivers before its built-ins, and `check-attr` prints a literal `merge=unset` exactly as it prints
+  `-merge`. Rename detection is off for the simulation so that every content merge happens at a path
   the branch touched, which is where the attributes were checked. Renormalisation is off too, so a
-  branch whose change was only line endings cannot merge away. A conflict, any other failure, or a git
-  older than 2.38 (which has no `--write-tree`) is an inconclusive proof. Like the other routes, this
-  one asks about the same pair of resolved commits the proof records.
+  branch whose change was only line endings cannot merge away. A conflict, any other failure, or a
+  git older than 2.38 (which has no `--write-tree`) is an inconclusive proof. Like the other routes,
+  this one asks about the same pair of resolved commits the proof records.
 
 ## Consequences
 

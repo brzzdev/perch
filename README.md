@@ -302,6 +302,19 @@ git config --add perch.keep develop
 git config --add perch.keep staging
 ```
 
+### Build caches for new worktrees
+
+A new worktree starts with no build output, so its first build starts from zero. List paths, relative to the repository root, to clone from the main checkout into each worktree `perch wt` creates:
+
+```sh
+git config --add perch.copy target
+git config --add perch.copy node_modules
+```
+
+Each path is cloned copy-on-write (APFS `clonefile` on macOS, reflinks on Linux btrfs and XFS), so it takes almost no disk space until a file in it changes. Symlinks are cloned as links. `du` counts a clone at full size; `df` shows what it really cost. Cloning happens before the `created` hook fires, and never when `perch wt` switches into a worktree that already exists.
+
+`perch` never falls back to a byte-for-byte copy. Where a path can't be cloned, because the filesystem can't clone or the worktree sits on another volume, it is skipped with a warning and creation carries on. A path missing from the main checkout is skipped silently. One already in the new worktree, because it is tracked, is left alone with a warning, and one outside the repository (`..`, absolute) is rejected with a warning.
+
 ### Worktree hooks
 
 Run a shell command when a worktree is created or removed — to open it in an editor, register it with a session manager, or forget it again when it goes:

@@ -9,7 +9,7 @@ use super::picker::{PickerOptions, Selection, interactive_keys, pick};
 use super::prefetch::{FetchedRemote, Prefetch, fetch_unless_covered};
 use super::{
     build_catalogue, display_path, fetch_and_ff, handoff_cd, hook, marker, picker,
-    prompt_delete_stale_branches, removal, report_fetch_failure, report_update,
+    prompt_delete_stale_branches, removal, report_fetch_failure, report_update, seed,
     select_removal_locals, spinner, warn,
 };
 use crate::grammar::{ShellHandoff, Verb, WorktreeRemoval};
@@ -327,10 +327,11 @@ pub(crate) fn update_in(
     Ok(())
 }
 
-/// Creates the worktree for `branch` and reports it — to the user, and to the
-/// created hook. Every worktree `perch` creates comes through here, which
-/// is what makes the hook a consequence of creation and of nothing else rather
-/// than a line each creation arm has to remember.
+/// Creates the worktree for `branch`, seeds it with the configured build
+/// caches, and reports it — to the user, and to the created hook. Every
+/// worktree `perch` creates comes through here, which is what makes the hook a
+/// consequence of creation and of nothing else rather than a line each creation
+/// arm has to remember.
 ///
 /// Fetches `remote` first unless `fetched` covers it. A failed fetch is
 /// reported and creation goes ahead regardless: a new branch made offline is
@@ -373,6 +374,7 @@ fn create_worktree(
             path.display()
         );
     }
+    seed::seed(main_path, &path);
     hook::fire(hook::Event::Created, &path, Some(branch), main_path);
     Ok(path)
 }

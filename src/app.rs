@@ -16,6 +16,7 @@ pub(crate) mod picker;
 pub(crate) mod prefetch;
 mod reclamation;
 pub(crate) mod removal;
+mod seed;
 mod shell;
 pub mod wt;
 

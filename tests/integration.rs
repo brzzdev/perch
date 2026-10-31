@@ -6459,6 +6459,67 @@ fn a_chatty_wt_hook_cannot_corrupt_the_handoff() {
     );
 }
 
+/// The main worktree's `target/`, with a file and a symlink to it, configured
+/// for cloning beside entries that must each be refused or skipped.
+fn configure_cache_to_copy(work: &Path) {
+    let target = work.join("target");
+    fs::create_dir(&target).unwrap();
+    fs::write(target.join("dep.rlib"), "built\n").unwrap();
+    std::os::unix::fs::symlink("dep.rlib", target.join("link")).unwrap();
+    for entry in ["target", "../escape", "missing", "file.txt"] {
+        git(work, &["config", "--add", "perch.copy", entry]);
+    }
+}
+
+/// Where the filesystem can clone, `target/` arrives as an independent copy;
+/// where it can't, it is skipped with a warning and nothing is written. Either
+/// way the worktree is created, and the other entries are refused or skipped.
+#[test]
+fn wt_seeds_a_new_worktree_with_copy_on_write_clones() {
+    let (_bare, parent, work) = setup_with_parent();
+    configure_cache_to_copy(&work);
+
+    let output = perch_args(&work, &["wt", "feature"]);
+    let stderr = stderr_str(&output);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert!(stderr.contains("not copying ../escape"), "stderr: {stderr}");
+    assert!(stderr.contains("not copying file.txt"), "stderr: {stderr}");
+    assert!(!stderr.contains("not copying missing"), "stderr: {stderr}");
+
+    let cloned = parent.path().join("worktrees/repo/feature/target");
+    let clone_supported = !stderr.contains("not copying target");
+    assert!(
+        clone_supported || !cfg!(target_os = "macos"),
+        "APFS should clone; stderr: {stderr}"
+    );
+    if !clone_supported {
+        assert!(!cloned.exists(), "a failed clone should leave nothing");
+        return;
+    }
+    assert_eq!(
+        fs::read_link(cloned.join("link")).unwrap(),
+        Path::new("dep.rlib")
+    );
+    fs::write(cloned.join("dep.rlib"), "edited\n").unwrap();
+    assert_eq!(
+        fs::read_to_string(work.join("target/dep.rlib")).unwrap(),
+        "built\n"
+    );
+}
+
+#[test]
+fn wt_into_an_existing_worktree_clones_nothing() {
+    let (_bare, parent, work) = setup_with_parent();
+    let existing = add_worktree_branch(&work, parent.path(), "feature");
+    configure_cache_to_copy(&work);
+
+    let output = perch_args(&work, &["wt", "feature"]);
+    let stderr = stderr_str(&output);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert!(!stderr.contains("not copying"), "stderr: {stderr}");
+    assert!(!existing.join("target").exists());
+}
+
 /// Cleanup removes a stale branch's worktree synchronously rather than through
 /// the reclamation worker, so this is the other path that has to prune.
 #[test]

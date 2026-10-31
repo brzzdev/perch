@@ -846,6 +846,15 @@ pub fn hook_command(event: &str) -> Option<String> {
     }
 }
 
+/// The `perch.copy` entries: paths, relative to the repository root, to clone
+/// into each new worktree.
+#[must_use]
+pub(crate) fn copy_paths() -> Vec<String> {
+    run(&["config", "--get-all", "perch.copy"])
+        .map(|o| o.lines().map(String::from).collect())
+        .unwrap_or_default()
+}
+
 #[must_use]
 pub(crate) fn default_branch(remote: &str) -> Option<String> {
     let head_ref = format!("refs/remotes/{remote}/HEAD");

@@ -1,0 +1,56 @@
+name: Homebrew
+
+# Releases are drafted and published by hand, and a draft's archives can't be
+# downloaded, so the formula follows publication rather than the tag.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Published tag to point the formula at (e.g. v2.8.0)"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency: homebrew-tap
+
+env:
+  TAG: ${{ inputs.tag || github.event.release.tag_name }}
+
+jobs:
+  formula:
+    if: ${{ !github.event.release.prerelease }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Render the formula
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download "$TAG" --pattern SHA256SUMS
+          .github/homebrew/formula.sh "${TAG#v}" SHA256SUMS > perch.rb
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: brzzdev/homebrew-tap
+          ssh-key: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+          path: tap
+
+      - name: Push to the tap
+        working-directory: tap
+        run: |
+          mkdir -p Formula
+          cp ../perch.rb Formula/perch.rb
+          git add Formula/perch.rb
+          if git diff --cached --quiet; then
+            echo "Formula already points at $TAG"
+            exit 0
+          fi
+          git -c user.name="github-actions[bot]" \
+            -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit --quiet -m "perch ${TAG#v}"
+          git push --quiet

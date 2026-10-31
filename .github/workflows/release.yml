@@ -39,13 +39,14 @@ jobs:
       - run: cargo build --release --target ${{ matrix.target }}
 
       # The archive unpacks to a self-contained directory: the binary plus the
-      # completions and shell wrappers `just install-*` would otherwise supply.
+      # completions `just install-completions` would otherwise supply. The shell
+      # wrapper ships inside the binary, behind `perch shell init`.
       - name: Stage the archive contents
         run: |
           stage="perch-${{ matrix.target }}"
           mkdir -p "$stage"
           cp "target/${{ matrix.target }}/release/perch" "$stage/"
-          cp -R completions shell "$stage/"
+          cp -R completions "$stage/"
           cp README.md LICENSE "$stage/"
           tar -czf "$stage.tar.gz" "$stage"
 

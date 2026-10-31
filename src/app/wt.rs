@@ -446,15 +446,10 @@ fn resolve_target(
         Existence::MustExist => Err(Error::Vanished {
             branch: name.to_string(),
         }),
-        // Without submodules the prefetch has already looked; with them it never
-        // ran, and `create_worktree` fetches the branch this finds.
-        Existence::Requested(_) if git::server_has_branch(remote, name) => {
+        Existence::Requested(reference) => {
+            reference.ensure_head_exists(name, remote)?;
             Ok(Action::CreateForBranch(name.to_string()))
         }
-        Existence::Requested(reference) => Err(reference.error(forge::Problem::HeadMissing {
-            branch: name.to_string(),
-            remote: remote.to_string(),
-        })),
     }
 }
 

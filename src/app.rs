@@ -259,7 +259,7 @@ pub(crate) fn navigation_remote(
     reference: Option<forge::Reference>,
 ) -> String {
     match reference {
-        Some(_) => forge::REMOTE.to_string(),
+        Some(_) => git::DEFAULT_REMOTE.to_string(),
         None => git::current_remote(current),
     }
 }

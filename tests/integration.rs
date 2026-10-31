@@ -6466,7 +6466,7 @@ fn configure_cache_to_copy(work: &Path) {
     fs::create_dir(&target).unwrap();
     fs::write(target.join("dep.rlib"), "built\n").unwrap();
     std::os::unix::fs::symlink("dep.rlib", target.join("link")).unwrap();
-    for entry in ["target", "../escape", "missing", "file.txt"] {
+    for entry in ["target/", "../escape", "missing", "file.txt"] {
         git(work, &["config", "--add", "perch.copy", entry]);
     }
 }
@@ -6487,7 +6487,7 @@ fn wt_seeds_a_new_worktree_with_copy_on_write_clones() {
     assert!(!stderr.contains("not copying missing"), "stderr: {stderr}");
 
     let cloned = parent.path().join("worktrees/repo/feature/target");
-    let clone_supported = !stderr.contains("not copying target");
+    let clone_supported = !stderr.contains("not copying target/");
     assert!(
         clone_supported || !cfg!(target_os = "macos"),
         "APFS should clone; stderr: {stderr}"
@@ -6505,6 +6505,31 @@ fn wt_seeds_a_new_worktree_with_copy_on_write_clones() {
         fs::read_to_string(work.join("target/dep.rlib")).unwrap(),
         "built\n"
     );
+}
+
+/// A branch can track a symlink where the main checkout has a directory, which
+/// would otherwise carry the clone out of the worktree.
+#[test]
+fn wt_refuses_to_seed_through_a_symlink_in_the_new_worktree() {
+    let (_bare, parent, work) = setup_with_parent();
+    let outside = parent.path().join("outside");
+    fs::create_dir(&outside).unwrap();
+    git(&work, &["checkout", "-b", "linked"]);
+    std::os::unix::fs::symlink(&outside, work.join("web")).unwrap();
+    git(&work, &["add", "web"]);
+    git(&work, &["commit", "-m", "link web"]);
+    git(&work, &["checkout", "main"]);
+    fs::create_dir_all(work.join("web/node_modules")).unwrap();
+    git(&work, &["config", "perch.copy", "web/node_modules"]);
+
+    let output = perch_args(&work, &["wt", "linked"]);
+    let stderr = stderr_str(&output);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert!(
+        stderr.contains("is a symlink in the new worktree"),
+        "stderr: {stderr}"
+    );
+    assert!(!outside.join("node_modules").exists());
 }
 
 #[test]

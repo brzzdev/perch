@@ -1,19 +1,14 @@
-//! Seeding a new worktree with copy-on-write clones of the main worktree's
-//! build caches, the paths configured as `perch.copy`.
-//!
-//! Only a real clone is ever made. Where the filesystem can't clone, the path
-//! is skipped with a warning rather than deep-copied, since a byte-for-byte
-//! copy of a `target/` can fill the disk.
+//! Seeding a new worktree with copy-on-write clones of the paths configured as
+//! `perch.copy`. Never a byte-for-byte copy, which for a `target/` can fill the disk.
 
 use std::io;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 use super::{spinner, warn};
 use crate::git;
 
 /// Clones each `perch.copy` path that exists in `main` into the same place in
-/// `worktree`. Every failure is a warning: the worktree is usable without its
-/// caches, only slower to build.
+/// `worktree`, warning about each one it can't.
 pub(crate) fn seed(main: &Path, worktree: &Path) {
     for entry in git::config_values("perch.copy") {
         if let Err(reason) = seed_one(main, worktree, &entry) {
@@ -23,18 +18,13 @@ pub(crate) fn seed(main: &Path, worktree: &Path) {
 }
 
 fn seed_one(main: &Path, worktree: &Path, entry: &str) -> Result<(), String> {
-    let relative = Path::new(entry);
-    if !stays_inside(relative) {
-        return Err("it is not a path inside the repository".into());
-    }
-    let source = main.join(relative);
+    let relative = inside_path(entry).ok_or("it is not a path inside the repository")?;
+    let source = main.join(&relative);
     if source.symlink_metadata().is_err() {
         return Ok(());
     }
-    let destination = worktree.join(relative);
-    if destination.symlink_metadata().is_ok() {
-        return Err("it already exists in the new worktree".into());
-    }
+    let created = first_missing(worktree, &relative)?;
+    let destination = worktree.join(&relative);
     if let Some(parent) = destination.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -43,17 +33,43 @@ fn seed_one(main: &Path, worktree: &Path, entry: &str) -> Result<(), String> {
     let result = clone_tree(&source, &destination);
     spinner.finish_and_clear();
     result.map_err(|error| {
-        remove_partial(&destination);
+        remove_partial(&created);
         reason(&error)
     })
 }
 
-/// A relative path with no `..`, so joined onto either worktree it stays inside.
-fn stays_inside(path: &Path) -> bool {
-    path.file_name().is_some()
-        && path
-            .components()
-            .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+/// `entry` rebuilt from its parts, without a trailing slash, or `None` where it
+/// could leave the repository.
+fn inside_path(entry: &str) -> Option<PathBuf> {
+    let mut path = PathBuf::new();
+    for component in Path::new(entry).components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(part) => path.push(part),
+            _ => return None,
+        }
+    }
+    (!path.as_os_str().is_empty()).then_some(path)
+}
+
+/// The first path on the way to `relative` that `worktree` lacks, which is what
+/// cloning it creates. A symlink on the way could lead out of the worktree.
+fn first_missing(worktree: &Path, relative: &Path) -> Result<PathBuf, String> {
+    let mut path = worktree.to_path_buf();
+    let mut components = relative.components().peekable();
+    while let Some(component) = components.next() {
+        path.push(component);
+        let Ok(metadata) = path.symlink_metadata() else {
+            return Ok(path);
+        };
+        if metadata.is_symlink() && components.peek().is_some() {
+            return Err(format!(
+                "{} is a symlink in the new worktree",
+                path.display()
+            ));
+        }
+    }
+    Err("it already exists in the new worktree".into())
 }
 
 fn remove_partial(destination: &Path) {
@@ -75,6 +91,7 @@ fn reason(error: &io::Error) -> String {
 }
 
 /// APFS clones a whole directory tree in one call, symlinks included as links.
+/// clonefile(2) steers directories to copyfile(3), which clones file by file.
 #[cfg(target_os = "macos")]
 fn clone_tree(source: &Path, destination: &Path) -> io::Result<()> {
     use std::ffi::CString;
@@ -107,13 +124,13 @@ fn clone_tree(source: &Path, destination: &Path) -> io::Result<()> {
         return symlink(fs::read_link(source)?, destination);
     }
     if file_type.is_dir() {
+        // Left writable, so a failure part-way can still remove what was cloned.
         fs::create_dir(destination)?;
         for entry in fs::read_dir(source)? {
             let entry = entry?;
             clone_tree(&entry.path(), &destination.join(entry.file_name()))?;
         }
-        // Set last, so a read-only directory still takes its contents.
-        return fs::set_permissions(destination, metadata.permissions());
+        return Ok(());
     }
     if !file_type.is_file() {
         return Ok(());
@@ -142,12 +159,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_a_path_below_the_root_stays_inside() {
-        for inside in ["target", "./target", "web/node_modules"] {
-            assert!(stays_inside(Path::new(inside)), "{inside}");
+    fn only_a_path_below_the_root_is_inside() {
+        for (entry, inside) in [
+            ("./target", "target"),
+            ("target/", "target"),
+            ("web/node_modules", "web/node_modules"),
+        ] {
+            assert_eq!(inside_path(entry), Some(PathBuf::from(inside)), "{entry}");
         }
         for outside in ["", ".", "../escape", "web/../../escape", "/etc"] {
-            assert!(!stays_inside(Path::new(outside)), "{outside}");
+            assert_eq!(inside_path(outside), None, "{outside}");
         }
     }
 }

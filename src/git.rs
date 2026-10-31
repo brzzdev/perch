@@ -849,8 +849,8 @@ pub fn hook_command(event: &str) -> Option<String> {
 /// Every value of the multi-valued config `key`, empty when it's unset.
 #[must_use]
 pub(crate) fn config_values(key: &str) -> Vec<String> {
-    run(&["config", "--get-all", key])
-        .map(|o| o.lines().map(String::from).collect())
+    run(&["config", "--null", "--get-all", key])
+        .map(|o| o.split_terminator('\0').map(String::from).collect())
         .unwrap_or_default()
 }
 

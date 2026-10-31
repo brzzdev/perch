@@ -24,7 +24,7 @@ explicit `--force`, which [ADR 0001](./0001-warned-means-forceable.md) did not a
 
 ## How it is proven
 
-Three routes, and any one proves it, because work lands in more shapes than one test sees (ancestry, from ADR 0012, comes before all three):
+Three routes, and any one proves it, because work lands in more shapes than one test sees:
 
 - **The patch already landed.** The branch's whole diff over its merge-base is synthesised as one
   commit and handed to `git cherry`, which answers by patch id. This survives the anchor moving on
@@ -52,7 +52,8 @@ Three routes, and any one proves it, because work lands in more shapes than one 
   touching a worktree. If that merge is clean and its tree is exactly the anchor's, the branch holds
   nothing a merge would keep, so deleting it loses nothing. This answers the shapes the other two
   routes miss: a rebase-merge, or a squash, that the anchor has since edited around in the same files.
-  It is tried after them, never instead of them. A branch the anchor took and then partly reverted is
+  It is tried after them, never instead of them. Wherever it can run it also proves everything the
+  content route does, so the content route remains for the paths and gits this one refuses. A branch the anchor took and then partly reverted is
   proven only by the patch route, because merging it again would bring the reverted half back. A merge
   driver can make a merge add nothing by throwing away the branch's side: an `ours`-style driver, or
   `union` keeping a line the branch deleted. So a path the branch touched whose `merge` attribute
@@ -98,5 +99,6 @@ Three routes, and any one proves it, because work lands in more shapes than one 
 - **How a branch landed stops being visible.** With no marker, a squash merge and a real merge look
   alike in the picker. The picker answers "may this go?", not "how did it get in?".
 - **Answering costs a write.** The proof synthesises the branch's diff as one commit via
-  `commit-tree`, which puts a dangling object in the repository — the only mutation git-switch makes
-  in order to observe something. It is unreachable and gc reaps it.
+  `commit-tree`, and `merge-tree --write-tree` writes the merged tree, both of which put dangling
+  objects in the repository — the only mutations git-switch makes in order to observe something.
+  They are unreachable and gc reaps them.

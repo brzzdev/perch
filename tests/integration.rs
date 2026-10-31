@@ -6717,9 +6717,11 @@ fn land_two_edits(work: &Path, landing: Landing) {
             git(work, &["cherry-pick", "-x", "feature~1"]);
         }
         Landing::RebaseMergeThenEdit => {
-            git(work, &["cherry-pick", "-x", "feature~1", "feature"]);
+            rebase_merge_upstream(work, "feature");
             edit_line(work, 9, "9m");
             git(work, &["commit", "-am", "edit nine"]);
+            git(work, &["push", "origin", "main"]);
+            return;
         }
         Landing::SquashWithAnExtraHunk => {
             git(work, &["merge", "--squash", "feature"]);

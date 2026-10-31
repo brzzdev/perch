@@ -1394,8 +1394,8 @@ pub(crate) fn proof_ref_tip(dir: Option<&Path>, against: &ProofRef) -> Option<St
 }
 
 /// Whether everything `tip` adds over its merge-base with the anchor is already
-/// in the anchor. Three routes, any of which proves it, because a branch's work
-/// can land in three shapes and no one test sees them all:
+/// in the anchor. Any one route proves it, because a branch's work can land in
+/// more shapes than one test sees:
 ///
 /// - The anchor already reaches the tip, so the branch's own commits landed — a
 ///   merge commit or a fast-forward. An untouched branch cut from the anchor
@@ -1556,28 +1556,26 @@ fn content_present(dir: Option<&Path>, anchor: &str, tip: &str, touched: &[Strin
 }
 
 /// Whether merging `tip` into the anchor would leave the anchor's tree exactly
-/// as it is, so deleting the branch loses nothing a merge would have kept.
-///
-/// A merge driver can make a merge add nothing by discarding the branch's side
-/// — `merge=ours`-style drivers, `union` dropping a deletion — so a touched path
-/// whose `merge` attribute names a driver, or a `merge.default` naming one for
-/// every path, proves nothing. `-merge` is safe: it selects the built-in binary
-/// driver, which conflicts rather than choose a side. Rename detection is off
-/// so that every content merge happens at a path the branch touched, where the
-/// attribute check has looked; renormalisation is off so that a branch whose
-/// change was only line endings cannot merge away. A conflict exits 1, and a
-/// git before 2.38 has no `--write-tree`; either proves nothing.
+/// as it is. A merge driver could get there by discarding the branch's side, so
+/// one named for any touched path proves nothing; ADR 0005 has the limits.
 fn merge_adds_nothing(dir: Option<&Path>, anchor: &str, tip: &str, touched: &[String]) -> bool {
     let merges = || {
-        let default_driver =
-            run_in(dir, &["config", "--default", "", "--get", "merge.default"]).ok()?;
-        if !default_driver.trim().is_empty() {
+        // Only an explicitly empty `merge.default` leaves the built-in text driver.
+        let default_driver = config_entries(dir).into_iter().rfind(|entry| {
+            entry
+                .split_once('\n')
+                .map_or(entry.as_str(), |(key, _)| key)
+                == "merge.default"
+        });
+        if default_driver.is_some_and(|entry| entry != "merge.default\n") {
             return None;
         }
         let mut attr_args = vec!["check-attr", "-z", "merge", "--"];
         attr_args.extend(touched.iter().map(String::as_str));
         let attrs = run_in(dir, &attr_args).ok()?;
-        // `-z` output is `<path> NUL merge NUL <value> NUL` per path.
+        // `-z` output is `<path> NUL merge NUL <value> NUL` per path. `unset`
+        // is `-merge`, the built-in binary driver, which conflicts rather than
+        // choosing a side.
         if !attrs
             .split('\0')
             .skip(2)
@@ -1586,6 +1584,8 @@ fn merge_adds_nothing(dir: Option<&Path>, anchor: &str, tip: &str, touched: &[St
         {
             return None;
         }
+        // Renames off keeps every content merge at a path the attributes were
+        // checked for; renormalising could merge a line-ending change away.
         let merged = run_in(
             dir,
             &[
@@ -1600,7 +1600,7 @@ fn merge_adds_nothing(dir: Option<&Path>, anchor: &str, tip: &str, touched: &[St
             ],
         )
         .ok()?;
-        let anchor_tree = rev_parse(dir, &format!("{anchor}^{{tree}}")).ok()?;
+        let anchor_tree = resolve(dir, &format!("{anchor}^{{tree}}"))?;
         Some(merged.lines().next()? == anchor_tree)
     };
     merges().unwrap_or(false)

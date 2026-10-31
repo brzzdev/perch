@@ -846,6 +846,14 @@ pub fn hook_command(event: &str) -> Option<String> {
     }
 }
 
+/// Every value of the multi-valued config `key`, empty when it's unset.
+#[must_use]
+pub(crate) fn config_values(key: &str) -> Vec<String> {
+    run(&["config", "--null", "--get-all", key])
+        .map(|o| o.split_terminator('\0').map(String::from).collect())
+        .unwrap_or_default()
+}
+
 #[must_use]
 pub(crate) fn default_branch(remote: &str) -> Option<String> {
     let head_ref = format!("refs/remotes/{remote}/HEAD");
@@ -859,9 +867,7 @@ pub(crate) fn default_branch(remote: &str) -> Option<String> {
 /// keeping is about the sweep and nothing else, so nothing that draws a picker
 /// or removes a named branch may consult it. See ADR 0011.
 fn kept_branches(remote: &str) -> HashSet<String> {
-    let mut kept: HashSet<String> = run(&["config", "--get-all", "perch.keep"])
-        .map(|o| o.lines().map(String::from).collect())
-        .unwrap_or_default();
+    let mut kept: HashSet<String> = config_values("perch.keep").into_iter().collect();
     if let Some(default) = default_branch(remote) {
         kept.insert(default);
     }

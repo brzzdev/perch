@@ -10,27 +10,44 @@ use crate::git;
 /// Clones each `perch.copy` path that exists in `main` into the same place in
 /// `worktree`, warning about each one it can't.
 pub(crate) fn seed(main: &Path, worktree: &Path) {
-    let mut seeded: Vec<PathBuf> = Vec::new();
-    for entry in git::config_values("perch.copy") {
-        let Some(relative) = inside_path(&entry) else {
+    let mut entries: Vec<(String, Option<PathBuf>)> = git::config_values("perch.copy")
+        .into_iter()
+        .map(|entry| {
+            let relative = inside_path(&entry);
+            (entry, relative)
+        })
+        .collect();
+    // Parents first, so a nested entry finds its parent already handled.
+    entries.sort_by(|a, b| a.1.cmp(&b.1));
+
+    let mut tried: Vec<PathBuf> = Vec::new();
+    for (entry, relative) in entries {
+        let Some(relative) = relative else {
             eprintln!(
                 "{} not copying {entry}: it is not a path inside the repository",
                 warn()
             );
             continue;
         };
-        // Config scopes repeat entries, and a nested one arrived with its parent.
-        if seeded.iter().any(|done| relative.starts_with(done)) {
+        if tried.iter().any(|done| relative.starts_with(done)) {
             continue;
         }
-        match seed_one(main, worktree, &relative) {
-            Ok(()) => seeded.push(relative),
-            Err(reason) => eprintln!("{} not copying {entry}: {reason}", warn()),
+        if let Err(reason) = seed_one(main, worktree, &relative) {
+            eprintln!("{} not copying {entry}: {reason}", warn());
         }
+        tried.push(relative);
     }
 }
 
 fn seed_one(main: &Path, worktree: &Path, relative: &Path) -> Result<(), String> {
+    for (root, name) in [(main, "main"), (worktree, "new")] {
+        if let Some(link) = symlinked_parent(root, relative) {
+            return Err(format!(
+                "{} is a symlink in the {name} worktree",
+                link.display()
+            ));
+        }
+    }
     let source = main.join(relative);
     match source.symlink_metadata() {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -66,21 +83,26 @@ fn inside_path(entry: &str) -> Option<PathBuf> {
     (!path.as_os_str().is_empty()).then_some(path)
 }
 
+/// The first directory on the way to `relative` under `root` that is a symlink,
+/// which could lead out of the repository.
+fn symlinked_parent(root: &Path, relative: &Path) -> Option<PathBuf> {
+    let mut path = root.to_path_buf();
+    relative.parent()?.components().find_map(|component| {
+        path.push(component);
+        path.symlink_metadata()
+            .is_ok_and(|metadata| metadata.is_symlink())
+            .then(|| path.clone())
+    })
+}
+
 /// The first path on the way to `relative` that `worktree` lacks, which is what
-/// cloning it creates. A symlink on the way could lead out of the worktree.
+/// cloning it creates.
 fn first_missing(worktree: &Path, relative: &Path) -> Result<PathBuf, String> {
     let mut path = worktree.to_path_buf();
-    let mut components = relative.components().peekable();
-    while let Some(component) = components.next() {
+    for component in relative.components() {
         path.push(component);
-        let Ok(metadata) = path.symlink_metadata() else {
+        if path.symlink_metadata().is_err() {
             return Ok(path);
-        };
-        if metadata.is_symlink() && components.peek().is_some() {
-            return Err(format!(
-                "{} is a symlink in the new worktree",
-                path.display()
-            ));
         }
     }
     Err("it already exists in the new worktree".into())

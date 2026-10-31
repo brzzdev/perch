@@ -6466,7 +6466,8 @@ fn configure_cache_to_copy(work: &Path) {
     fs::create_dir(&target).unwrap();
     fs::write(target.join("dep.rlib"), "built\n").unwrap();
     std::os::unix::fs::symlink("dep.rlib", target.join("link")).unwrap();
-    for entry in ["../escape", "file.txt", "missing", "target/"] {
+    // The nested entry comes first, which must not stop its parent cloning.
+    for entry in ["../escape", "file.txt", "missing", "target/link", "target/"] {
         git(work, &["config", "--add", "perch.copy", entry]);
     }
 }
@@ -6487,6 +6488,10 @@ fn wt_seeds_a_new_worktree_with_copy_on_write_clones() {
     assert!(!stderr.contains("not copying missing"), "stderr: {stderr}");
 
     let cloned = parent.path().join("worktrees/repo/feature/target");
+    assert!(
+        stderr.matches("not copying target").count() <= 1,
+        "stderr: {stderr}"
+    );
     let clone_supported = !stderr.contains("not copying target/");
     assert!(
         clone_supported || !cfg!(target_os = "macos"),
@@ -6507,10 +6512,10 @@ fn wt_seeds_a_new_worktree_with_copy_on_write_clones() {
     );
 }
 
-/// A branch can track a symlink where the main checkout has a directory, which
-/// would otherwise carry the clone out of the worktree.
+/// A symlinked directory on the way to an entry could lead out of either
+/// worktree: here the branch tracks `web` as one, and the main checkout has `lib`.
 #[test]
-fn wt_refuses_to_seed_through_a_symlink_in_the_new_worktree() {
+fn wt_refuses_to_seed_through_a_symlinked_directory() {
     let (_bare, parent, work) = setup_with_parent();
     let outside = parent.path().join("outside");
     fs::create_dir(&outside).unwrap();
@@ -6520,16 +6525,25 @@ fn wt_refuses_to_seed_through_a_symlink_in_the_new_worktree() {
     git(&work, &["commit", "-m", "link web"]);
     git(&work, &["checkout", "main"]);
     fs::create_dir_all(work.join("web/node_modules")).unwrap();
-    git(&work, &["config", "perch.copy", "web/node_modules"]);
+    fs::create_dir_all(outside.join("cache")).unwrap();
+    std::os::unix::fs::symlink(&outside, work.join("lib")).unwrap();
+    for entry in ["lib/cache", "web/node_modules"] {
+        git(&work, &["config", "--add", "perch.copy", entry]);
+    }
 
     let output = perch_args(&work, &["wt", "linked"]);
     let stderr = stderr_str(&output);
     assert!(output.status.success(), "stderr: {stderr}");
     assert!(
+        stderr.contains("is a symlink in the main worktree"),
+        "stderr: {stderr}"
+    );
+    assert!(
         stderr.contains("is a symlink in the new worktree"),
         "stderr: {stderr}"
     );
     assert!(!outside.join("node_modules").exists());
+    assert!(!parent.path().join("worktrees/repo/linked/lib").exists());
 }
 
 #[test]

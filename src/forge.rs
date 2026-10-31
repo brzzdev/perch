@@ -1,11 +1,12 @@
 use std::fmt;
 use std::io::ErrorKind;
+use std::ops::Range;
 use std::process::{Command, Stdio};
 
 use crate::{AppResult, Error, git};
 
 /// The remote whose forge `pr:<n>` and `mr:<n>` are looked up on.
-const REMOTE: &str = "origin";
+pub(crate) const REMOTE: &str = "origin";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Forge {
@@ -28,9 +29,7 @@ impl Forge {
         }
     }
 
-    /// The JSON flags and a `--jq` query printing `<from a fork> <head branch>`,
-    /// the fork flag as `true` or `false`. A branch name holds no space, so one
-    /// split reads both.
+    /// Flags printing `<true|false: from a fork> <head branch>`; a branch holds no space.
     fn view_query(self) -> ([&'static str; 2], &'static str) {
         match self {
             Self::GitHub => (
@@ -80,11 +79,13 @@ impl Reference {
     /// `None` for an ordinary branch name. Git refuses `:` in a ref, so these
     /// prefixes never shadow a branch.
     pub(crate) fn parse(argument: &str) -> AppResult<Option<Self>> {
-        let (forge, number) = if let Some(number) = argument.strip_prefix("pr:") {
-            (Forge::GitHub, number)
-        } else if let Some(number) = argument.strip_prefix("mr:") {
-            (Forge::GitLab, number)
-        } else {
+        let Some((forge, number)) = [Forge::GitHub, Forge::GitLab]
+            .into_iter()
+            .find_map(|forge| {
+                let number = argument.strip_prefix(forge.prefix())?.strip_prefix(':')?;
+                Some((forge, number))
+            })
+        else {
             return Ok(None);
         };
         let number = number
@@ -112,7 +113,7 @@ impl Reference {
         let output = match Command::new(cli)
             .args([self.forge.prefix(), "view"])
             .arg(self.number.to_string())
-            .args(["--repo", &url])
+            .args(["--repo", &without_ssh_alias(&url)])
             .args(json)
             .args(["--jq", query])
             .stdin(Stdio::null())
@@ -159,6 +160,48 @@ impl Reference {
     }
 }
 
+/// `url` with an SSH host alias swapped for the host `ssh -G` resolves it to.
+/// `gh` and `glab` read a `--repo` host literally, so `git@github-work:o/r`
+/// would send them looking for a server called `github-work`.
+fn without_ssh_alias(url: &str) -> String {
+    let Some(host) = ssh_host(url) else {
+        return url.to_string();
+    };
+    let Ok(output) = Command::new("ssh")
+        .args(["-G", &url[host.clone()]])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return url.to_string();
+    };
+    let config = String::from_utf8_lossy(&output.stdout);
+    let Some(hostname) = config
+        .lines()
+        .find_map(|line| line.strip_prefix("hostname "))
+    else {
+        return url.to_string();
+    };
+    format!("{}{hostname}{}", &url[..host.start], &url[host.end..])
+}
+
+/// Where the host sits in an SSH remote URL, scp-style or `ssh://`.
+fn ssh_host(url: &str) -> Option<Range<usize>> {
+    let (start, rest) = match url.split_once("://") {
+        Some(("ssh" | "git+ssh" | "ssh+git", rest)) => (url.len() - rest.len(), rest),
+        Some(_) => return None,
+        // scp-style, `[user@]host:path`; a `/` before the `:` makes it a path.
+        None => match url.find([':', '/']) {
+            Some(colon) if url[colon..].starts_with(':') => (0, &url[..colon]),
+            _ => return None,
+        },
+    };
+    let authority = &rest[..rest.find([':', '/']).unwrap_or(rest.len())];
+    let user = authority.rfind('@').map_or(0, |at| at + 1);
+    let start = start + user;
+    Some(start..start + authority.len() - user)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,5 +223,22 @@ mod tests {
         assert_eq!(Reference::parse("PR:1").unwrap(), None);
         assert!(Reference::parse("pr:").is_err());
         assert!(Reference::parse("pr:12a").is_err());
+    }
+
+    #[test]
+    fn only_an_ssh_remote_has_a_host_to_resolve() {
+        fn host(url: &str) -> Option<&str> {
+            ssh_host(url).map(|range| &url[range])
+        }
+        assert_eq!(host("git@github-work:o/r.git"), Some("github-work"));
+        assert_eq!(host("github-work:o/r.git"), Some("github-work"));
+        assert_eq!(
+            host("ssh://git@gitlab-work:2222/o/r.git"),
+            Some("gitlab-work")
+        );
+        assert_eq!(host("git+ssh://gitlab-work/o/r"), Some("gitlab-work"));
+        assert_eq!(host("https://github.com/o/r.git"), None);
+        assert_eq!(host("/srv/git/r.git"), None);
+        assert_eq!(host("./a:b"), None);
     }
 }

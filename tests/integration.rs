@@ -7317,3 +7317,82 @@ fn wt_pr_whose_head_is_gone_creates_nothing() {
     );
     assert!(!parent.path().join("worktrees").exists());
 }
+
+#[test]
+fn br_pr_whose_head_is_gone_names_the_request() {
+    let (bare, work) = setup();
+    let (_bin, path) = forge_path("gh", &view_query("pr", bare.path(), 7), "false feat/x");
+
+    let output = perch_with_path(work.path(), &["br", "pr:7"], &path);
+
+    assert!(!output.status.success());
+    assert!(
+        stderr_str(&output).contains("pr:7 has head branch feat/x, which is not on origin"),
+        "stderr: {}",
+        stderr_str(&output)
+    );
+}
+
+/// The forge was asked about `origin`, so its head is found there even when
+/// the branch being left tracks another remote.
+#[test]
+fn pr_finds_its_head_on_origin_whatever_the_current_branch_tracks() {
+    let (bare, parent, work) = setup_with_parent();
+    publish_pull_request_head(bare.path());
+    let upstream = TempDir::new().unwrap();
+    git(upstream.path(), &["init", "--bare"]);
+    pin_default_branch(upstream.path());
+    git(
+        &work,
+        &[
+            "remote",
+            "add",
+            "upstream",
+            upstream.path().to_str().unwrap(),
+        ],
+    );
+    git(&work, &["push", "-u", "upstream", "main"]);
+    let (_bin, path) = forge_path("gh", &view_query("pr", bare.path(), 7), "false feat/x");
+
+    let worktree_output = perch_with_path(&work, &["wt", "pr:7"], &path);
+
+    assert!(
+        worktree_output.status.success(),
+        "stderr: {}",
+        stderr_str(&worktree_output)
+    );
+    let worktree = parent.path().join("worktrees").join("repo").join("feat/x");
+    let upstream_ref = git(&worktree, &["rev-parse", "--abbrev-ref", "@{upstream}"]);
+    assert_eq!(stdout_str(&upstream_ref).trim(), "origin/feat/x");
+
+    git(&work, &["worktree", "remove", worktree.to_str().unwrap()]);
+    git(&work, &["branch", "-D", "feat/x"]);
+    git(&work, &["update-ref", "-d", "refs/remotes/origin/feat/x"]);
+
+    let in_place = perch_with_path(&work, &["br", "pr:7"], &path);
+
+    assert!(
+        in_place.status.success(),
+        "stderr: {}",
+        stderr_str(&in_place)
+    );
+    let upstream_ref = git(&work, &["rev-parse", "--abbrev-ref", "@{upstream}"]);
+    assert_eq!(stdout_str(&upstream_ref).trim(), "origin/feat/x");
+}
+
+/// Submodules switch the prefetch off, so the head is not in the cached refs
+/// when the worktree's target is resolved.
+#[test]
+fn wt_pr_finds_an_unfetched_head_without_the_prefetch() {
+    let (bare, parent, work) = setup_with_parent();
+    fs::write(work.join(".gitmodules"), "").unwrap();
+    publish_pull_request_head(bare.path());
+    let (_bin, path) = forge_path("gh", &view_query("pr", bare.path(), 7), "false feat/x");
+
+    let output = perch_with_path(&work, &["wt", "pr:7"], &path);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    let worktree = parent.path().join("worktrees").join("repo").join("feat/x");
+    let upstream = git(&worktree, &["rev-parse", "--abbrev-ref", "@{upstream}"]);
+    assert_eq!(stdout_str(&upstream).trim(), "origin/feat/x");
+}

@@ -29,6 +29,12 @@ pub enum Error {
     #[error("branch diverged from remote")]
     Diverged,
 
+    #[error("{reference} {problem}")]
+    Forge {
+        reference: forge::Reference,
+        problem: forge::Problem,
+    },
+
     /// `br` was asked to check out a branch git already holds in another
     /// worktree. The message names the path and the verb that does reach it,
     /// because that hand-off is the whole difference between the two verbs.
@@ -38,21 +44,15 @@ pub enum Error {
     )]
     HeldByWorktree { branch: String, path: String },
 
-    #[error("{reference} {problem}")]
-    Forge {
-        reference: forge::Reference,
-        problem: forge::Problem,
-    },
-
-    #[error("`{0}` is not a request number; expected pr:<number> or mr:<number>")]
-    InvalidForgeReference(String),
-
     #[error("{branch} is checked out at {path}; {hint}")]
     HeldForRemoval {
         branch: String,
         path: String,
         hint: String,
     },
+
+    #[error("`{0}` is not a request number; expected pr:<number> or mr:<number>")]
+    InvalidForgeReference(String),
 
     #[error("branch '{branch}' does not exist locally")]
     LocalBranchNotFound { branch: String },

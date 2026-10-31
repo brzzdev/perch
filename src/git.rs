@@ -1347,6 +1347,13 @@ pub fn server_proven_branches(
     proven
 }
 
+/// Whether the server `remote` names has `branch`, asked without fetching.
+#[must_use]
+pub(crate) fn server_has_branch(remote: &str, branch: &str) -> bool {
+    let refname = format!("refs/heads/{branch}");
+    server_tips(None, remote, &[&refname]).is_ok_and(|tips| tips.contains_key(&refname))
+}
+
 /// Where each of `refnames` stands on the server `remote` names, by remote
 /// name or URL. A ref the server lacks is absent from the map. Nobody is asked for credentials, so a remote that
 /// needs them fails instead.

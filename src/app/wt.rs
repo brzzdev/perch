@@ -41,7 +41,8 @@ pub(crate) fn run(
     shell_handoff: ShellHandoff,
 ) -> AppResult<()> {
     let current_branch = git::current_branch()?;
-    let remote = git::current_remote(current_branch.as_deref());
+    let reference = target.map(forge::Reference::parse).transpose()?.flatten();
+    let remote = super::navigation_remote(current_branch.as_deref(), reference);
 
     // A worktree whose directory was deleted by hand can't be entered, so its
     // branch is one to (re)create. `worktree_add`/`checkout` prune the stale
@@ -69,11 +70,13 @@ pub(crate) fn run(
     let prefetch = ((target.is_some() || super::is_interactive()) && !has_submodules)
         .then(|| Prefetch::start(&remote));
 
-    let (branch, existence) = if let Some(name) = target {
-        match super::branch_named(name)? {
-            (branch, Some(reference)) => (branch, Existence::Requested(reference)),
-            (branch, None) => (branch, Existence::MayCreate),
-        }
+    let (branch, existence) = if let Some(reference) = reference {
+        (
+            super::look_up_head(reference)?,
+            Existence::Requested(reference),
+        )
+    } else if let Some(name) = target {
+        (name.to_string(), Existence::MayCreate)
     } else {
         let Some(picked) = select(&listed, current_branch.as_deref(), &remote)? else {
             return Ok(());
@@ -443,6 +446,11 @@ fn resolve_target(
         Existence::MustExist => Err(Error::Vanished {
             branch: name.to_string(),
         }),
+        // Without submodules the prefetch has already looked; with them it never
+        // ran, and `create_worktree` fetches the branch this finds.
+        Existence::Requested(_) if git::server_has_branch(remote, name) => {
+            Ok(Action::CreateForBranch(name.to_string()))
+        }
         Existence::Requested(reference) => Err(reference.error(forge::Problem::HeadMissing {
             branch: name.to_string(),
             remote: remote.to_string(),

@@ -153,7 +153,8 @@ pub fn run_br(target: Option<&str>) -> AppResult<()> {
 
 fn run_verb(verb: Verb, target: Option<&str>) -> AppResult<()> {
     let old_branch = git::current_branch()?;
-    let remote = git::current_remote(old_branch.as_deref());
+    let reference = target.map(forge::Reference::parse).transpose()?.flatten();
+    let remote = navigation_remote(old_branch.as_deref(), reference);
 
     // `perch .` refreshes the branch we're already on against its remote,
     // rather than switching anywhere.
@@ -170,14 +171,16 @@ fn run_verb(verb: Verb, target: Option<&str>) -> AppResult<()> {
     // from this same worktree, and a *Held* one with submodules is never covered.
     let prefetch = (target.is_some() || is_interactive()).then(|| Prefetch::start(&remote));
 
-    let (target, reference) = if let Some(name) = target {
-        branch_named(name)?
+    let target = if let Some(reference) = reference {
+        look_up_head(reference)?
+    } else if let Some(name) = target {
+        name.to_string()
     } else {
         let listed = live_worktrees()?;
         let Some(picked) = select_branch(old_branch.as_deref(), &remote, &listed, verb)? else {
             return Ok(());
         };
-        (picked, None)
+        picked
     };
 
     // Joined before the *Held* check and any stash, so both see the fetched
@@ -249,16 +252,23 @@ fn run_verb(verb: Verb, target: Option<&str>) -> AppResult<()> {
     result
 }
 
-/// `pr:<n>` and `mr:<n>` name their request's head branch; anything else names
-/// itself.
-pub(crate) fn branch_named(argument: &str) -> AppResult<(String, Option<forge::Reference>)> {
-    let Some(reference) = forge::Reference::parse(argument)? else {
-        return Ok((argument.to_string(), None));
-    };
+/// The remote a navigation fetches and finds its branch on. A request's head
+/// is on the remote its forge was asked about, whatever the current branch tracks.
+pub(crate) fn navigation_remote(
+    current: Option<&str>,
+    reference: Option<forge::Reference>,
+) -> String {
+    match reference {
+        Some(_) => forge::REMOTE.to_string(),
+        None => git::current_remote(current),
+    }
+}
+
+pub(crate) fn look_up_head(reference: forge::Reference) -> AppResult<String> {
     let (spinner, _cursor) = spinner(format!("Looking up {reference}…"));
     let branch = reference.head_branch();
     spinner.finish_and_clear();
-    Ok((branch?, Some(reference)))
+    branch
 }
 
 /// Pop the auto-stash and report the outcome — a clean restore, a conflict to

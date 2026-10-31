@@ -152,7 +152,7 @@ _perch() {
     _describe -t subverbs 'branch subverb' branch_subs
     _perch_offers branches 'branch' br
   elif (( pos == 3 )) && [[ "$cmdline[2]" == shell ]]; then
-    _describe -t subverbs 'shell subverb' shell_subs
+    _describe -t shell-commands 'shell command' shell_subs
   elif (( pos == 4 )) && [[ "$cmdline[2]" == shell && "$cmdline[3]" == init ]]; then
     _describe -t shells 'shell' shells
   fi

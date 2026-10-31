@@ -144,7 +144,7 @@ complete -c perch -f -n '__perch_after_double_dash' -a '(__perch_offers --)'
 complete -c perch -f -n '__fish_seen_subcommand_from br; and __fish_is_nth_token 2; and not __perch_after_double_dash' -a 'rm' -d 'Remove local branches'
 complete -c perch -f -n '__fish_seen_subcommand_from br; and __fish_is_nth_token 2' -a '(__perch_offers br)'
 
-# After `shell`: its subverbs, then the shells `init` prints a script for.
+# After `shell`: `init` and `install`, then the shells `init` prints a script for.
 complete -c perch -f -n '__fish_seen_subcommand_from shell; and __fish_is_nth_token 2; and not __perch_after_double_dash' -a 'init' -d 'Print the shell integration script'
 complete -c perch -f -n '__fish_seen_subcommand_from shell; and __fish_is_nth_token 2; and not __perch_after_double_dash' -a 'install' -d 'Add the shell integration to your rc file'
 complete -c perch -f -n '__fish_seen_subcommand_from shell; and __fish_is_nth_token 3; and __fish_seen_subcommand_from init' -a 'bash fish zsh'

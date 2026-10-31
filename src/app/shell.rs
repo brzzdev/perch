@@ -3,16 +3,22 @@ use std::ffi::{OsStr, OsString};
 use std::fs::{self, OpenOptions};
 use std::io::{self, ErrorKind, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use crate::app::{display_path, shell_quote};
 use crate::grammar::Shell;
 use crate::{AppResult, Error};
 
 impl Shell {
-    pub(crate) fn script(self) -> &'static str {
+    fn rc_file(self, home: &Path, shell_path: &Path) -> PathBuf {
         match self {
-            Self::Bash | Self::Zsh => include_str!("../../shell/perch.sh"),
-            Self::Fish => include_str!("../../shell/perch.fish"),
+            Self::Bash => home.join(".bashrc"),
+            Self::Fish => non_empty_var("XDG_CONFIG_HOME")
+                .map_or_else(|| home.join(".config"), PathBuf::from)
+                .join("fish/conf.d/perch.fish"),
+            Self::Zsh => zsh_dotdir(shell_path)
+                .unwrap_or_else(|| home.to_path_buf())
+                .join(".zshrc"),
         }
     }
 
@@ -24,25 +30,20 @@ impl Shell {
         }
     }
 
-    fn rc_file(self, home: &Path) -> PathBuf {
+    pub(crate) fn script(self) -> &'static str {
         match self {
-            Self::Bash => home.join(".bashrc"),
-            Self::Fish => non_empty_var("XDG_CONFIG_HOME")
-                .map_or_else(|| home.join(".config"), PathBuf::from)
-                .join("fish/conf.d/perch.fish"),
-            Self::Zsh => non_empty_var("ZDOTDIR")
-                .map_or_else(|| home.to_path_buf(), PathBuf::from)
-                .join(".zshrc"),
+            Self::Bash | Self::Zsh => include_str!("../../shell/perch.sh"),
+            Self::Fish => include_str!("../../shell/perch.fish"),
         }
     }
 }
 
 pub(crate) fn run_install() -> AppResult<()> {
-    let shell = login_shell()?;
+    let (shell, shell_path) = login_shell()?;
     let home =
         non_empty_var("HOME").ok_or_else(|| Error::ShellInstall("$HOME is not set".into()))?;
     let home = Path::new(&home);
-    let rc = shell.rc_file(home);
+    let rc = shell.rc_file(home, &shell_path);
     let shown = display_path(&rc);
     let line = shell.rc_line();
 
@@ -104,14 +105,31 @@ fn source_argument(rc: &Path, home: &Path) -> String {
     }
 }
 
-fn login_shell() -> AppResult<Shell> {
-    let path =
-        non_empty_var("SHELL").ok_or_else(|| Error::ShellInstall("$SHELL is not set".into()))?;
-    let name = Path::new(&path)
-        .file_name()
-        .and_then(OsStr::to_str)
-        .unwrap_or_default();
-    Shell::parse(name).map_err(|message| Error::ShellInstall(format!("$SHELL: {message}")))
+fn login_shell() -> AppResult<(Shell, PathBuf)> {
+    let path = PathBuf::from(
+        non_empty_var("SHELL").ok_or_else(|| Error::ShellInstall("$SHELL is not set".into()))?,
+    );
+    let name = path.file_name().and_then(OsStr::to_str).unwrap_or_default();
+    let shell =
+        Shell::parse(name).map_err(|message| Error::ShellInstall(format!("$SHELL: {message}")))?;
+    Ok((shell, path))
+}
+
+/// Asks zsh, because `.zshenv` can set `ZDOTDIR` without exporting it, which leaves it out of
+/// perch's environment. The last line is the answer, since `.zshenv` may print before it.
+fn zsh_dotdir(zsh: &Path) -> Option<PathBuf> {
+    let output = Command::new(zsh)
+        .args(["-c", "print -r -- ${ZDOTDIR:-$HOME}"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    let dir = stdout.lines().last()?;
+    (!dir.is_empty()).then(|| PathBuf::from(dir))
 }
 
 fn non_empty_var(key: &str) -> Option<OsString> {

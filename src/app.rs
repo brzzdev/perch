@@ -815,9 +815,9 @@ fn named_removal_choice(
 /// How to spell `branch` as the argument to a bare `perch`, so that telling
 /// someone to run it actually reaches the branch.
 ///
-/// A branch named after a verb is read as that verb, and `perch wt` opens the
-/// worktree picker rather than going anywhere — so those names need the `--`
-/// escape hatch. Grammar uses the same command facts for this check, invocation
+/// A branch named after a command word is read as that word, and `perch wt`
+/// opens the worktree picker rather than going anywhere — so those names need
+/// the `--` escape hatch. Grammar uses the same command facts for this check, invocation
 /// parsing, and completion filtering.
 pub(crate) fn go_there_argument(branch: &str) -> String {
     let quoted = shell_quote(branch);
@@ -941,7 +941,7 @@ mod tests {
     }
 
     #[test]
-    fn a_branch_named_after_a_verb_is_escaped_past_the_dispatcher() {
+    fn a_branch_named_after_a_command_word_is_escaped_past_the_dispatcher() {
         assert_eq!(go_there_argument("br"), "-- br");
         assert_eq!(go_there_argument("wt"), "-- wt");
         assert_eq!(go_there_argument("shell"), "-- shell");

@@ -110,10 +110,10 @@ _Avoid_: Worktree name, branch name, path, folder
 
 **Subverb**:
 A word a *Verb* reads before it reads a branch name. `br` reads `rm`; `wt` reads `ls` and `rm`, plus the retired `list` and `remove`, which are refused rather than taken for branches. Collision is positional: `--` is needed after `br` for a colliding branch, after `wt` for either a colliding branch or a *Worktree directory name* that looks like a subverb or option, and at the top level for a branch matching a *Command word*. Everywhere else the bare name reaches the branch, so `perch list`, `perch br list` and `perch br wt` all work as written.
-_Avoid_: Subcommand (reserved for the *Verb*), flag, option
+_Avoid_: Subcommand, flag, option
 
 **Grammar**:
-The rules that decide whether each command word names a *Verb*, *Subverb*, option, *Worktree directory name*, or branch. `--` makes the next word a branch at the top level and after `br`; after `wt` it introduces either one branch or a *Worktree directory name* followed by a branch without reading options or subverbs, except that the legacy `wt -- <branch> --no-switch` stays a single-branch form and does not suppress the *Handoff*; inside `wt rm` it introduces a target. Destructive forms reject duplicate options, unknown options, and extra targets; worktree creation rejects unknown options, invalid *Worktree directory names*, and extra arguments.
+The rules that decide whether each word names a *Command word*, *Subverb*, option, *Worktree directory name*, or branch. `--` makes the next word a branch at the top level and after `br`; after `wt` it introduces either one branch or a *Worktree directory name* followed by a branch without reading options or subverbs, except that the legacy `wt -- <branch> --no-switch` stays a single-branch form and does not suppress the *Handoff*; inside `wt rm` it introduces a target. Destructive forms reject duplicate options, unknown options, and extra targets; worktree creation rejects unknown options, invalid *Worktree directory names*, and extra arguments.
 _Avoid_: Dispatch, parsing
 
 **`.`**:

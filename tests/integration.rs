@@ -6655,3 +6655,18 @@ fn shell_init_defines_the_wrapper_and_both_shortcuts() {
         assert_eq!(defined, ["br", "perch", "wt"], "{shell}");
     }
 }
+
+#[test]
+fn shell_install_follows_a_zdotdir_that_zshenv_sets_without_exporting() {
+    let home = TempDir::new().unwrap();
+    fs::write(home.path().join(".zshenv"), "ZDOTDIR=$HOME/zsh\n").unwrap();
+
+    let output = perch_shell_install(home.path(), "/bin/zsh");
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert_eq!(
+        fs::read_to_string(home.path().join("zsh/.zshrc")).unwrap(),
+        "eval \"$(perch shell init zsh)\"\n"
+    );
+    assert!(!home.path().join(".zshrc").exists());
+}

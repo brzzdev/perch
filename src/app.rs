@@ -184,7 +184,7 @@ fn run_verb(verb: Verb, target: Option<&str>) -> AppResult<()> {
     // refs, and an interrupt here leaves before anything is touched.
     let fetched = prefetch.map(Prefetch::join).transpose()?;
     if let Some(reference) = reference {
-        forge::ensure_head_exists(reference, &target)?;
+        reference.ensure_head_exists(&target, &remote)?;
     }
 
     // Read the worktrees again rather than reusing what the picker was drawn
@@ -249,19 +249,16 @@ fn run_verb(verb: Verb, target: Option<&str>) -> AppResult<()> {
     result
 }
 
-/// The branch a navigation argument names: the argument itself, or the head
-/// branch of the request `pr:<n>` or `mr:<n>` names, alongside that request.
+/// `pr:<n>` and `mr:<n>` name their request's head branch; anything else names
+/// itself.
 pub(crate) fn branch_named(argument: &str) -> AppResult<(String, Option<forge::Reference>)> {
     let Some(reference) = forge::Reference::parse(argument)? else {
         return Ok((argument.to_string(), None));
     };
-    let branch = {
-        let (spinner, _cursor) = spinner(format!("Looking up {reference}…"));
-        let branch = reference.head_branch();
-        spinner.finish_and_clear();
-        branch?
-    };
-    Ok((branch, Some(reference)))
+    let (spinner, _cursor) = spinner(format!("Looking up {reference}…"));
+    let branch = reference.head_branch();
+    spinner.finish_and_clear();
+    Ok((branch?, Some(reference)))
 }
 
 /// Pop the auto-stash and report the outcome — a clean restore, a conflict to

@@ -28,26 +28,20 @@ impl Forge {
         }
     }
 
-    /// Arguments printing `<from a fork> <head branch>`, the fork flag as
-    /// `true` or `false`. A branch name holds no space, so one split reads both.
-    fn view_args(self, number: u64, url: &str) -> Vec<String> {
-        let (subcommand, query) = match self {
-            Self::GitHub => ("pr", r#""\(.isCrossRepository) \(.headRefName)""#),
+    /// The JSON flags and a `--jq` query printing `<from a fork> <head branch>`,
+    /// the fork flag as `true` or `false`. A branch name holds no space, so one
+    /// split reads both.
+    fn view_query(self) -> ([&'static str; 2], &'static str) {
+        match self {
+            Self::GitHub => (
+                ["--json", "isCrossRepository,headRefName"],
+                r#""\(.isCrossRepository) \(.headRefName)""#,
+            ),
             Self::GitLab => (
-                "mr",
+                ["--output", "json"],
                 r#""\(.source_project_id != .target_project_id) \(.source_branch)""#,
             ),
-        };
-        let json = match self {
-            Self::GitHub => ["--json", "isCrossRepository,headRefName"],
-            Self::GitLab => ["--output", "json"],
-        };
-        [subcommand, "view", &number.to_string(), "--repo", url]
-            .into_iter()
-            .chain(json)
-            .chain(["--jq", query])
-            .map(str::to_string)
-            .collect()
+        }
     }
 }
 
@@ -62,6 +56,24 @@ impl fmt::Display for Reference {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}:{}", self.forge.prefix(), self.number)
     }
+}
+
+/// Why a request could not be followed to its head branch.
+#[derive(Debug, thiserror::Error)]
+pub enum Problem {
+    #[error("needs `{0}`")]
+    CliMissing(&'static str),
+
+    #[error("failed: {0}")]
+    Failed(String),
+
+    #[error("comes from a fork, which perch does not check out yet")]
+    Fork,
+
+    #[error(
+        "has head branch {branch}, which is not on {remote}; it may have been deleted on merge"
+    )]
+    HeadMissing { branch: String, remote: String },
 }
 
 impl Reference {
@@ -81,24 +93,34 @@ impl Reference {
         Ok(Some(Self { forge, number }))
     }
 
-    pub(crate) fn cli(self) -> &'static str {
-        self.forge.cli()
+    pub(crate) fn error(self, problem: Problem) -> Error {
+        Error::Forge {
+            reference: self,
+            problem,
+        }
     }
 
     /// The request's head branch on `origin`, asked of the forge's own CLI.
     pub(crate) fn head_branch(self) -> AppResult<String> {
-        let url = git::remote_url(None, REMOTE).ok_or_else(|| Error::Forge {
-            reference: self,
-            message: format!("no `{REMOTE}` remote to look it up on"),
+        let url = git::remote_url(None, REMOTE).ok_or_else(|| {
+            self.error(Problem::Failed(format!(
+                "no `{REMOTE}` remote to look it up on"
+            )))
         })?;
-        let output = match Command::new(self.cli())
-            .args(self.forge.view_args(self.number, &url))
+        let cli = self.forge.cli();
+        let (json, query) = self.forge.view_query();
+        let output = match Command::new(cli)
+            .args([self.forge.prefix(), "view"])
+            .arg(self.number.to_string())
+            .args(["--repo", &url])
+            .args(json)
+            .args(["--jq", query])
             .stdin(Stdio::null())
             .output()
         {
             Ok(output) => output,
             Err(e) if e.kind() == ErrorKind::NotFound => {
-                return Err(Error::ForgeCliMissing { reference: self });
+                return Err(self.error(Problem::CliMissing(cli)));
             }
             Err(e) => return Err(e.into()),
         };
@@ -110,34 +132,31 @@ impl Reference {
             } else {
                 stderr.trim()
             };
-            return Err(Error::Forge {
-                reference: self,
-                message: message.to_string(),
-            });
+            return Err(self.error(Problem::Failed(message.to_string())));
         }
         match stdout.trim().split_once(' ') {
             Some(("false", branch)) if !branch.is_empty() => Ok(branch.to_string()),
-            Some(("true", _)) => Err(Error::ForkRequest { reference: self }),
-            _ => Err(Error::Forge {
-                reference: self,
-                message: format!("unexpected answer from `{}`: {}", self.cli(), stdout.trim()),
-            }),
+            Some(("true", _)) => Err(self.error(Problem::Fork)),
+            _ => Err(self.error(Problem::Failed(format!(
+                "unexpected answer from `{cli}`: {}",
+                stdout.trim()
+            )))),
         }
     }
-}
 
-/// Refuses a head branch that is neither local nor on `origin`, such as one
-/// deleted when its request merged: navigating to it would make a new branch.
-pub(crate) fn ensure_head_exists(reference: Reference, branch: &str) -> AppResult<()> {
-    if git::local_branches()?.iter().any(|local| local == branch)
-        || git::remote_branch_exists(REMOTE, branch)
-    {
-        return Ok(());
+    /// Refuses a head branch that is neither local nor on `remote`, such as one
+    /// deleted when its request merged.
+    pub(crate) fn ensure_head_exists(self, branch: &str, remote: &str) -> AppResult<()> {
+        if git::resolve(None, &format!("refs/heads/{branch}")).is_some()
+            || git::remote_branch_exists(remote, branch)
+        {
+            return Ok(());
+        }
+        Err(self.error(Problem::HeadMissing {
+            branch: branch.to_string(),
+            remote: remote.to_string(),
+        }))
     }
-    Err(Error::ForgeHeadMissing {
-        reference,
-        branch: branch.to_string(),
-    })
 }
 
 #[cfg(test)]

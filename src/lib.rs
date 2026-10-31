@@ -38,23 +38,11 @@ pub enum Error {
     )]
     HeldByWorktree { branch: String, path: String },
 
-    #[error("{reference}: {message}")]
+    #[error("{reference} {problem}")]
     Forge {
         reference: forge::Reference,
-        message: String,
+        problem: forge::Problem,
     },
-
-    #[error("{reference} needs `{}`", reference.cli())]
-    ForgeCliMissing { reference: forge::Reference },
-
-    #[error("{reference}'s branch {branch} is not on origin; it may have been deleted on merge")]
-    ForgeHeadMissing {
-        reference: forge::Reference,
-        branch: String,
-    },
-
-    #[error("{reference} comes from a fork, which perch does not check out yet")]
-    ForkRequest { reference: forge::Reference },
 
     #[error("`{0}` is not a request number; expected pr:<number> or mr:<number>")]
     InvalidForgeReference(String),

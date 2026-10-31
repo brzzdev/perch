@@ -26,11 +26,13 @@ enum Action {
 /// at the shell, or into the filter behind "Create new", claims nothing, and
 /// creating it is the point. A picked row claims the branch was there when the
 /// *Catalogue* was drawn, so a branch that has gone since leaves nothing to
-/// fall back to that the user chose.
+/// fall back to that the user chose. A request's head branch is claimed by the
+/// forge in the same way.
 #[derive(Clone, Copy, PartialEq)]
 enum Existence {
     MayCreate,
     MustExist,
+    Requested(forge::Reference),
 }
 
 pub(crate) fn run(
@@ -67,22 +69,21 @@ pub(crate) fn run(
     let prefetch = ((target.is_some() || super::is_interactive()) && !has_submodules)
         .then(|| Prefetch::start(&remote));
 
-    let (branch, existence, reference) = if let Some(name) = target {
-        let (branch, reference) = super::branch_named(name)?;
-        (branch, Existence::MayCreate, reference)
+    let (branch, existence) = if let Some(name) = target {
+        match super::branch_named(name)? {
+            (branch, Some(reference)) => (branch, Existence::Requested(reference)),
+            (branch, None) => (branch, Existence::MayCreate),
+        }
     } else {
-        let Some((branch, existence)) = select(&listed, current_branch.as_deref(), &remote)? else {
+        let Some(picked) = select(&listed, current_branch.as_deref(), &remote)? else {
             return Ok(());
         };
-        (branch, existence, None)
+        picked
     };
 
     // Joined before the worktrees are read again below, so a slow join cannot
     // make that snapshot stale in its turn.
     let fetched = prefetch.map(Prefetch::join).transpose()?;
-    if let Some(reference) = reference {
-        forge::ensure_head_exists(reference, &branch)?;
-    }
 
     // Read the worktrees again before deciding what the branch needs: the list
     // above was drawn before the picker opened, and it then sat waiting on a
@@ -437,12 +438,16 @@ fn resolve_target(
     if remote_only.iter().any(|b| b == name) {
         return Ok(Action::CreateForBranch(name.to_string()));
     }
-    if existence == Existence::MustExist {
-        return Err(Error::Vanished {
+    match existence {
+        Existence::MayCreate => Ok(Action::CreateNewBranch(name.to_string())),
+        Existence::MustExist => Err(Error::Vanished {
             branch: name.to_string(),
-        });
+        }),
+        Existence::Requested(reference) => Err(reference.error(forge::Problem::HeadMissing {
+            branch: name.to_string(),
+            remote: remote.to_string(),
+        })),
     }
-    Ok(Action::CreateNewBranch(name.to_string()))
 }
 
 /// The worktrees `wt rm` can act on: every one but the main worktree, which git

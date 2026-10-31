@@ -7143,15 +7143,15 @@ fn publish_pull_request_head(bare: &Path) {
     git(other.path(), &["push", "origin", "feat/x"]);
 }
 
-fn gh_pr_view(bare: &Path, number: u32) -> String {
-    format!("pr view {number} --repo {}", bare.display())
+fn view_query(prefix: &str, bare: &Path, number: u32) -> String {
+    format!("{prefix} view {number} --repo {}", bare.display())
 }
 
 #[test]
 fn wt_pr_creates_then_reuses_a_worktree_tracking_the_head_branch() {
     let (bare, parent, work) = setup_with_parent();
     publish_pull_request_head(bare.path());
-    let (_bin, path) = forge_path("gh", &gh_pr_view(bare.path(), 7), "false feat/x");
+    let (_bin, path) = forge_path("gh", &view_query("pr", bare.path(), 7), "false feat/x");
 
     let first = perch_with_path(&work, &["wt", "pr:7"], &path);
 
@@ -7172,7 +7172,7 @@ fn wt_pr_creates_then_reuses_a_worktree_tracking_the_head_branch() {
 fn wt_pr_takes_an_explicit_directory_name() {
     let (bare, parent, work) = setup_with_parent();
     publish_pull_request_head(bare.path());
-    let (_bin, path) = forge_path("gh", &gh_pr_view(bare.path(), 7), "false feat/x");
+    let (_bin, path) = forge_path("gh", &view_query("pr", bare.path(), 7), "false feat/x");
 
     let output = perch_with_path(&work, &["wt", "7", "pr:7"], &path);
 
@@ -7186,7 +7186,7 @@ fn wt_pr_takes_an_explicit_directory_name() {
 fn br_pr_checks_the_head_branch_out_in_place() {
     let (bare, work) = setup();
     publish_pull_request_head(bare.path());
-    let (_bin, path) = forge_path("gh", &gh_pr_view(bare.path(), 7), "false feat/x");
+    let (_bin, path) = forge_path("gh", &view_query("pr", bare.path(), 7), "false feat/x");
 
     let output = perch_with_path(work.path(), &["br", "pr:7"], &path);
 
@@ -7199,7 +7199,7 @@ fn br_pr_checks_the_head_branch_out_in_place() {
 fn perch_pr_goes_to_the_worktree_holding_the_head_branch() {
     let (bare, parent, work) = setup_with_parent();
     publish_pull_request_head(bare.path());
-    let (_bin, path) = forge_path("gh", &gh_pr_view(bare.path(), 7), "false feat/x");
+    let (_bin, path) = forge_path("gh", &view_query("pr", bare.path(), 7), "false feat/x");
 
     let in_place = perch_with_path(&work, &["pr:7"], &path);
 
@@ -7239,8 +7239,7 @@ fn perch_pr_goes_to_the_worktree_holding_the_head_branch() {
 fn wt_mr_asks_glab_for_the_head_branch() {
     let (bare, parent, work) = setup_with_parent();
     publish_pull_request_head(bare.path());
-    let query = format!("mr view 4 --repo {}", bare.path().display());
-    let (_bin, path) = forge_path("glab", &query, "false feat/x");
+    let (_bin, path) = forge_path("glab", &view_query("mr", bare.path(), 4), "false feat/x");
 
     let output = perch_with_path(&work, &["wt", "mr:4"], &path);
 
@@ -7253,7 +7252,7 @@ fn wt_mr_asks_glab_for_the_head_branch() {
 #[test]
 fn wt_pr_from_a_fork_is_refused_without_creating_anything() {
     let (bare, parent, work) = setup_with_parent();
-    let (_bin, path) = forge_path("gh", &gh_pr_view(bare.path(), 7), "true main");
+    let (_bin, path) = forge_path("gh", &view_query("pr", bare.path(), 7), "true main");
 
     let output = perch_with_path(&work, &["wt", "pr:7"], &path);
 
@@ -7289,13 +7288,13 @@ fn wt_pr_without_gh_names_it() {
 #[test]
 fn wt_pr_surfaces_the_forges_own_error() {
     let (bare, work) = setup();
-    let (_bin, path) = forge_path("gh", &gh_pr_view(bare.path(), 7), "false feat/x");
+    let (_bin, path) = forge_path("gh", &view_query("pr", bare.path(), 7), "false feat/x");
 
     let output = perch_with_path(work.path(), &["wt", "pr:8"], &path);
 
     assert!(!output.status.success());
     assert!(
-        stderr_str(&output).contains("pr:8: no pull requests found"),
+        stderr_str(&output).contains("pr:8 failed: no pull requests found"),
         "stderr: {}",
         stderr_str(&output)
     );
@@ -7306,13 +7305,13 @@ fn wt_pr_surfaces_the_forges_own_error() {
 #[test]
 fn wt_pr_whose_head_is_gone_creates_nothing() {
     let (bare, parent, work) = setup_with_parent();
-    let (_bin, path) = forge_path("gh", &gh_pr_view(bare.path(), 7), "false feat/x");
+    let (_bin, path) = forge_path("gh", &view_query("pr", bare.path(), 7), "false feat/x");
 
     let output = perch_with_path(&work, &["wt", "pr:7"], &path);
 
     assert!(!output.status.success());
     assert!(
-        stderr_str(&output).contains("pr:7's branch feat/x is not on origin"),
+        stderr_str(&output).contains("pr:7 has head branch feat/x, which is not on origin"),
         "stderr: {}",
         stderr_str(&output)
     );

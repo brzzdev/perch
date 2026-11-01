@@ -1,6 +1,6 @@
 use std::assert_matches;
 use std::env;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -2529,6 +2529,23 @@ fn wt_updates_the_worktree_whatever_git_dir_names() {
     assert_eq!(stdout_str(&branch).trim(), "main");
 }
 
+/// Writes, to the index at `index`, the commit `work` has checked out less
+/// `file.txt`.
+fn stage_deletion_of_file_txt(work: &Path, index: impl AsRef<OsStr>) {
+    for args in [
+        &["read-tree", "HEAD"][..],
+        &["rm", "--cached", "--quiet", "file.txt"],
+    ] {
+        let staged = Command::new("git")
+            .args(args)
+            .current_dir(work)
+            .env("GIT_INDEX_FILE", &index)
+            .status()
+            .unwrap();
+        assert!(staged.success(), "git {args:?}");
+    }
+}
+
 /// The worktree perch started in keeps an inherited `GIT_INDEX_FILE`, even where
 /// perch roots git there by path.
 #[test]
@@ -2538,18 +2555,7 @@ fn wt_honours_an_inherited_index_in_its_own_worktree() {
     push_upstream_change(&work, "file.txt", "incoming\n", "incoming change");
     let before = stdout_str(&git(&work, &["rev-parse", "HEAD"]));
     let index = parent.path().join("index");
-    for args in [
-        &["read-tree", "HEAD"][..],
-        &["rm", "--cached", "--quiet", "file.txt"],
-    ] {
-        let staged = Command::new("git")
-            .args(args)
-            .current_dir(&work)
-            .env("GIT_INDEX_FILE", &index)
-            .status()
-            .unwrap();
-        assert!(staged.success(), "git {args:?}");
-    }
+    stage_deletion_of_file_txt(&work, &index);
 
     let output = perch_command(&work, &["wt", "main", "--no-switch"])
         .env("GIT_INDEX_FILE", &index)
@@ -2600,18 +2606,7 @@ fn wt_honours_a_relative_index_from_a_subdirectory() {
     add_worktree(&work, &parent, "feature");
     push_upstream_change(&work, "file.txt", "incoming\n", "incoming change");
     let before = stdout_str(&git(&work, &["rev-parse", "HEAD"]));
-    for args in [
-        &["read-tree", "HEAD"][..],
-        &["rm", "--cached", "--quiet", "file.txt"],
-    ] {
-        let staged = Command::new("git")
-            .args(args)
-            .current_dir(&work)
-            .env("GIT_INDEX_FILE", "index.alt")
-            .status()
-            .unwrap();
-        assert!(staged.success(), "git {args:?}");
-    }
+    stage_deletion_of_file_txt(&work, "index.alt");
     // A clean index where the value would lead from the subdirectory.
     let sub = work.join("sub");
     fs::create_dir(&sub).unwrap();

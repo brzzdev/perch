@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 #[cfg(unix)]
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsStr;
+use std::ffi::OsString;
 use std::io::ErrorKind;
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
@@ -2417,15 +2418,12 @@ const REPOSITORY_VARIABLES: [&str; 13] = [
 ];
 
 /// Where the inherited [`REPOSITORY_VARIABLES`] lead from where perch started.
-/// Unset where none is inherited.
 static INHERITED_REPOSITORY: OnceLock<InheritedRepository> = OnceLock::new();
 
 struct InheritedRepository {
     /// Its git dir and toplevel, canonicalised.
     roots: Vec<PathBuf>,
-    /// What a command rooted at one of [`Self::roots`] runs under, so that it
-    /// finds the work-tree top perch started under, which the top-relative
-    /// variables resolve from.
+    /// The cwd-relative variables made absolute, and the top a lone `GIT_DIR` implies.
     env: Vec<(&'static str, OsString)>,
 }
 
@@ -2453,8 +2451,8 @@ pub fn record_inherited_repository() {
         return;
     };
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let printed: Vec<&str> = stdout.lines().collect();
-    let roots = printed
+    let git_dir_and_toplevel: Vec<&str> = stdout.lines().collect();
+    let roots = git_dir_and_toplevel
         .iter()
         .filter_map(|line| Path::new(line).canonicalize().ok())
         .collect();
@@ -2468,7 +2466,7 @@ pub fn record_inherited_repository() {
     // A `GIT_DIR` with no work tree takes the working directory as the top.
     let pins_the_top = env.iter().any(|(name, _)| *name == "GIT_DIR")
         && !env.iter().any(|(name, _)| *name == "GIT_WORK_TREE");
-    if let (true, [_, toplevel]) = (pins_the_top, printed.as_slice()) {
+    if pins_the_top && let [_, toplevel] = git_dir_and_toplevel.as_slice() {
         env.push(("GIT_WORK_TREE", OsString::from(toplevel)));
     }
     let _ = INHERITED_REPOSITORY.set(InheritedRepository { roots, env });

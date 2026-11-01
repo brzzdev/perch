@@ -152,7 +152,7 @@ pub fn run_br(target: Option<&str>) -> AppResult<()> {
 }
 
 fn run_verb(verb: Verb, target: Option<&str>) -> AppResult<()> {
-    let old_branch = git::current_branch()?;
+    let old_branch = git::current_branch(None)?;
     let request = target.map(forge::Request::parse).transpose()?.flatten();
     let remote = navigation_remote(old_branch.as_deref(), request);
 
@@ -210,7 +210,7 @@ fn run_verb(verb: Verb, target: Option<&str>) -> AppResult<()> {
             });
         }
         // The target may track a different remote than the current branch.
-        let target_remote = git::current_remote(Some(target.as_str()));
+        let target_remote = git::current_remote(None, Some(target.as_str()));
         if let Err(e) = wt::update_in(&held_by.path, &target, &target_remote, fetched.as_ref()) {
             eprintln!("{} update of {target} failed: {e}", warn());
         }
@@ -262,7 +262,7 @@ fn run_verb(verb: Verb, target: Option<&str>) -> AppResult<()> {
 pub(crate) fn navigation_remote(current: Option<&str>, request: Option<forge::Request>) -> String {
     match request {
         Some(_) => git::DEFAULT_REMOTE.to_string(),
-        None => git::current_remote(current),
+        None => git::current_remote(None, current),
     }
 }
 
@@ -315,8 +315,12 @@ fn refresh_current(remote: &str, current: &str) -> AppResult<()> {
         let (spinner, _cursor) = spinner(format!("Fetching {remote}…"));
 
         let fetch_outcome = git::fetch(None, remote);
-        let submodule_outcome = git::fetch_missing_submodule_commits(None, &remote_ref);
         let has_remote = git::remote_branch_exists(remote, current);
+        let submodule_outcome = if has_remote {
+            git::fetch_missing_submodule_commits(None, &remote_ref)
+        } else {
+            git::FetchOutcome::Ok
+        };
 
         spinner.finish_and_clear();
 
@@ -470,7 +474,7 @@ fn switch_and_update(
     // Read after the checkout, which is what sets up tracking for a branch
     // taken from the remote. The target may track a different remote than the
     // branch we left.
-    let target_remote = git::tracked_remote(target).unwrap_or_else(|| remote.to_string());
+    let target_remote = git::tracked_remote(None, target).unwrap_or_else(|| remote.to_string());
     match fetch_and_ff(None, target, &target_remote, fetched)? {
         git::FastForwardResult::Diverged => reconcile_diverged(target, &target_remote)?,
         git::FastForwardResult::Merged(report) => report_update(&report),

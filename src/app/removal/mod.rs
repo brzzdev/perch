@@ -911,7 +911,7 @@ fn assess_stale(request: StaleRequest) -> Assessment {
     // Grounds were read against the current branch's remote; the proof follows the main worktree's.
     let remote = main_worktree.map_or_else(
         || request.remote.clone(),
-        |worktree| git::current_remote(worktree.branch.as_deref()),
+        |worktree| git::current_remote(None, worktree.branch.as_deref()),
     );
     let judgement = BranchJudgement::read(
         main.as_deref(),
@@ -1114,7 +1114,7 @@ fn assess_branches(request: BranchRequest) -> AppResult<Assessment> {
             message: "main worktree not found".into(),
         })?;
     let main = main_worktree.path.clone();
-    let remote = git::current_remote(main_worktree.branch.as_deref());
+    let remote = git::current_remote(None, main_worktree.branch.as_deref());
     let reachable = |name: &str| match request.target.as_deref() {
         None => true,
         Some(target) => request.forcing == Forcing::Unforced && target == name,
@@ -1260,7 +1260,7 @@ fn build_worktree_assessment(
             message: "no main worktree found".into(),
         })?;
     let main = main_worktree.path.clone();
-    let remote = git::current_remote(main_worktree.branch.as_deref());
+    let remote = git::current_remote(None, main_worktree.branch.as_deref());
     let removable: Vec<(git::Worktree, bool)> = request
         .worktrees
         .into_iter()

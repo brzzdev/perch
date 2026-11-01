@@ -1678,7 +1678,7 @@ fn current_remote_handles_multiline_config_value() {
     );
 
     let _cwd = cwd_at(work.path());
-    let remote = perch::git::current_remote(Some("main"));
+    let remote = perch::git::current_remote(None, Some("main"));
 
     assert_eq!(remote, "upstream");
 }
@@ -2511,7 +2511,7 @@ enum Recorded {
     OutsideTheRefspec,
 }
 
-/// A `feature` worktree with its `sub` submodule initialised, behind a remote
+/// A `feature` worktree with its `module` submodule initialised, behind a remote
 /// `feature` that records a submodule commit the worktree's repository lacks.
 /// The main checkout has already fetched it, as any other fetch might, so the
 /// shared refs are where the worktree's own fetch would move them.
@@ -2531,22 +2531,8 @@ fn submodule_left_behind(recorded: Recorded) -> LeftBehind {
     // The mode git records a submodule's commit under in its superproject.
     const GITLINK_MODE: &str = "160000";
     let (bare, parent, work) = setup_with_parent();
-    let submodule = TempDir::new().unwrap();
-    git(submodule.path(), &["init", "--initial-branch=main"]);
-    commit_in(submodule.path(), "s.txt", "sub initial");
-    let url = submodule.path().to_str().unwrap();
-    git(
-        &work,
-        &[&ALLOW_FILE[..], &["submodule", "add", url, "sub"]].concat(),
-    );
-    git(&work, &["commit", "-m", "add sub"]);
-    git(&work, &["push", "origin", "main"]);
-    let worktree = add_worktree(&work, &parent, "feature");
-    git(&work, &["push", "origin", "feature"]);
-    git(
-        &worktree,
-        &[&ALLOW_FILE[..], &["submodule", "update", "--init"]].concat(),
-    );
+    let (submodule, worktree) = add_worktree_with_initialized_submodule(&work, &parent);
+    git(&work, &["push", "origin", "main", "feature"]);
 
     commit_in(submodule.path(), "s2.txt", "sub ahead");
     let sub_tip = stdout_str(&git(submodule.path(), &["rev-parse", "HEAD"]))
@@ -2566,7 +2552,7 @@ fn submodule_left_behind(recorded: Recorded) -> LeftBehind {
         &[
             "update-index",
             "--cacheinfo",
-            &format!("{GITLINK_MODE},{sub_tip},sub"),
+            &format!("{GITLINK_MODE},{sub_tip},module"),
         ],
     );
     git(pusher.path(), &["commit", "-m", "advance sub"]);
@@ -2607,11 +2593,20 @@ impl LeftBehind {
     fn submodule_has_recorded(&self) -> bool {
         Command::new("git")
             .args(["cat-file", "-e", &format!("{}^{{commit}}", self.recorded)])
-            .current_dir(self.worktree.join("sub"))
+            .current_dir(self.worktree.join("module"))
             .status()
             .unwrap()
             .success()
     }
+}
+
+/// How perch comes to move the `feature` worktree on.
+#[derive(Clone, Copy)]
+enum Run {
+    /// `perch .` from inside it.
+    Refresh,
+    /// `perch wt feature` from the main checkout.
+    UpdateWorktree,
 }
 
 /// Git's on-demand recursion follows only the refs its own fetch moved, so
@@ -2622,12 +2617,11 @@ impl LeftBehind {
 #[test]
 fn a_submodule_commit_another_fetch_left_behind_is_fetched() {
     for recorded in [Recorded::OnABranch, Recorded::OutsideTheRefspec] {
-        for update_from_main in [false, true] {
+        for run in [Run::Refresh, Run::UpdateWorktree] {
             let fixture = submodule_left_behind(recorded);
-            let (dir, args) = if update_from_main {
-                (&fixture.work, &["wt", "feature", "--no-switch"][..])
-            } else {
-                (&fixture.worktree, &["."][..])
+            let (dir, args) = match run {
+                Run::Refresh => (&fixture.worktree, &["."][..]),
+                Run::UpdateWorktree => (&fixture.work, &["wt", "feature", "--no-switch"][..]),
             };
 
             let (output, _) = fixture.perch(dir, args);
@@ -2665,12 +2659,12 @@ fn a_submodule_is_not_fetched_where_present_or_opted_out() {
         let worktree = &fixture.worktree;
         match case {
             NoSubmoduleFetch::AlreadyPresent => git(
-                &worktree.join("sub"),
+                &worktree.join("module"),
                 &[&ALLOW_FILE[..], &["fetch", "origin"]].concat(),
             ),
             NoSubmoduleFetch::OptedOutByName => git(
                 worktree,
-                &["config", "submodule.sub.fetchRecurseSubmodules", "false"],
+                &["config", "submodule.module.fetchRecurseSubmodules", "false"],
             ),
             NoSubmoduleFetch::RecursionSwitchedOff => {
                 git(worktree, &["config", "fetch.recurseSubmodules", "false"])
@@ -4053,28 +4047,16 @@ fn add_worktree_with_initialized_submodule(work: &Path, parent: &TempDir) -> (Te
     let submodule = TempDir::new().unwrap();
     git(submodule.path(), &["init", "--initial-branch=main"]);
     commit_in(submodule.path(), "tracked.txt", "initial submodule commit");
+    let url = submodule.path().to_str().unwrap();
     git(
         work,
-        &[
-            "-c",
-            "protocol.file.allow=always",
-            "submodule",
-            "add",
-            submodule.path().to_str().unwrap(),
-            "module",
-        ],
+        &[&ALLOW_FILE[..], &["submodule", "add", url, "module"]].concat(),
     );
     git(work, &["commit", "-m", "add submodule"]);
     let path = add_worktree(work, parent, "feature");
     git(
         &path,
-        &[
-            "-c",
-            "protocol.file.allow=always",
-            "submodule",
-            "update",
-            "--init",
-        ],
+        &[&ALLOW_FILE[..], &["submodule", "update", "--init"]].concat(),
     );
     (submodule, path)
 }

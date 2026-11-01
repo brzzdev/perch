@@ -13,7 +13,7 @@ pub(crate) fn run(query: &Completion) -> AppResult<()> {
             query.render(local.iter().map(String::as_str))
         }
         CompletionSource::ReachableBranches => {
-            let remote = git::current_remote(git::current_branch()?.as_deref());
+            let remote = git::current_remote(None, git::current_branch(None)?.as_deref());
             let (local, remote_only) = super::reachable_branches(&remote)?;
             query.render(local.iter().chain(&remote_only).map(String::as_str))
         }

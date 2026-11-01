@@ -38,8 +38,8 @@ pub enum RebaseOutcome {
     Aborted,
 }
 
-pub fn current_branch() -> AppResult<Option<String>> {
-    let output = run(&["branch", "--show-current"])?;
+pub fn current_branch(dir: Option<&Path>) -> AppResult<Option<String>> {
+    let output = run_in(dir, &["branch", "--show-current"])?;
     let name = output.trim().to_string();
     Ok(if name.is_empty() { None } else { Some(name) })
 }
@@ -49,15 +49,10 @@ pub(crate) const DEFAULT_REMOTE: &str = "origin";
 
 /// Resolves the remote name to use for fetch, merge, and default-branch
 /// detection. Prefers `branch.<current>.remote`, then the sole configured
-/// remote, falling back to `origin`.
+/// remote, falling back to `origin`, as git resolves them in `dir`.
 #[must_use]
-pub fn current_remote(current: Option<&str>) -> String {
-    default_remote(None, current)
-}
-
-/// [`current_remote`] for the repository at `dir`, as git resolves it there.
-fn default_remote(dir: Option<&Path>, branch: Option<&str>) -> String {
-    if let Some(name) = branch.and_then(|branch| configured_remote(dir, branch)) {
+pub fn current_remote(dir: Option<&Path>, current: Option<&str>) -> String {
+    if let Some(name) = current.and_then(|branch| tracked_remote(dir, branch)) {
         return name;
     }
 
@@ -75,11 +70,7 @@ fn default_remote(dir: Option<&Path>, branch: Option<&str>) -> String {
 
 /// The remote `branch.<branch>.remote` names, if any.
 #[must_use]
-pub fn tracked_remote(branch: &str) -> Option<String> {
-    configured_remote(None, branch)
-}
-
-fn configured_remote(dir: Option<&Path>, branch: &str) -> Option<String> {
+pub fn tracked_remote(dir: Option<&Path>, branch: &str) -> Option<String> {
     let output = run_in(
         dir,
         &["config", "--get", &format!("branch.{branch}.remote")],
@@ -444,18 +435,17 @@ pub fn common_dir() -> AppResult<PathBuf> {
 const RECURSION_KEYS: [&str; 2] = ["fetch.recursesubmodules", "submodule.recurse"];
 
 /// Whether the last of `entries` to set any of `keys` switches recursion into
-/// submodules off, `None` where none of them sets one. Takes
-/// [`config_entries`]: each a key, lowercased by git, then a newline and the
-/// value where it has one. A key with no value is true, and `on-demand` is no
-/// boolean at all.
-fn recursion_switched_off(entries: &[String], keys: &[&str]) -> Option<bool> {
-    let Some(value) = config_value(last_config_entry(entries, keys)?) else {
-        return Some(false);
+/// submodules off. Takes [`config_entries`]: each a key, lowercased by git,
+/// then a newline and the value where it has one. A key with no value is true,
+/// and `on-demand` is no boolean at all.
+fn recursion_switched_off(entries: &[String], keys: &[&str]) -> bool {
+    let Some(value) = last_config_entry(entries, keys).and_then(config_value) else {
+        return false;
     };
-    Some(matches!(
+    matches!(
         value.to_ascii_lowercase().as_str(),
         "" | "0" | "false" | "no" | "off"
-    ))
+    )
 }
 
 /// Fetches, into each submodule populated in the worktree at `dir`, the commit
@@ -482,7 +472,7 @@ pub fn fetch_missing_submodule_commits(dir: Option<&Path>, commit: &str) -> Fetc
         return FetchOutcome::Ok;
     }
     let config = config_entries(dir);
-    if recursion_switched_off(&config, &RECURSION_KEYS) == Some(true) {
+    if recursion_switched_off(&config, &RECURSION_KEYS) {
         return FetchOutcome::Ok;
     }
     let Ok(top) = run_in(dir, &["rev-parse", "--show-toplevel"]) else {
@@ -490,14 +480,13 @@ pub fn fetch_missing_submodule_commits(dir: Option<&Path>, commit: &str) -> Fetc
     };
     let top = PathBuf::from(top.trim_end_matches('\n'));
     let recorded = gitlinks(&top, commit, paths.iter().map(|(_, path)| *path));
+    // Read last, config overrides `.gitmodules`, as it does for `git fetch`.
+    let declared_then_config = [declared.as_slice(), config.as_slice()].concat();
 
     let mut failures = Vec::new();
     for (name, path) in paths {
-        // Config overrides `.gitmodules`, as it does for `git fetch`.
         let key = format!("submodule.{name}.fetchrecursesubmodules");
-        let opted_out = recursion_switched_off(&config, &[&key])
-            .or_else(|| recursion_switched_off(&declared, &[&key]));
-        if opted_out == Some(true) {
+        if recursion_switched_off(&declared_then_config, &[&key]) {
             continue;
         }
         let Some(recorded) = recorded.get(path) else {
@@ -546,13 +535,7 @@ fn gitlinks<'a>(
 /// brings first, and asks for the commit by name only if that left it out.
 fn fetch_submodule_commit(repository: &Path, commit: &str) -> Result<(), String> {
     let object = format!("{commit}^{{commit}}");
-    let has_commit = || {
-        git_cmd(Some(repository))
-            .args(["cat-file", "-e", &object])
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success())
-    };
+    let has_commit = || run_in(Some(repository), &["cat-file", "-e", &object]).is_ok();
     if has_commit() {
         return Ok(());
     }
@@ -560,12 +543,9 @@ fn fetch_submodule_commit(repository: &Path, commit: &str) -> Result<(), String>
     if has_commit() {
         return Ok(());
     }
-    let branch = run_in(Some(repository), &["branch", "--show-current"]).unwrap_or_default();
-    let branch = Some(branch.trim()).filter(|branch| !branch.is_empty());
-    fetch_into(
-        repository,
-        &[&default_remote(Some(repository), branch), commit],
-    )
+    let branch = current_branch(Some(repository)).ok().flatten();
+    let remote = current_remote(Some(repository), branch.as_deref());
+    fetch_into(repository, &[&remote, commit])
 }
 
 fn fetch_into(repository: &Path, args: &[&str]) -> Result<(), String> {
@@ -985,7 +965,7 @@ fn stale_from(
 /// [ADR 0002](../docs/adr/0002-staleness-is-anchored-to-the-default-branch.md)
 /// records why that is accepted rather than guessed at.
 pub fn stale_branches(remote: &str) -> AppResult<Vec<StaleBranch>> {
-    let current = current_branch()?;
+    let current = current_branch(None)?;
     let keep = kept_branches(remote);
 
     let refs_output = read_branch_refs()?;
@@ -2444,8 +2424,11 @@ mod tests {
             (&["submodule.recurse"], false),
         ] {
             let entries: Vec<String> = entries.iter().map(ToString::to_string).collect();
-            let switched_off = recursion_switched_off(&entries, &RECURSION_KEYS) == Some(true);
-            assert_eq!(switched_off, off, "{entries:?}");
+            assert_eq!(
+                recursion_switched_off(&entries, &RECURSION_KEYS),
+                off,
+                "{entries:?}"
+            );
         }
     }
 

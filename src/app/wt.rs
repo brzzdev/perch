@@ -51,7 +51,7 @@ pub(crate) fn run(
     target: Option<&str>,
     shell_handoff: ShellHandoff,
 ) -> AppResult<()> {
-    let current_branch = git::current_branch()?;
+    let current_branch = git::current_branch(None)?;
     let request = target.map(forge::Request::parse).transpose()?.flatten();
     let remote = super::navigation_remote(current_branch.as_deref(), request);
 
@@ -98,7 +98,7 @@ pub(crate) fn run(
         Action::UseExisting(wt) => {
             let branch = wt.branch.unwrap_or_default();
             // The worktree's branch may track a different remote than ours.
-            let branch_remote = git::current_remote(Some(branch.as_str()));
+            let branch_remote = git::current_remote(None, Some(branch.as_str()));
             if let Err(e) = update_in(&wt.path, &branch, &branch_remote, fetched.as_ref()) {
                 eprintln!("{} update of {branch} failed: {e}", warn());
             }
@@ -451,7 +451,7 @@ fn fetch_start(
         }
     };
     if git::is_local_branch(branch)? {
-        fetch(&git::current_remote(Some(branch)));
+        fetch(&git::current_remote(None, Some(branch)));
         return Ok(Start::Local);
     }
     if git::remote_url(None, preferred).is_some() {

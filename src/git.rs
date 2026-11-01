@@ -265,21 +265,12 @@ pub enum SubmoduleFetch {
 /// concurrent fetch of the same remote.
 #[must_use]
 pub fn fetch(dir: Option<&Path>, remote: &str, submodules: SubmoduleFetch) -> FetchOutcome {
-    let outcome = fetch_once(dir, remote, submodules);
-    let FetchOutcome::Failed(detail) = &outcome else {
-        return outcome;
-    };
-    if !is_lost_ref_lock_error(detail) {
-        return outcome;
+    match fetch_once(dir, remote, submodules) {
+        FetchOutcome::Failed(detail) if is_lost_ref_lock_error(&detail) => {
+            fetch_once(dir, remote, submodules)
+        }
+        outcome => outcome,
     }
-    // The fetch that won moved the refs, which leaves on-demand recursion no
-    // moved gitlink to follow.
-    let submodules = if last_recursion_is_off(&config_entries(dir)) {
-        submodules
-    } else {
-        SubmoduleFetch::All
-    };
-    fetch_once(dir, remote, submodules)
 }
 
 /// Runs in the C locale, so that [`is_lost_ref_lock_error`] reads git's message

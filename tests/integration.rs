@@ -133,9 +133,6 @@ fn pin_default_branch(bare: &Path) {
 /// Like `setup`, but places the working clone inside a parent `TempDir` so
 /// worktrees created at `<parent>/worktrees/<repo>/...` land in cleanable
 /// space. Returns `(bare, parent, work_path)`.
-/// The mode git records a submodule's commit under in its superproject.
-const GITLINK_MODE: &str = "160000";
-
 fn setup_with_parent() -> (TempDir, TempDir, PathBuf) {
     let bare = TempDir::new().unwrap();
     let parent = TempDir::new().unwrap();
@@ -434,9 +431,9 @@ fn lose_the_next_ref_lock_on_origin_main(work: &Path, target: &str) -> PathBuf {
 fn refresh_dot_retries_a_fetch_that_lost_a_ref_lock_race() {
     let (_bare, parent, work) = setup_with_parent();
     push_upstream_change(&work, "file.txt", "updated\n", "upstream change");
-    let upstream = stdout_str(&git(&work, &["rev-parse", "origin/main"]));
+    let upstream = remote_branch_tip(&work, "origin", "main").unwrap();
     git(&work, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
-    let marker = lose_the_next_ref_lock_on_origin_main(&work, upstream.trim());
+    let marker = lose_the_next_ref_lock_on_origin_main(&work, &upstream);
 
     let (output, fetches) = perch_traced(&parent, &work, &["."]);
 
@@ -448,72 +445,15 @@ fn refresh_dot_retries_a_fetch_that_lost_a_ref_lock_race() {
     assert!(stderr.contains("Pulled 1 commit"), "stderr: {stderr}");
 }
 
-/// The fetch that won the race recursed into no submodule repository of this
-/// checkout, and on demand the retry finds no moved gitlink to recurse for.
-#[test]
-fn refresh_dot_retry_fetches_the_submodule_commit_a_lost_race_left_behind() {
-    let (bare, parent, work) = setup_with_parent();
-    let submodule = TempDir::new().unwrap();
-    git(submodule.path(), &["init", "--initial-branch=main"]);
-    commit_in(submodule.path(), "s.txt", "sub initial");
-    let url = submodule.path().to_str().unwrap();
-    git(
-        &work,
-        &[
-            "-c",
-            "protocol.file.allow=always",
-            "submodule",
-            "add",
-            url,
-            "sub",
-        ],
-    );
-    git(&work, &["commit", "-m", "add sub"]);
-    git(&work, &["push", "origin", "main"]);
-    commit_in(submodule.path(), "s2.txt", "sub ahead");
-    let sub_tip = stdout_str(&git(submodule.path(), &["rev-parse", "HEAD"]))
-        .trim()
-        .to_string();
-    let pusher = clone_bare(bare.path());
-    git(
-        pusher.path(),
-        &[
-            "update-index",
-            "--cacheinfo",
-            &format!("{GITLINK_MODE},{sub_tip},sub"),
-        ],
-    );
-    git(pusher.path(), &["commit", "-m", "advance sub"]);
-    git(pusher.path(), &["push", "origin", "main"]);
-    let upstream = remote_branch_tip(&work, "origin", "main").unwrap();
-    let marker = lose_the_next_ref_lock_on_origin_main(&work, &upstream);
-    let mut command = perch_command(&work, &["."]);
-    command
-        .env("GIT_CONFIG_COUNT", "1")
-        .env("GIT_CONFIG_KEY_0", "protocol.file.allow")
-        .env("GIT_CONFIG_VALUE_0", "always");
-
-    let (output, _) = perch_traced_with(&parent, command);
-
-    let stderr = stderr_str(&output);
-    assert!(output.status.success(), "stderr: {stderr}");
-    assert!(!marker.exists(), "the hook never forced the lost lock");
-    assert!(!stderr.contains("fetch failed"), "stderr: {stderr}");
-    git(
-        &work.join("sub"),
-        &["cat-file", "-e", &format!("{sub_tip}^{{commit}}")],
-    );
-}
-
 /// The background fetch's stderr goes nowhere, so the foreground fetch that
 /// follows any failure of it is what retries a lost lock.
 #[test]
 fn wt_prefetch_that_lost_a_ref_lock_race_reports_nothing() {
     let (_bare, _parent, work) = setup_with_parent();
     push_upstream_change(&work, "file.txt", "updated\n", "upstream change");
-    let upstream = stdout_str(&git(&work, &["rev-parse", "origin/main"]));
+    let upstream = remote_branch_tip(&work, "origin", "main").unwrap();
     git(&work, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
-    let marker = lose_the_next_ref_lock_on_origin_main(&work, upstream.trim());
+    let marker = lose_the_next_ref_lock_on_origin_main(&work, &upstream);
 
     let output = perch_args(&work, &["wt", "brand-new", "--no-switch"]);
 
@@ -2606,6 +2546,8 @@ enum SubmoduleCase {
 /// gitlink names.
 #[test]
 fn wt_still_fetches_a_worktree_with_submodules() {
+    // The mode git records a submodule's commit under in its superproject.
+    const GITLINK_MODE: &str = "160000";
     for case in [
         SubmoduleCase::AtStartup,
         SubmoduleCase::GainedMidRun,

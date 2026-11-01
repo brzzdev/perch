@@ -1,11 +1,13 @@
 use std::collections::{HashMap, HashSet};
 #[cfg(unix)]
 use std::ffi::OsStr;
+use std::ffi::OsString;
 use std::io::ErrorKind;
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
+use std::sync::OnceLock;
 
 #[cfg(unix)]
 use crate::session;
@@ -482,10 +484,10 @@ pub fn fetch_missing_submodule_commits(dir: Option<&Path>, rev: &str) -> FetchOu
     };
     let toplevel = PathBuf::from(toplevel.trim_end_matches('\n'));
     let config = config_entries(dir);
-    if recursion_switched_off_in_checkout(&toplevel, &config) {
+    if recursion_switched_off_in_checkout(dir, &toplevel, &config) {
         return FetchOutcome::Ok;
     }
-    let gitlinks = gitlinks(&toplevel, rev, submodules.iter().map(|(_, path)| *path));
+    let gitlinks = gitlinks(dir, rev, submodules.iter().map(|(_, path)| *path));
     // Read last, config overrides `.gitmodules`, as it does for `git fetch`.
     let declared_then_config = [declared.as_slice(), config.as_slice()].concat();
 
@@ -500,7 +502,7 @@ pub fn fetch_missing_submodule_commits(dir: Option<&Path>, rev: &str) -> FetchOu
         };
         let url = format!("submodule.{name}.url");
         let initialised = config.iter().any(|entry| config_key(entry) == url);
-        let Some(repository) = submodule_repository(&toplevel, name, path, initialised) else {
+        let Some(repository) = submodule_repository(dir, &toplevel, name, path, initialised) else {
             continue;
         };
         if let FetchOutcome::Failed(detail) = fetch_submodule_commit(&repository, commit) {
@@ -524,30 +526,43 @@ fn stays_inside(relative: &str) -> bool {
             .all(|component| component != "..")
 }
 
-/// Whether recursion is switched off for the worktree at `toplevel`: by
-/// `config`, or, where it sets neither key, by its checked-out `.gitmodules`.
-fn recursion_switched_off_in_checkout(toplevel: &Path, config: &[String]) -> bool {
+/// Whether recursion is switched off for the worktree at `dir`: by `config`,
+/// or, where it sets neither key, by its checked-out `.gitmodules`.
+fn recursion_switched_off_in_checkout(
+    dir: Option<&Path>,
+    toplevel: &Path,
+    config: &[String],
+) -> bool {
     if last_config_entry(config, &RECURSION_KEYS).is_some() {
         return recursion_switched_off(config, &RECURSION_KEYS);
     }
+    let checked_out = toplevel.join(".gitmodules");
+    let file = checked_out.to_string_lossy();
     // Git falls back to the index's copy where the checkout leaves it out.
-    let source = if toplevel.join(".gitmodules").exists() {
-        ["--file", ".gitmodules"]
+    let source = if checked_out.exists() {
+        ["--file", &file]
     } else {
         ["--blob", ":.gitmodules"]
     };
-    let gitmodules = listed_config(Some(toplevel), &source);
+    let gitmodules = listed_config(dir, &source);
     recursion_switched_off(&gitmodules, &[FETCH_RECURSION_KEY])
 }
 
-/// The commit `rev` records at each of `paths` that is a gitlink, by path.
+/// The commit `rev` records at each top-relative path in `paths` that is a gitlink.
 fn gitlinks<'a>(
-    toplevel: &Path,
+    dir: Option<&Path>,
     rev: &str,
     paths: impl Iterator<Item = &'a str>,
 ) -> HashMap<String, String> {
-    let Some(output) = git_cmd(Some(toplevel))
-        .args(["--literal-pathspecs", "ls-tree", "-z", rev, "--"])
+    let Some(output) = git_cmd(dir)
+        .args([
+            "--literal-pathspecs",
+            "ls-tree",
+            "--full-tree",
+            "-z",
+            rev,
+            "--",
+        ])
         .args(paths)
         .output()
         .ok()
@@ -565,11 +580,12 @@ fn gitlinks<'a>(
         .collect()
 }
 
-/// Where the submodule `name` keeps its repository in the worktree at
-/// `toplevel`: wherever its checkout at `path` says, or, with nothing checked
-/// out there, as one the target commit moves, under `modules/<name>`. That
-/// one is skipped unless `initialised`, since `submodule deinit` keeps it.
+/// Where the submodule `name` keeps its repository in the worktree at `dir`:
+/// wherever its checkout at `path` says, or, with nothing checked out there,
+/// as one the target commit moves, under `modules/<name>`. That one is skipped
+/// unless `initialised`, since `submodule deinit` keeps it.
 fn submodule_repository(
+    dir: Option<&Path>,
     toplevel: &Path,
     name: &str,
     path: &str,
@@ -588,7 +604,7 @@ fn submodule_repository(
         return None;
     }
     let kept = run_in(
-        Some(toplevel),
+        dir,
         &[
             "rev-parse",
             "--path-format=absolute",
@@ -2384,12 +2400,90 @@ fn rev_parse(dir: Option<&Path>, refname: &str) -> AppResult<String> {
     Ok(output.trim().to_string())
 }
 
-/// A `git` command, optionally rooted in `dir` via `-C` so it operates on
-/// another worktree without mutating the process's working directory.
+/// Git's `local_repo_env`, less the config it passes on to a submodule.
+const REPOSITORY_VARIABLES: [&str; 13] = [
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_CONFIG",
+    "GIT_DIR",
+    "GIT_GRAFT_FILE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_PREFIX",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_SHALLOW_FILE",
+    "GIT_WORK_TREE",
+];
+
+/// The [`REPOSITORY_VARIABLES`] git resolves from the cwd, not the work-tree top.
+const CWD_RELATIVE_VARIABLES: [&str; 3] = ["GIT_CONFIG", "GIT_DIR", "GIT_WORK_TREE"];
+
+/// Where the inherited [`REPOSITORY_VARIABLES`] lead from where perch started.
+static INHERITED_REPOSITORY: OnceLock<InheritedRepository> = OnceLock::new();
+
+struct InheritedRepository {
+    /// The [`CWD_RELATIVE_VARIABLES`] inherited, made absolute.
+    overrides: Vec<(&'static str, OsString)>,
+    /// The inherited repository's git dir and toplevel, canonicalised.
+    roots: Vec<PathBuf>,
+}
+
+/// Records [`INHERITED_REPOSITORY`] before anything moves the cwd.
+pub fn record_inherited_repository() {
+    if !REPOSITORY_VARIABLES
+        .iter()
+        .any(|name| std::env::var_os(name).is_some())
+    {
+        return;
+    }
+    let Ok(cwd) = std::env::current_dir() else {
+        return;
+    };
+    // Without a work tree, `--show-toplevel` fails after the git dir is printed.
+    let Ok(output) = git_cmd(None)
+        .args(["rev-parse", "--absolute-git-dir", "--show-toplevel"])
+        .output()
+    else {
+        return;
+    };
+    let roots = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| Path::new(line).canonicalize().ok())
+        .collect();
+    let overrides = CWD_RELATIVE_VARIABLES
+        .into_iter()
+        .filter_map(|name| {
+            let value = std::env::var_os(name).filter(|value| !value.is_empty())?;
+            Some((name, cwd.join(value).into_os_string()))
+        })
+        .collect();
+    let _ = INHERITED_REPOSITORY.set(InheritedRepository { overrides, roots });
+}
+
+/// A `git` command rooted in `dir`, clearing inherited repository variables unless they lead there.
 fn git_cmd(dir: Option<&Path>) -> Command {
     let mut cmd = Command::new("git");
-    if let Some(d) = dir {
-        cmd.arg("-C").arg(d);
+    let Some(dir) = dir else {
+        return cmd;
+    };
+    cmd.arg("-C").arg(dir);
+    let inherited_here = INHERITED_REPOSITORY.get().filter(|inherited| {
+        dir.canonicalize()
+            .is_ok_and(|canonical| inherited.roots.contains(&canonical))
+    });
+    if let Some(inherited) = inherited_here {
+        cmd.envs(
+            inherited
+                .overrides
+                .iter()
+                .map(|(name, value)| (name, value)),
+        );
+        return cmd;
+    }
+    for name in REPOSITORY_VARIABLES {
+        cmd.env_remove(name);
     }
     cmd
 }

@@ -119,5 +119,6 @@ impl Error {
 }
 
 pub fn run(args: &[String]) -> AppResult<()> {
+    git::record_inherited_repository();
     app::run_invocation(grammar::parse(args)?)
 }

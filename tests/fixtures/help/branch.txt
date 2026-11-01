@@ -3,8 +3,8 @@ Usage: perch br [<branch>]    Check the branch out here
                                   Remove local branches
        perch br -- <branch>   Check out a branch named rm
 
-A <branch> to go to can also be `pr:<n>`, a GitHub pull request, or
-`mr:<n>`, a GitLab merge request.
+A <branch> to go to can also be `pr:<n>` or `mr:<n>`, naming the head
+branch of a GitHub pull request or a GitLab merge request.
 
 Options:
       --upstream  Also offer the branch's same-named upstream for removal

@@ -2503,8 +2503,7 @@ fn wt_still_fetches_a_worktree_whose_origin_points_elsewhere() {
     );
 }
 
-/// An inherited `GIT_DIR` and `GIT_WORK_TREE` override `-C`, which once had
-/// `wt` fast-forward the main checkout's branch in place of the worktree's.
+/// An inherited `GIT_DIR` and `GIT_WORK_TREE` override `-C`.
 #[test]
 fn wt_updates_the_worktree_whatever_git_dir_names() {
     let (_bare, parent, work) = setup_with_parent();
@@ -2528,6 +2527,42 @@ fn wt_updates_the_worktree_whatever_git_dir_names() {
     assert_eq!(stdout_str(&git(&work, &["rev-parse", "main"])), main_before);
     let branch = git(&work, &["branch", "--show-current"]);
     assert_eq!(stdout_str(&branch).trim(), "main");
+}
+
+/// The worktree perch started in keeps an inherited `GIT_INDEX_FILE`, as a
+/// hook exports it, even where perch roots git there by path.
+#[test]
+fn wt_updates_its_own_worktree_through_an_inherited_index() {
+    let (_bare, parent, work) = setup_with_parent();
+    add_worktree(&work, &parent, "feature");
+    push_upstream_change(&work, "file.txt", "incoming\n", "incoming change");
+    let before = stdout_str(&git(&work, &["rev-parse", "HEAD"]));
+    let index = parent.path().join("index");
+    for args in [
+        &["read-tree", "HEAD"][..],
+        &["rm", "--cached", "--quiet", "file.txt"],
+    ] {
+        let staged = Command::new("git")
+            .args(args)
+            .current_dir(&work)
+            .env("GIT_INDEX_FILE", &index)
+            .status()
+            .unwrap();
+        assert!(staged.success(), "git {args:?}");
+    }
+
+    let output = perch_command(&work, &["wt", "main", "--no-switch"])
+        .env("GIT_INDEX_FILE", &index)
+        .env("PERCH_NO_HOOKS", "1")
+        .output()
+        .expect("failed to run perch");
+
+    assert_eq!(
+        stdout_str(&git(&work, &["rev-parse", "HEAD"])),
+        before,
+        "fast-forwarded over the inherited index; stderr: {}",
+        stderr_str(&output)
+    );
 }
 
 /// Where the commit a superproject records for its submodule sits on the
@@ -2721,11 +2756,11 @@ fn a_submodule_commit_another_fetch_left_behind_is_fetched() {
 /// exported, as git exports them to a hook.
 #[derive(Clone, Copy, Debug)]
 enum Exported {
-    /// In the worktree.
-    FromTheWorktree,
     /// Outside any repository, with the worktree's `.git` file gone, so only
     /// the variables lead to its repository.
     FromOutside,
+    /// In the worktree.
+    FromTheWorktree,
 }
 
 /// An inherited `GIT_DIR` overrides `-C`, so perch clears it for git it runs in

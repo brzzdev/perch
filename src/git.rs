@@ -6,6 +6,7 @@ use std::io::ErrorKind;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
+use std::sync::OnceLock;
 
 #[cfg(unix)]
 use crate::session;
@@ -524,9 +525,8 @@ fn stays_inside(relative: &str) -> bool {
             .all(|component| component != "..")
 }
 
-/// Whether recursion is switched off for the worktree at `dir`, whose top is
-/// `toplevel`: by `config`, or, where it sets neither key, by its checked-out
-/// `.gitmodules`.
+/// Whether recursion is switched off for the worktree at `dir`: by `config`,
+/// or, where it sets neither key, by its checked-out `.gitmodules`.
 fn recursion_switched_off_in_checkout(
     dir: Option<&Path>,
     toplevel: &Path,
@@ -580,11 +580,10 @@ fn gitlinks<'a>(
         .collect()
 }
 
-/// Where the submodule `name` keeps its repository in the worktree at `dir`,
-/// whose top is `toplevel`: wherever its checkout at `path` says, or, with
-/// nothing checked out there, as one the target commit moves, under
-/// `modules/<name>`. That one is skipped unless `initialised`, since
-/// `submodule deinit` keeps it.
+/// Where the submodule `name` keeps its repository in the worktree at `dir`:
+/// wherever its checkout at `path` says, or, with nothing checked out there,
+/// as one the target commit moves, under `modules/<name>`. That one is skipped
+/// unless `initialised`, since `submodule deinit` keeps it.
 fn submodule_repository(
     dir: Option<&Path>,
     toplevel: &Path,
@@ -2420,16 +2419,49 @@ const REPOSITORY_VARIABLES: [&str; 13] = [
     "GIT_WORK_TREE",
 ];
 
+/// The worktree and git dir the inherited [`REPOSITORY_VARIABLES`] lead to
+/// from where perch started, canonicalised. Unset where none is inherited.
+static INHERITED_REPOSITORY: OnceLock<Vec<PathBuf>> = OnceLock::new();
+
+/// Records [`INHERITED_REPOSITORY`], before anything moves the working
+/// directory a relative `GIT_DIR` resolves from.
+pub fn record_inherited_repository() {
+    if !REPOSITORY_VARIABLES
+        .iter()
+        .any(|name| std::env::var_os(name).is_some())
+    {
+        return;
+    }
+    // Without a work tree, `--show-toplevel` fails after the git dir is printed.
+    let Ok(output) = Command::new("git")
+        .args(["rev-parse", "--absolute-git-dir", "--show-toplevel"])
+        .output()
+    else {
+        return;
+    };
+    let paths = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| Path::new(line).canonicalize().ok())
+        .collect();
+    let _ = INHERITED_REPOSITORY.set(paths);
+}
+
 /// A `git` command, optionally rooted in `dir` via `-C` so it operates on
-/// another worktree without mutating the process's working directory. A
-/// rooted command finds its repository from `dir` alone, as git's submodule
-/// recursion does, since an inherited `GIT_DIR` would override `-C`.
+/// another worktree without mutating the process's working directory. An
+/// inherited `GIT_DIR` would override `-C`, so a command rooted anywhere but
+/// the repository it leads to finds its repository from `dir` alone.
 fn git_cmd(dir: Option<&Path>) -> Command {
     let mut cmd = Command::new("git");
     let Some(dir) = dir else {
         return cmd;
     };
     cmd.arg("-C").arg(dir);
+    let inherited_here = INHERITED_REPOSITORY
+        .get()
+        .is_some_and(|inherited| dir.canonicalize().is_ok_and(|dir| inherited.contains(&dir)));
+    if inherited_here {
+        return cmd;
+    }
     for name in REPOSITORY_VARIABLES {
         cmd.env_remove(name);
     }

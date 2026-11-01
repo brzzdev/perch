@@ -113,7 +113,7 @@ A pull request (GitHub) or merge request (GitLab), named on the command line as 
 _Avoid_: PR, MR (as domain words), ticket
 
 **Head branch**:
-The branch a *Request* proposes to merge. Perch navigates to it as if it had been named.
+The branch a *Request* proposes to merge. Perch navigates to it as if its name had been typed.
 _Avoid_: Source branch, PR branch
 
 **Subverb**:

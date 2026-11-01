@@ -32,7 +32,7 @@ enum Action {
 enum Existence {
     MayCreate,
     MustExist,
-    Requested(forge::Reference),
+    Requested(forge::Request),
 }
 
 pub(crate) fn run(
@@ -41,8 +41,8 @@ pub(crate) fn run(
     shell_handoff: ShellHandoff,
 ) -> AppResult<()> {
     let current_branch = git::current_branch()?;
-    let reference = target.map(forge::Reference::parse).transpose()?.flatten();
-    let remote = super::navigation_remote(current_branch.as_deref(), reference);
+    let request = target.map(forge::Request::parse).transpose()?.flatten();
+    let remote = super::navigation_remote(current_branch.as_deref(), request);
 
     // A worktree whose directory was deleted by hand can't be entered, so its
     // branch is one to (re)create. `worktree_add`/`checkout` prune the stale
@@ -70,11 +70,8 @@ pub(crate) fn run(
     let prefetch = ((target.is_some() || super::is_interactive()) && !has_submodules)
         .then(|| Prefetch::start(&remote));
 
-    let (branch, existence) = if let Some(reference) = reference {
-        (
-            super::look_up_head(reference)?,
-            Existence::Requested(reference),
-        )
+    let (branch, existence) = if let Some(request) = request {
+        (super::look_up_head(request)?, Existence::Requested(request))
     } else if let Some(name) = target {
         (name.to_string(), Existence::MayCreate)
     } else {
@@ -446,8 +443,8 @@ fn resolve_target(
         Existence::MustExist => Err(Error::Vanished {
             branch: name.to_string(),
         }),
-        Existence::Requested(reference) => {
-            reference.ensure_head_exists(name, remote)?;
+        Existence::Requested(request) => {
+            request.ensure_head_exists(name, remote)?;
             Ok(Action::CreateForBranch(name.to_string()))
         }
     }

@@ -7105,7 +7105,7 @@ fn an_attribute_missing_from_the_worktree_hides_no_driver() {
 // ---------------------------------------------------------------------------
 
 /// A `PATH` that finds `cli` first, as a script answering `query` with `answer`
-/// on stdout and anything else as a forge error.
+/// on stdout and anything else with a two-line forge error, message first.
 fn forge_path(cli: &str, query: &str, answer: &str) -> (TempDir, OsString) {
     let bin = TempDir::new().unwrap();
     let script = bin.path().join(cli);
@@ -7115,7 +7115,7 @@ fn forge_path(cli: &str, query: &str, answer: &str) -> (TempDir, OsString) {
             "#!/bin/sh\n\
              case \"$*\" in\n\
              \"{query}\"*) printf '%s\\n' '{answer}' ;;\n\
-             *) echo 'no pull requests found' >&2; exit 1 ;;\n\
+             *) printf 'no pull requests found\\nTry again later\\n' >&2; exit 1 ;;\n\
              esac\n"
         ),
     )
@@ -7294,7 +7294,7 @@ fn wt_pr_surfaces_the_forges_own_error() {
 
     assert!(!output.status.success());
     assert!(
-        stderr_str(&output).contains("pr:8 failed: no pull requests found"),
+        stderr_str(&output).contains("pr:8 failed: no pull requests found\nTry again later"),
         "stderr: {}",
         stderr_str(&output)
     );

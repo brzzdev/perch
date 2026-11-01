@@ -29,9 +29,9 @@ pub enum Error {
     #[error("branch diverged from remote")]
     Diverged,
 
-    #[error("{reference} {problem}")]
+    #[error("{request} {problem}")]
     Forge {
-        reference: forge::Reference,
+        request: forge::Request,
         problem: forge::Problem,
     },
 
@@ -52,7 +52,7 @@ pub enum Error {
     },
 
     #[error("`{0}` is not a request number; expected pr:<number> or mr:<number>")]
-    InvalidForgeReference(String),
+    InvalidRequest(String),
 
     #[error("branch '{branch}' does not exist locally")]
     LocalBranchNotFound { branch: String },

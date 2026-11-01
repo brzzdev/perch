@@ -4,6 +4,9 @@ use std::process::{Command, Stdio};
 
 use crate::{AppResult, Error, git};
 
+/// The subdomain GitLab serves SSH from on port 443.
+const GITLAB_PORT_443_PREFIX: &str = "altssh.";
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Forge {
     GitHub,
@@ -42,12 +45,12 @@ impl Forge {
 
 /// A pull or merge request named by number, as `pr:<n>` or `mr:<n>`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Reference {
+pub struct Request {
     forge: Forge,
     number: u64,
 }
 
-impl fmt::Display for Reference {
+impl fmt::Display for Request {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}:{}", self.forge.prefix(), self.number)
     }
@@ -71,7 +74,7 @@ pub enum Problem {
     HeadMissing { branch: String, remote: String },
 }
 
-impl Reference {
+impl Request {
     /// `None` for an ordinary branch name. Git refuses `:` in a ref, so these
     /// prefixes never shadow a branch.
     pub(crate) fn parse(argument: &str) -> AppResult<Option<Self>> {
@@ -89,13 +92,13 @@ impl Reference {
             .all(|byte| byte.is_ascii_digit())
             .then(|| number.parse().ok())
             .flatten()
-            .ok_or_else(|| Error::InvalidForgeReference(argument.to_string()))?;
+            .ok_or_else(|| Error::InvalidRequest(argument.to_string()))?;
         Ok(Some(Self { forge, number }))
     }
 
     pub(crate) fn error(self, problem: Problem) -> Error {
         Error::Forge {
-            reference: self,
+            request: self,
             problem,
         }
     }
@@ -128,14 +131,15 @@ impl Reference {
         let stdout = String::from_utf8_lossy(&output.stdout);
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            // `glab` frames its error in a box of padding lines; the message is last.
-            let message = [&*stderr, &*stdout]
-                .into_iter()
-                .find_map(|text| text.lines().map(str::trim).rfind(|line| !line.is_empty()))
-                .unwrap_or_default();
+            let message = if stderr.trim().is_empty() {
+                stdout.trim()
+            } else {
+                stderr.trim()
+            };
             return Err(self.error(Problem::Failed(message.to_string())));
         }
-        match stdout.trim().split_once(' ') {
+        // A branch name may end in Unicode whitespace, so only the line ending goes.
+        match stdout.trim_end_matches(['\n', '\r']).split_once(' ') {
             Some(("false", branch)) if !branch.is_empty() => Ok(branch.to_string()),
             Some(("true", _)) => Err(self.error(Problem::Fork)),
             _ => Err(self.error(Problem::Failed(format!(
@@ -177,6 +181,9 @@ fn forge_url(url: &str) -> String {
 /// The host `ssh -G` connects to for the remote, asked as its user, which a
 /// `Match user` block can turn on.
 fn aliased_host(parts: &SshParts<'_>) -> String {
+    if parts.host.starts_with('[') {
+        return parts.host.to_string();
+    }
     let destination = match parts.user {
         Some(user) => format!("{user}@{}", parts.host),
         None => parts.host.to_string(),
@@ -207,9 +214,6 @@ fn forge_host<'a>(host: &'a str, resolved: Option<&'a str>) -> &'a str {
     host.strip_prefix(GITLAB_PORT_443_PREFIX).unwrap_or(host)
 }
 
-/// The subdomain GitLab serves SSH from on port 443.
-const GITLAB_PORT_443_PREFIX: &str = "altssh.";
-
 /// An SSH remote URL's parts, scp-style or `ssh://`.
 #[derive(Debug, PartialEq)]
 struct SshParts<'a> {
@@ -223,17 +227,35 @@ fn ssh_parts(url: &str) -> Option<SshParts<'_>> {
         Some(("ssh" | "git+ssh" | "ssh+git", rest)) => rest.split_once('/')?,
         Some(_) => return None,
         // scp-style, `[user@]host:path`; a `/` before the `:` makes it a path.
-        None => match url.find([':', '/']) {
-            Some(colon) if url[colon..].starts_with(':') => (&url[..colon], &url[colon + 1..]),
-            _ => return None,
-        },
+        None => {
+            let host_start = url
+                .find('@')
+                .filter(|&at| !url[..at].contains('/'))
+                .map_or(0, |at| at + 1);
+            let after_brackets = match url[host_start..].strip_prefix('[') {
+                Some(bracketed) => host_start + bracketed.find(']')? + 2,
+                None => host_start,
+            };
+            match url[after_brackets..]
+                .find([':', '/'])
+                .map(|i| after_brackets + i)
+            {
+                Some(colon) if url[colon..].starts_with(':') => (&url[..colon], &url[colon + 1..]),
+                _ => return None,
+            }
+        }
     };
     let (user, host) = match authority.rsplit_once('@') {
         Some((user, host)) => (Some(user), host),
         None => (None, authority),
     };
+    // An IPv6 host is bracketed, its colons no port separator.
+    let host = match host.strip_prefix('[') {
+        Some(bracketed) => &host[..bracketed.find(']')? + 2],
+        None => host.split_once(':').map_or(host, |(host, _)| host),
+    };
     Some(SshParts {
-        host: host.split_once(':').map_or(host, |(host, _)| host),
+        host,
         path: path.trim_start_matches('/'),
         user,
     })
@@ -244,23 +266,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_a_numbered_prefix_is_a_reference() {
+    fn only_a_numbered_prefix_is_a_request() {
         assert_eq!(
-            Reference::parse("pr:12").unwrap(),
-            Some(Reference {
+            Request::parse("pr:12").unwrap(),
+            Some(Request {
                 forge: Forge::GitHub,
                 number: 12
             })
         );
         assert_eq!(
-            Reference::parse("mr:3").unwrap().map(|r| r.to_string()),
+            Request::parse("mr:3").unwrap().map(|r| r.to_string()),
             Some("mr:3".to_string())
         );
-        assert_eq!(Reference::parse("feature/pr").unwrap(), None);
-        assert_eq!(Reference::parse("PR:1").unwrap(), None);
-        assert!(Reference::parse("pr:").is_err());
-        assert!(Reference::parse("pr:12a").is_err());
-        assert!(Reference::parse("pr:+7").is_err());
+        assert_eq!(Request::parse("feature/pr").unwrap(), None);
+        assert_eq!(Request::parse("PR:1").unwrap(), None);
+        assert!(Request::parse("pr:").is_err());
+        assert!(Request::parse("pr:12a").is_err());
+        assert!(Request::parse("pr:+7").is_err());
     }
 
     #[test]
@@ -282,9 +304,18 @@ mod tests {
             ssh_parts("git+ssh://gitlab-work//o/r"),
             parts("gitlab-work", "o/r", None)
         );
+        assert_eq!(
+            ssh_parts("ssh://git@[2001:db8::1]:22/g/r.git"),
+            parts("[2001:db8::1]", "g/r.git", Some("git"))
+        );
+        assert_eq!(
+            ssh_parts("git@[2001:db8::1]:g/r.git"),
+            parts("[2001:db8::1]", "g/r.git", Some("git"))
+        );
         assert_eq!(ssh_parts("https://github.com/o/r.git"), None);
         assert_eq!(ssh_parts("/srv/git/r.git"), None);
         assert_eq!(ssh_parts("./a:b"), None);
+        assert_eq!(ssh_parts("/srv/a@b:c"), None);
     }
 
     #[test]

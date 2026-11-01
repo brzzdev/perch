@@ -153,8 +153,8 @@ pub fn run_br(target: Option<&str>) -> AppResult<()> {
 
 fn run_verb(verb: Verb, target: Option<&str>) -> AppResult<()> {
     let old_branch = git::current_branch()?;
-    let reference = target.map(forge::Reference::parse).transpose()?.flatten();
-    let remote = navigation_remote(old_branch.as_deref(), reference);
+    let request = target.map(forge::Request::parse).transpose()?.flatten();
+    let remote = navigation_remote(old_branch.as_deref(), request);
 
     // `perch .` refreshes the branch we're already on against its remote,
     // rather than switching anywhere.
@@ -171,8 +171,8 @@ fn run_verb(verb: Verb, target: Option<&str>) -> AppResult<()> {
     // from this same worktree, and a *Held* one with submodules is never covered.
     let prefetch = (target.is_some() || is_interactive()).then(|| Prefetch::start(&remote));
 
-    let target = if let Some(reference) = reference {
-        look_up_head(reference)?
+    let target = if let Some(request) = request {
+        look_up_head(request)?
     } else if let Some(name) = target {
         name.to_string()
     } else {
@@ -186,8 +186,8 @@ fn run_verb(verb: Verb, target: Option<&str>) -> AppResult<()> {
     // Joined before the *Held* check and any stash, so both see the fetched
     // refs, and an interrupt here leaves before anything is touched.
     let fetched = prefetch.map(Prefetch::join).transpose()?;
-    if let Some(reference) = reference {
-        reference.ensure_head_exists(&target, &remote)?;
+    if let Some(request) = request {
+        request.ensure_head_exists(&target, &remote)?;
     }
 
     // Read the worktrees again rather than reusing what the picker was drawn
@@ -254,19 +254,16 @@ fn run_verb(verb: Verb, target: Option<&str>) -> AppResult<()> {
 
 /// The remote a navigation fetches and finds its branch on. A request's head
 /// is on the remote its forge was asked about, whatever the current branch tracks.
-pub(crate) fn navigation_remote(
-    current: Option<&str>,
-    reference: Option<forge::Reference>,
-) -> String {
-    match reference {
+pub(crate) fn navigation_remote(current: Option<&str>, request: Option<forge::Request>) -> String {
+    match request {
         Some(_) => git::DEFAULT_REMOTE.to_string(),
         None => git::current_remote(current),
     }
 }
 
-pub(crate) fn look_up_head(reference: forge::Reference) -> AppResult<String> {
-    let (spinner, _cursor) = spinner(format!("Looking up {reference}…"));
-    let branch = reference.head_branch();
+pub(crate) fn look_up_head(request: forge::Request) -> AppResult<String> {
+    let (spinner, _cursor) = spinner(format!("Looking up {request}…"));
+    let branch = request.head_branch();
     spinner.finish_and_clear();
     branch
 }

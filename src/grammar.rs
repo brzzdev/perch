@@ -521,20 +521,14 @@ fn parse_worktree_subverb(word: &str) -> Option<WorktreeSubverb> {
     }
 }
 
-macro_rules! request_note {
-    () => {
-        concat!(
-            "Except with `rm`, <branch> can also be `pr:<n>` or `mr:<n>`: the head\n",
-            "branch of a GitHub pull request or a GitLab merge request.\n",
-        )
-    };
-}
-
 const MAIN_HELP: &str = concat!(
-    "Usage: perch [<branch>]       Go to the branch, wherever it lives\n",
-    "       perch br [<branch>]    Check the branch out here\n",
-    "       perch wt [<branch>]    Give the branch its own worktree\n",
-    "       perch wt <name> <branch>\n",
+    "Usage: perch [<branch>|pr:<n>|mr:<n>]\n",
+    "                                  Go to the branch, wherever it lives\n",
+    "       perch br [<branch>|pr:<n>|mr:<n>]\n",
+    "                                  Check the branch out here\n",
+    "       perch wt [<branch>|pr:<n>|mr:<n>]\n",
+    "                                  Give the branch its own worktree\n",
+    "       perch wt <name> <branch>|pr:<n>|mr:<n>\n",
     "                                  Use a custom worktree directory name\n",
     "\n",
     "       perch .                Refresh the current branch from its remote\n",
@@ -544,19 +538,16 @@ const MAIN_HELP: &str = concat!(
     "       perch wt rm [<branch>|.]\n",
     "       perch shell install    Add the shell integration to your rc file\n",
     "\n",
-    request_note!(),
-    "\n",
     "With the shell integration loaded, `br` and `wt` stand in for `perch br`\n",
     "and `perch wt`. Set PERCH_NO_SHORTCUTS to leave both names alone.\n",
 );
 
 const BRANCH_HELP: &str = concat!(
-    "Usage: perch br [<branch>]    Check the branch out here\n",
+    "Usage: perch br [<branch>|pr:<n>|mr:<n>]\n",
+    "                                  Check the branch out here\n",
     "       perch br rm [<branch>] [--upstream] [--force]\n",
     "                                  Remove local branches\n",
     "       perch br -- <branch>   Check out a branch named rm\n",
-    "\n",
-    request_note!(),
     "\n",
     "Options:\n",
     "      --upstream  Also offer the branch's same-named upstream for removal\n",
@@ -574,9 +565,9 @@ const SHELL_HELP: &str = concat!(
 );
 
 const WORKTREE_HELP: &str = concat!(
-    "Usage: perch wt [<branch>] [--no-switch]\n",
+    "Usage: perch wt [<branch>|pr:<n>|mr:<n>] [--no-switch]\n",
     "                                  Give the branch its own worktree\n",
-    "       perch wt <worktree-directory-name> <branch> [--no-switch]\n",
+    "       perch wt <worktree-directory-name> <branch>|pr:<n>|mr:<n> [--no-switch]\n",
     "                                  Use a custom worktree directory name\n",
     "       perch wt ls            List worktrees\n",
     "       perch wt rm [<branch>] Remove a worktree (deletes branch if merged)\n",
@@ -584,8 +575,6 @@ const WORKTREE_HELP: &str = concat!(
     "       perch wt -- <branch>   Worktree a branch named ls/rm/list/remove\n",
     "       perch wt -- <worktree-directory-name> <branch>\n",
     "                                  Escape a colliding worktree directory name\n",
-    "\n",
-    request_note!(),
     "\n",
     "Options:\n",
     "      --no-switch  Create or find the worktree without switching to it\n",

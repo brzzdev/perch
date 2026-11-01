@@ -1,7 +1,10 @@
-Usage: perch [<branch>]       Go to the branch, wherever it lives
-       perch br [<branch>]    Check the branch out here
-       perch wt [<branch>]    Give the branch its own worktree
-       perch wt <name> <branch>
+Usage: perch [<branch>|pr:<n>|mr:<n>]
+                                  Go to the branch, wherever it lives
+       perch br [<branch>|pr:<n>|mr:<n>]
+                                  Check the branch out here
+       perch wt [<branch>|pr:<n>|mr:<n>]
+                                  Give the branch its own worktree
+       perch wt <name> <branch>|pr:<n>|mr:<n>
                                   Use a custom worktree directory name
 
        perch .                Refresh the current branch from its remote
@@ -10,9 +13,6 @@ Usage: perch [<branch>]       Go to the branch, wherever it lives
        perch wt ls            List worktrees
        perch wt rm [<branch>|.]
        perch shell install    Add the shell integration to your rc file
-
-Except with `rm`, <branch> can also be `pr:<n>` or `mr:<n>`: the head
-branch of a GitHub pull request or a GitLab merge request.
 
 With the shell integration loaded, `br` and `wt` stand in for `perch br`
 and `perch wt`. Set PERCH_NO_SHORTCUTS to leave both names alone.

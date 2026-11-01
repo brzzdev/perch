@@ -2529,10 +2529,10 @@ fn wt_updates_the_worktree_whatever_git_dir_names() {
     assert_eq!(stdout_str(&branch).trim(), "main");
 }
 
-/// The worktree perch started in keeps an inherited `GIT_INDEX_FILE`, as a
-/// hook exports it, even where perch roots git there by path.
+/// The worktree perch started in keeps an inherited `GIT_INDEX_FILE`, even where
+/// perch roots git there by path.
 #[test]
-fn wt_updates_its_own_worktree_through_an_inherited_index() {
+fn wt_honours_an_inherited_index_in_its_own_worktree() {
     let (_bare, parent, work) = setup_with_parent();
     add_worktree(&work, &parent, "feature");
     push_upstream_change(&work, "file.txt", "incoming\n", "incoming change");
@@ -2561,6 +2561,33 @@ fn wt_updates_its_own_worktree_through_an_inherited_index() {
         stdout_str(&git(&work, &["rev-parse", "HEAD"])),
         before,
         "fast-forwarded over the inherited index; stderr: {}",
+        stderr_str(&output)
+    );
+}
+
+/// A relative `GIT_DIR` resolves from where perch started, not from where `-C`
+/// roots git.
+#[test]
+fn wt_updates_its_own_worktree_through_a_relative_git_dir() {
+    let (_bare, parent, work) = setup_with_parent();
+    add_worktree(&work, &parent, "feature");
+    push_upstream_change(&work, "file.txt", "incoming\n", "incoming change");
+    let tip = remote_branch_tip(&work, "origin", "main").unwrap();
+    let sub = work.join("sub");
+    fs::create_dir(&sub).unwrap();
+
+    let output = perch_command(&sub, &["wt", "main", "--no-switch"])
+        .env("GIT_DIR", "../.git")
+        .env("GIT_WORK_TREE", "..")
+        .env("PERCH_NO_HOOKS", "1")
+        .output()
+        .expect("failed to run perch");
+
+    let head = git(&work, &["rev-parse", "HEAD"]);
+    assert_eq!(
+        stdout_str(&head).trim(),
+        tip,
+        "stderr: {}",
         stderr_str(&output)
     );
 }
@@ -2753,13 +2780,12 @@ fn a_submodule_commit_another_fetch_left_behind_is_fetched() {
 }
 
 /// Where perch runs with the `feature` worktree's `GIT_DIR` and `GIT_WORK_TREE`
-/// exported, as git exports them to a hook.
+/// exported.
 #[derive(Clone, Copy, Debug)]
 enum Exported {
     /// Outside any repository, with the worktree's `.git` file gone, so only
     /// the variables lead to its repository.
     FromOutside,
-    /// In the worktree.
     FromTheWorktree,
 }
 

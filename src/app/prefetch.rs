@@ -146,8 +146,8 @@ fn environment_resolves_per_directory() -> bool {
 /// user's choosing, in place of the config settings of the same purpose.
 const PROGRAM_VARIABLES: [&str; 3] = ["GIT_PROXY_COMMAND", "GIT_SSH", "GIT_SSH_COMMAND"];
 
-/// The environment variables that choose which repository, or which object
-/// store, a fetch writes to in place of the directory git runs in.
+/// The variables that choose which repository or object store a fetch writes to,
+/// out of all the repository variables, so that `GIT_PREFIX` from an alias does not count.
 const FETCH_TARGET_VARIABLES: [&str; 5] = [
     "GIT_ALTERNATE_OBJECT_DIRECTORIES",
     "GIT_COMMON_DIR",

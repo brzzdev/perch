@@ -269,7 +269,7 @@ pub fn fetch(dir: Option<&Path>, remote: &str, submodules: SubmoduleFetch) -> Fe
     let FetchOutcome::Failed(detail) = &outcome else {
         return outcome;
     };
-    if !lost_a_ref_lock(detail) {
+    if !is_lost_ref_lock_error(detail) {
         return outcome;
     }
     // The fetch that won moved the refs, which leaves on-demand recursion no
@@ -282,7 +282,7 @@ pub fn fetch(dir: Option<&Path>, remote: &str, submodules: SubmoduleFetch) -> Fe
     fetch_once(dir, remote, submodules)
 }
 
-/// Runs in the C locale, so that [`lost_a_ref_lock`] reads git's message
+/// Runs in the C locale, so that [`is_lost_ref_lock_error`] reads git's message
 /// untranslated.
 fn fetch_once(dir: Option<&Path>, remote: &str, submodules: SubmoduleFetch) -> FetchOutcome {
     let mut command = git_cmd(dir);
@@ -303,7 +303,7 @@ fn fetch_once(dir: Option<&Path>, remote: &str, submodules: SubmoduleFetch) -> F
 /// Whether git refused a ref update because the ref moved after the fetch read
 /// it. A stale `.lock` file fails as "cannot lock ref" too, but with "File
 /// exists", and a retry would only fail the same way.
-fn lost_a_ref_lock(stderr: &str) -> bool {
+fn is_lost_ref_lock_error(stderr: &str) -> bool {
     stderr
         .lines()
         .any(|line| line.contains("cannot lock ref") && line.contains("but expected"))
@@ -2232,10 +2232,32 @@ fn output_text(command: &str, output: Output) -> AppResult<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Anchor, Ground, StaleBranch, Unmerged, branch_refs, last_recursion_is_off, parse_track,
-        stale_from, unmerged_from,
+        Anchor, Ground, StaleBranch, Unmerged, branch_refs, is_lost_ref_lock_error,
+        last_recursion_is_off, parse_track, stale_from, unmerged_from,
     };
     use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn only_a_ref_that_moved_under_the_fetch_is_a_lost_lock() {
+        for (stderr, lost) in [
+            (
+                "error: cannot lock ref 'refs/remotes/origin/main': is at 674caa9 but expected \
+                 0e5d0b6",
+                true,
+            ),
+            (
+                "error: cannot lock ref 'refs/remotes/origin/main': Unable to create \
+                 '.git/refs/remotes/origin/main.lock': File exists.",
+                false,
+            ),
+            (
+                "fatal: '/nonexistent/nowhere' does not appear to be a git repository",
+                false,
+            ),
+        ] {
+            assert_eq!(is_lost_ref_lock_error(stderr), lost, "{stderr}");
+        }
+    }
 
     /// Git reads both keys into one setting, so a later `submodule.recurse`
     /// overrides an earlier `fetch.recurseSubmodules`, and the reverse.

@@ -2524,7 +2524,7 @@ struct LeftBehind {
     _bare: TempDir,
     _submodule: TempDir,
     parent: TempDir,
-    recorded: String,
+    recorded_commit: String,
     work: PathBuf,
     worktree: PathBuf,
 }
@@ -2588,7 +2588,7 @@ fn submodule_left_behind(recorded: Recorded) -> LeftBehind {
         _bare: bare,
         _submodule: submodule,
         parent,
-        recorded: sub_tip,
+        recorded_commit: sub_tip,
         work,
         worktree,
     }
@@ -2615,10 +2615,25 @@ impl LeftBehind {
         (output, submodule_fetches)
     }
 
+    /// Asks the submodule's repository itself, which outlives its checkout.
     fn submodule_has_recorded(&self) -> bool {
+        let repository = git(
+            &self.worktree,
+            &[
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-path",
+                "modules/module",
+            ],
+        );
         Command::new("git")
-            .args(["cat-file", "-e", &format!("{}^{{commit}}", self.recorded)])
-            .current_dir(self.worktree.join("module"))
+            .arg("--git-dir")
+            .arg(stdout_str(&repository).trim())
+            .args([
+                "cat-file",
+                "-e",
+                &format!("{}^{{commit}}", self.recorded_commit),
+            ])
             .stderr(Stdio::null())
             .status()
             .unwrap()
@@ -2697,13 +2712,13 @@ fn a_submodule_is_not_fetched_where_present_or_opted_out() {
                 &worktree.join("module"),
                 &[&ALLOW_FILE[..], &["fetch", "origin"]].concat(),
             ),
+            NoSubmoduleFetch::Deinitialised => {
+                git(worktree, &["submodule", "deinit", "--force", "module"])
+            }
             NoSubmoduleFetch::OptedOutByName => git(
                 worktree,
                 &["config", "submodule.module.fetchRecurseSubmodules", "false"],
             ),
-            NoSubmoduleFetch::Deinitialised => {
-                git(worktree, &["submodule", "deinit", "--force", "module"])
-            }
             NoSubmoduleFetch::RecursionSwitchedOff => {
                 git(worktree, &["config", "fetch.recurseSubmodules", "false"])
             }

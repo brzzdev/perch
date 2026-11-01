@@ -51,7 +51,7 @@ pub(crate) fn run(
     target: Option<&str>,
     shell_handoff: ShellHandoff,
 ) -> AppResult<()> {
-    let current_branch = git::current_branch()?;
+    let current_branch = git::current_branch(None)?;
     let request = target.map(forge::Request::parse).transpose()?.flatten();
     let remote = super::navigation_remote(current_branch.as_deref(), request);
 
@@ -66,20 +66,7 @@ pub(crate) fn run(
     // catalogue may therefore be read while the fetch is updating refs, so its
     // local and remote-only halves can reflect slightly different moments;
     // `resolve_target` runs after the join and decides the final action.
-    //
-    // Not where any worktree has submodules, by its `.gitmodules` or by the
-    // submodule repositories the repository keeps. Each worktree keeps its own
-    // submodule repositories, and a fetch recurses on demand only into those
-    // where it runs, for gitlinks moved by the commits it fetched. Once the
-    // prefetch has moved the shared remote refs, a worktree's own fetch finds
-    // nothing new and never reaches its submodules. Without the prefetch each
-    // fetch runs from the worktree it updates.
-    let has_submodules = listed
-        .iter()
-        .any(|worktree| git::declares_submodules(&worktree.path))
-        || git::holds_submodule_repositories();
-    let prefetch = ((target.is_some() || super::is_interactive()) && !has_submodules)
-        .then(|| Prefetch::start(&remote));
+    let prefetch = (target.is_some() || super::is_interactive()).then(|| Prefetch::start(&remote));
 
     let (branch, existence) = if let Some(request) = request {
         (super::look_up_head(request)?, Existence::Requested(request))
@@ -111,7 +98,7 @@ pub(crate) fn run(
         Action::UseExisting(wt) => {
             let branch = wt.branch.unwrap_or_default();
             // The worktree's branch may track a different remote than ours.
-            let branch_remote = git::current_remote(Some(branch.as_str()));
+            let branch_remote = git::current_remote(None, Some(branch.as_str()));
             if let Err(e) = update_in(&wt.path, &branch, &branch_remote, fetched.as_ref()) {
                 eprintln!("{} update of {branch} failed: {e}", warn());
             }
@@ -464,7 +451,7 @@ fn fetch_start(
         }
     };
     if git::is_local_branch(branch)? {
-        fetch(&git::current_remote(Some(branch)));
+        fetch(&git::current_remote(None, Some(branch)));
         return Ok(Start::Local);
     }
     if git::remote_url(None, preferred).is_some() {

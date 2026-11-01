@@ -174,10 +174,7 @@ impl FetchedRemote {
     /// that worktree resolves the name to the same [`FetchContext`], and where
     /// that context names one repository whichever directory git runs in. A
     /// failure covers no worktree: each has a `FETCH_HEAD` of its own, so one
-    /// can fetch where another could not. Nor does a fetch cover a worktree
-    /// with submodules, whose own fetch recurses into submodule repositories
-    /// that only it has; [`fetch_unless_covered`] forces that fetch's
-    /// recursion unless its config switches recursion off.
+    /// can fetch where another could not.
     fn covers(&self, dir: Option<&Path>, remote: &str) -> bool {
         if self.name != remote {
             return false;
@@ -186,7 +183,6 @@ impl FetchedRemote {
             return true;
         };
         self.failure.is_none()
-            && !git::has_submodules(dir)
             && self.context.names_one_repository(remote)
             && FetchContext::read(Some(dir), remote) == self.context
     }
@@ -204,21 +200,7 @@ pub(crate) fn fetch_unless_covered(
     if fetched.is_some_and(|fetched| fetched.covers(dir, remote)) {
         return git::FetchOutcome::Ok;
     }
-    // On demand, a worktree's fetch recurses only for gitlinks moved by the
-    // commits it fetched, and a prefetch that has already moved the shared
-    // refs leaves it none. So a worktree with submodules has them all fetched,
-    // unless its config switches recursion off.
-    let moved_the_refs =
-        fetched.is_some_and(|fetched| fetched.name == remote && fetched.failure.is_none());
-    let wants_every_submodule = || {
-        dir.is_some_and(|dir| git::has_submodules(dir) && !git::submodule_fetch_switched_off(dir))
-    };
-    let submodules = if moved_the_refs && wants_every_submodule() {
-        git::SubmoduleFetch::All
-    } else {
-        git::SubmoduleFetch::Configured
-    };
-    match git::fetch(dir, remote, submodules) {
+    match git::fetch(dir, remote) {
         git::FetchOutcome::Failed(detail)
             if fetched.is_some_and(|fetched| {
                 fetched.name == remote && fetched.failure.as_ref() == Some(&detail)
@@ -301,7 +283,7 @@ impl Prefetch {
                 // this process's own group, where nothing would clean it up.
                 git::FetchOutcome::Ok
             } else {
-                git::fetch(None, &remote, git::SubmoduleFetch::Configured)
+                git::fetch(None, &remote)
             };
             spinner.finish_and_clear();
             outcome

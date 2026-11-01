@@ -13,7 +13,7 @@ use super::{
     select_removal_locals, spinner, warn,
 };
 use crate::grammar::{ShellHandoff, Verb, WorktreeRemoval};
-use crate::{AppResult, Error, git};
+use crate::{AppResult, Error, forge, git};
 
 enum Action {
     UseExisting(git::Worktree),
@@ -26,11 +26,13 @@ enum Action {
 /// at the shell, or into the filter behind "Create new", claims nothing, and
 /// creating it is the point. A picked row claims the branch was there when the
 /// *Catalogue* was drawn, so a branch that has gone since leaves nothing to
-/// fall back to that the user chose.
+/// fall back to that the user chose. A request's head branch is claimed by the
+/// forge in the same way.
 #[derive(Clone, Copy, PartialEq)]
 enum Existence {
     MayCreate,
     MustExist,
+    Requested(forge::Request),
 }
 
 pub(crate) fn run(
@@ -39,7 +41,8 @@ pub(crate) fn run(
     shell_handoff: ShellHandoff,
 ) -> AppResult<()> {
     let current_branch = git::current_branch()?;
-    let remote = git::current_remote(current_branch.as_deref());
+    let request = target.map(forge::Request::parse).transpose()?.flatten();
+    let remote = super::navigation_remote(current_branch.as_deref(), request);
 
     // A worktree whose directory was deleted by hand can't be entered, so its
     // branch is one to (re)create. `worktree_add`/`checkout` prune the stale
@@ -67,7 +70,9 @@ pub(crate) fn run(
     let prefetch = ((target.is_some() || super::is_interactive()) && !has_submodules)
         .then(|| Prefetch::start(&remote));
 
-    let (branch, existence) = if let Some(name) = target {
+    let (branch, existence) = if let Some(request) = request {
+        (super::look_up_head(request)?, Existence::Requested(request))
+    } else if let Some(name) = target {
         (name.to_string(), Existence::MayCreate)
     } else {
         let Some(picked) = select(&listed, current_branch.as_deref(), &remote)? else {
@@ -433,12 +438,16 @@ fn resolve_target(
     if remote_only.iter().any(|b| b == name) {
         return Ok(Action::CreateForBranch(name.to_string()));
     }
-    if existence == Existence::MustExist {
-        return Err(Error::Vanished {
+    match existence {
+        Existence::MayCreate => Ok(Action::CreateNewBranch(name.to_string())),
+        Existence::MustExist => Err(Error::Vanished {
             branch: name.to_string(),
-        });
+        }),
+        Existence::Requested(request) => {
+            request.ensure_head_exists(name, remote)?;
+            Ok(Action::CreateForBranch(name.to_string()))
+        }
     }
-    Ok(Action::CreateNewBranch(name.to_string()))
 }
 
 /// The worktrees `wt rm` can act on: every one but the main worktree, which git

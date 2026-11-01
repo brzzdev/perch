@@ -117,6 +117,19 @@ Local
 
 `perch .` fetches and brings the branch you're on up to date with its remote. A clean branch integrates with no prompt — fast-forwarding, or (when it has diverged, e.g. after rebasing through a web UI) rebasing your local commits onto the remote, which drops any already upstream and replays genuine new work. Only when the working tree is dirty does it stop to ask: **keep** the uncommitted work (stash, rebase, restore) or **discard** it (hard reset to the remote).
 
+### Pull requests
+
+Wherever you name a branch to go to, `pr:<n>` names a GitHub pull request's head branch, and `mr:<n>` a GitLab merge request's:
+
+```sh
+perch wt pr:123      # review it in its own worktree, tracking origin/<branch>
+perch wt 123 pr:123  # …in a worktree directory named 123
+perch br mr:45       # check it out in place
+perch pr:123         # go to its worktree, or check it out here
+```
+
+Perch asks `gh` (for `pr:`) or `glab` (for `mr:`) about the request on `origin`, so that CLI must be installed and signed in (`glab` 1.100 or newer). From there it behaves exactly as if you had typed the branch name. A request from a fork is refused, as is one whose branch is neither on `origin` nor local, typically deleted on merge.
+
 ## Removing branches
 
 ```sh

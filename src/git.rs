@@ -44,6 +44,9 @@ pub fn current_branch() -> AppResult<Option<String>> {
     Ok(if name.is_empty() { None } else { Some(name) })
 }
 
+/// The remote a clone names its source.
+pub(crate) const DEFAULT_REMOTE: &str = "origin";
+
 /// Resolves the remote name to use for fetch, merge, and default-branch
 /// detection. Prefers `branch.<current>.remote`, then the sole configured
 /// remote, falling back to `origin`.
@@ -62,7 +65,7 @@ pub fn current_remote(current: Option<&str>) -> String {
         }
     }
 
-    "origin".to_string()
+    DEFAULT_REMOTE.to_string()
 }
 
 /// The remote `branch.<branch>.remote` names, if any.
@@ -1345,6 +1348,12 @@ pub fn server_proven_branches(
         }
     }
     proven
+}
+
+/// Whether the server `remote` names has `branch`, asked without fetching.
+pub(crate) fn server_has_branch(remote: &str, branch: &str) -> AppResult<bool> {
+    let refname = format!("refs/heads/{branch}");
+    Ok(server_tips(None, remote, &[&refname])?.contains_key(&refname))
 }
 
 /// Where each of `refnames` stands on the server `remote` names, by remote

@@ -1,4 +1,5 @@
 pub mod app;
+mod forge;
 pub mod git;
 mod grammar;
 #[cfg(unix)]
@@ -28,6 +29,12 @@ pub enum Error {
     #[error("branch diverged from remote")]
     Diverged,
 
+    #[error("{request} {problem}")]
+    Forge {
+        request: forge::Request,
+        problem: forge::Problem,
+    },
+
     /// `br` was asked to check out a branch git already holds in another
     /// worktree. The message names the path and the verb that does reach it,
     /// because that hand-off is the whole difference between the two verbs.
@@ -43,6 +50,9 @@ pub enum Error {
         path: String,
         hint: String,
     },
+
+    #[error("`{0}` is not a request number; expected pr:<number> or mr:<number>")]
+    InvalidRequest(String),
 
     #[error("branch '{branch}' does not exist locally")]
     LocalBranchNotFound { branch: String },

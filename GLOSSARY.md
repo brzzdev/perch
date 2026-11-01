@@ -108,6 +108,14 @@ _Avoid_: Marker (reserved for risk), label, badge, hint
 The final directory component reserved for a branch's new worktree. It normally follows the branch spelling, but a user may choose a separate name; it does not rename the branch or override an existing worktree already *Held*ing it.
 _Avoid_: Worktree name, branch name, path, folder
 
+**Request**:
+A pull request (GitHub) or merge request (GitLab), named on the command line as `pr:<n>` or `mr:<n>` and resolved to its *Head branch* through `gh` or `glab`.
+_Avoid_: PR, MR (as domain words), ticket
+
+**Head branch**:
+The branch a *Request* proposes to merge. Perch navigates to it as if its name had been typed.
+_Avoid_: Source branch, PR branch
+
 **Subverb**:
 A word a *Verb* reads before it reads a branch name. `br` reads `rm`; `wt` reads `ls` and `rm`, plus the retired `list` and `remove`, which are refused rather than taken for branches. Collision is positional: `--` is needed after `br` for a colliding branch, after `wt` for either a colliding branch or a *Worktree directory name* that looks like a subverb or option, and at the top level for a branch matching a *Command word*. Everywhere else the bare name reaches the branch, so `perch list`, `perch br list` and `perch br wt` all work as written.
 _Avoid_: Subcommand, flag, option

@@ -6,7 +6,7 @@ use console::{Key, StyledObject, Term, style};
 use indicatif::ProgressBar;
 
 use crate::grammar::{Invocation, Navigation, Verb, WorktreeDirectoryName};
-use crate::{AppResult, Error, git};
+use crate::{AppResult, Error, forge, git};
 
 pub mod br;
 pub mod complete;
@@ -153,7 +153,8 @@ pub fn run_br(target: Option<&str>) -> AppResult<()> {
 
 fn run_verb(verb: Verb, target: Option<&str>) -> AppResult<()> {
     let old_branch = git::current_branch()?;
-    let remote = git::current_remote(old_branch.as_deref());
+    let request = target.map(forge::Request::parse).transpose()?.flatten();
+    let remote = navigation_remote(old_branch.as_deref(), request);
 
     // `perch .` refreshes the branch we're already on against its remote,
     // rather than switching anywhere.
@@ -170,7 +171,9 @@ fn run_verb(verb: Verb, target: Option<&str>) -> AppResult<()> {
     // from this same worktree, and a *Held* one with submodules is never covered.
     let prefetch = (target.is_some() || is_interactive()).then(|| Prefetch::start(&remote));
 
-    let target = if let Some(name) = target {
+    let target = if let Some(request) = request {
+        look_up_head(request)?
+    } else if let Some(name) = target {
         name.to_string()
     } else {
         let listed = live_worktrees()?;
@@ -183,6 +186,9 @@ fn run_verb(verb: Verb, target: Option<&str>) -> AppResult<()> {
     // Joined before the *Held* check and any stash, so both see the fetched
     // refs, and an interrupt here leaves before anything is touched.
     let fetched = prefetch.map(Prefetch::join).transpose()?;
+    if let Some(request) = request {
+        request.ensure_head_exists(&target, &remote)?;
+    }
 
     // Read the worktrees again rather than reusing what the picker was drawn
     // from: that snapshot was taken before it opened, and the picker then sat
@@ -244,6 +250,22 @@ fn run_verb(verb: Verb, target: Option<&str>) -> AppResult<()> {
     }
 
     result
+}
+
+/// The remote a navigation fetches and finds its branch on. A request's head
+/// is on the remote its forge was asked about, whatever the current branch tracks.
+pub(crate) fn navigation_remote(current: Option<&str>, request: Option<forge::Request>) -> String {
+    match request {
+        Some(_) => git::DEFAULT_REMOTE.to_string(),
+        None => git::current_remote(current),
+    }
+}
+
+pub(crate) fn look_up_head(request: forge::Request) -> AppResult<String> {
+    let (spinner, _cursor) = spinner(format!("Looking up {request}…"));
+    let branch = request.head_branch();
+    spinner.finish_and_clear();
+    branch
 }
 
 /// Pop the auto-stash and report the outcome — a clean restore, a conflict to

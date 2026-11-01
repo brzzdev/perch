@@ -7482,8 +7482,28 @@ fn a_typed_name_on_several_remotes_but_not_origin_is_refused() {
         assert!(
             stderr_str(&output).contains(
                 "x is not on origin, and more than one remote has it; pick one with \
-                 `git branch --track x fork/x` or `git branch --track x upstream/x`"
+                 `git branch --track x refs/remotes/fork/x` or \
+                 `git branch --track x refs/remotes/upstream/x`"
             ),
+            "{verb}: {}",
+            stderr_str(&output)
+        );
+        assert!(!local_branch_exists(&work, "x"), "{verb}");
+    }
+}
+
+#[test]
+fn a_typed_name_whose_origin_ref_is_broken_is_refused() {
+    for verb in ["br", "wt"] {
+        let (_bare, parent, work) = setup_with_parent();
+        publish_branch_on(parent.path(), &work, &["origin", "upstream"], "x");
+        fs::write(work.join(".git/refs/remotes/origin/x"), "garbage\n").unwrap();
+
+        let output = perch_args(&work, &[verb, "x"]);
+
+        assert!(!output.status.success(), "{verb} should refuse");
+        assert!(
+            stderr_str(&output).contains("refs/remotes/origin/x"),
             "{verb}: {}",
             stderr_str(&output)
         );

@@ -100,7 +100,7 @@ fn track_commands(branch: &str, remotes: &[String]) -> String {
     let commands: Vec<String> = remotes
         .iter()
         .map(|remote| {
-            let start = app::shell_quote(&format!("{remote}/{branch}"));
+            let start = app::shell_quote(&git::remote_ref(remote, branch));
             format!("`git branch --track {} {start}`", app::shell_quote(branch))
         })
         .collect();

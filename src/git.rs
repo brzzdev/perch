@@ -278,17 +278,11 @@ pub fn remote_ref(remote: &str, branch: &str) -> String {
 /// `preferred` where it has `branch`, else the one remote that does; several,
 /// or a ref that can't be read, are refused rather than guessed past.
 pub fn remote_holding(branch: &str, preferred: &str) -> AppResult<Option<String>> {
-    if ref_present(&remote_ref(preferred, branch))? {
+    let mut holding = remotes_holding(branch)?;
+    if holding.iter().any(|remote| remote == preferred) {
         return Ok(Some(preferred.to_string()));
     }
-    let mut holding = Vec::new();
-    for remote in run(&["remote"])?.lines() {
-        if ref_present(&remote_ref(remote, branch))? {
-            holding.push(remote.to_string());
-        }
-    }
     if holding.len() > 1 {
-        holding.sort();
         return Err(Error::AmbiguousRemote {
             branch: branch.to_string(),
             preferred: preferred.to_string(),
@@ -296,6 +290,18 @@ pub fn remote_holding(branch: &str, preferred: &str) -> AppResult<Option<String>
         });
     }
     Ok(holding.pop())
+}
+
+/// The remotes with a ref for `branch`, sorted.
+pub fn remotes_holding(branch: &str) -> AppResult<Vec<String>> {
+    let mut holding = Vec::new();
+    for remote in run(&["remote"])?.lines() {
+        if ref_present(&remote_ref(remote, branch))? {
+            holding.push(remote.to_string());
+        }
+    }
+    holding.sort();
+    Ok(holding)
 }
 
 /// Whether `refname` names a ref exactly; unlike [`resolve`], revision syntax
@@ -306,7 +312,14 @@ fn ref_present(refname: &str) -> AppResult<bool> {
         .output()?;
     match output.status.code() {
         Some(0) => Ok(true),
-        Some(1) => Ok(false),
+        // `show-ref` answers 1 for a malformed ref too, which `rev-parse` tells apart.
+        Some(1) => match ref_state(None, refname) {
+            RefState::Unreadable(message) => Err(Error::Git {
+                command: "rev-parse".to_string(),
+                message,
+            }),
+            RefState::At(_) | RefState::Missing => Ok(false),
+        },
         _ => Err(Error::Git {
             command: "show-ref".to_string(),
             message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
@@ -1777,8 +1790,8 @@ pub fn worktree_for_branch(worktrees: &[Worktree], branch: &str) -> Option<Workt
         .cloned()
 }
 
-/// Add a worktree at `path` for `branch`. If `start` is `Some`, create the
-/// branch from it (e.g. `origin/main`); if `None`, check out the local branch.
+/// Add a worktree at `path` for `branch`, created from `start` (e.g.
+/// `refs/remotes/origin/main`) unless `branch` is already local.
 pub fn worktree_add(path: &Path, branch: &str, start: Option<&str>) -> AppResult<()> {
     let path_str = path_to_str(path)?;
     let build_args = || -> AppResult<Vec<String>> {

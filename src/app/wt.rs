@@ -470,15 +470,10 @@ fn fetch_start(
     if git::remote_url(None, preferred).is_some() {
         fetch(preferred);
     }
-    let holders = match git::remote_holding(branch, preferred) {
-        Ok(Some(holder)) if holder == preferred => {
-            return Ok(Start::Tracking(git::remote_ref(preferred, branch)));
-        }
-        Ok(Some(holder)) => vec![holder],
-        Ok(None) => Vec::new(),
-        Err(Error::AmbiguousRemote { remotes, .. }) => remotes,
-        Err(e) => return Err(e),
-    };
+    let holders = git::remotes_holding(branch)?;
+    if holders.iter().any(|holder| holder == preferred) {
+        return Ok(Start::Tracking(git::remote_ref(preferred, branch)));
+    }
     for holder in &holders {
         fetch(holder);
     }

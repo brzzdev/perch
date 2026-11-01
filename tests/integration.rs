@@ -7401,17 +7401,22 @@ fn wt_pr_finds_an_unfetched_head_without_the_prefetch() {
 // Branches on several remotes
 // ---------------------------------------------------------------------------
 
-/// Publishes `branch` to each of `remotes`, adding a bare repository in
-/// `parent` for any but `origin`, and leaves no local `branch`.
+/// Adds `remote` to `work`, backed by an empty bare repository in `parent`.
+fn add_bare_remote(parent: &Path, work: &Path, remote: &str) {
+    let bare = parent.join(format!("{remote}.git"));
+    fs::create_dir(&bare).unwrap();
+    git(&bare, &["init", "--bare"]);
+    git(work, &["remote", "add", remote, bare.to_str().unwrap()]);
+}
+
+/// Publishes `branch` to each of `remotes`, adding any but `origin`, and leaves
+/// no local `branch`.
 fn publish_branch_on(parent: &Path, work: &Path, remotes: &[&str], branch: &str) {
     git(work, &["switch", "-c", branch]);
     commit_in(work, "branch.txt", branch);
     for remote in remotes {
         if *remote != "origin" {
-            let bare = parent.join(format!("{remote}.git"));
-            fs::create_dir(&bare).unwrap();
-            git(&bare, &["init", "--bare"]);
-            git(work, &["remote", "add", remote, bare.to_str().unwrap()]);
+            add_bare_remote(parent, work, remote);
         }
         git(work, &["push", remote, branch]);
     }
@@ -7490,13 +7495,7 @@ fn a_request_head_tracks_origin_whatever_the_default_remote() {
         let (bare, parent, work) = setup_with_parent();
         publish_pull_request_head(bare.path());
         git(&work, &["fetch", "origin"]);
-        let upstream = parent.path().join("upstream.git");
-        fs::create_dir(&upstream).unwrap();
-        git(&upstream, &["init", "--bare"]);
-        git(
-            &work,
-            &["remote", "add", "upstream", upstream.to_str().unwrap()],
-        );
+        add_bare_remote(parent.path(), &work, "upstream");
         git(
             &work,
             &[

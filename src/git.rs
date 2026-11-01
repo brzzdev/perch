@@ -214,8 +214,6 @@ pub fn stash_pop() -> AppResult<StashPopOutcome> {
     })
 }
 
-/// Checks `branch` out, creating it from [`remote_start_point`] when it isn't
-/// local.
 pub fn checkout(branch: &str) -> AppResult<()> {
     let start = remote_start_point(branch)?;
     let args: Vec<&str> = match &start {
@@ -272,14 +270,15 @@ fn remote_start_point(branch: &str) -> AppResult<Option<String>> {
 /// the branch, else the one remote that does. Several without `origin` is
 /// refused rather than guessed between.
 pub fn remote_holding(branch: &str) -> AppResult<Option<String>> {
-    let mut holding: Vec<String> = run(&["remote"])?
-        .lines()
-        .filter(|remote| resolve(None, &format!("refs/remotes/{remote}/{branch}")).is_some())
-        .map(String::from)
-        .collect();
-    if holding.iter().any(|remote| remote == DEFAULT_REMOTE) {
+    let holds = |remote: &str| resolve(None, &format!("refs/remotes/{remote}/{branch}")).is_some();
+    if holds(DEFAULT_REMOTE) {
         return Ok(Some(DEFAULT_REMOTE.to_string()));
     }
+    let mut holding: Vec<String> = run(&["remote"])?
+        .lines()
+        .filter(|remote| holds(remote))
+        .map(String::from)
+        .collect();
     if holding.len() > 1 {
         holding.sort();
         return Err(Error::AmbiguousRemote {

@@ -7396,3 +7396,122 @@ fn wt_pr_finds_an_unfetched_head_without_the_prefetch() {
     let upstream = git(&worktree, &["rev-parse", "--abbrev-ref", "@{upstream}"]);
     assert_eq!(stdout_str(&upstream).trim(), "origin/feat/x");
 }
+
+// ---------------------------------------------------------------------------
+// Branches on several remotes
+// ---------------------------------------------------------------------------
+
+/// Publishes `branch` to each of `remotes`, adding a bare repository in
+/// `parent` for any but `origin`, and leaves no local `branch`.
+fn publish_branch_on(parent: &Path, work: &Path, remotes: &[&str], branch: &str) {
+    git(work, &["switch", "-c", branch]);
+    commit_in(work, "branch.txt", branch);
+    for remote in remotes {
+        if *remote != "origin" {
+            let bare = parent.join(format!("{remote}.git"));
+            fs::create_dir(&bare).unwrap();
+            git(&bare, &["init", "--bare"]);
+            git(work, &["remote", "add", remote, bare.to_str().unwrap()]);
+        }
+        git(work, &["push", remote, branch]);
+    }
+    git(work, &["switch", "main"]);
+    git(work, &["branch", "-D", branch]);
+}
+
+fn upstream_of(dir: &Path, branch: &str) -> String {
+    let refname = format!("{branch}@{{upstream}}");
+    stdout_str(&git(dir, &["rev-parse", "--abbrev-ref", &refname]))
+        .trim()
+        .to_string()
+}
+
+#[test]
+fn a_typed_name_on_origin_and_another_remote_tracks_origin() {
+    for default_remote in [None, Some("upstream")] {
+        for verb in ["br", "wt"] {
+            let (_bare, parent, work) = setup_with_parent();
+            publish_branch_on(parent.path(), &work, &["origin", "upstream"], "x");
+            if let Some(remote) = default_remote {
+                git(&work, &["config", "checkout.defaultRemote", remote]);
+            }
+
+            let output = perch_args(&work, &[verb, "x"]);
+
+            assert!(
+                output.status.success(),
+                "{verb} with {default_remote:?}: {}",
+                stderr_str(&output)
+            );
+            assert_eq!(
+                upstream_of(&work, "x"),
+                "origin/x",
+                "{verb} {default_remote:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_typed_name_on_one_other_remote_tracks_it() {
+    for verb in ["br", "wt"] {
+        let (_bare, parent, work) = setup_with_parent();
+        publish_branch_on(parent.path(), &work, &["upstream"], "x");
+
+        let output = perch_args(&work, &[verb, "x"]);
+
+        assert!(output.status.success(), "{verb}: {}", stderr_str(&output));
+        assert_eq!(upstream_of(&work, "x"), "upstream/x", "{verb}");
+    }
+}
+
+#[test]
+fn a_typed_name_on_several_remotes_but_not_origin_is_refused() {
+    for verb in ["br", "wt"] {
+        let (_bare, parent, work) = setup_with_parent();
+        publish_branch_on(parent.path(), &work, &["fork", "upstream"], "x");
+
+        let output = perch_args(&work, &[verb, "x"]);
+
+        assert!(!output.status.success(), "{verb} should refuse");
+        assert!(
+            stderr_str(&output)
+                .contains("x is not on origin, and more than one remote has it (fork, upstream)"),
+            "{verb}: {}",
+            stderr_str(&output)
+        );
+        assert!(!local_branch_exists(&work, "x"), "{verb}");
+    }
+}
+
+#[test]
+fn a_request_head_tracks_origin_whatever_the_default_remote() {
+    for args in [&["wt", "pr:7"][..], &["br", "pr:7"], &["pr:7"]] {
+        let (bare, parent, work) = setup_with_parent();
+        publish_pull_request_head(bare.path());
+        git(&work, &["fetch", "origin"]);
+        let upstream = parent.path().join("upstream.git");
+        fs::create_dir(&upstream).unwrap();
+        git(&upstream, &["init", "--bare"]);
+        git(
+            &work,
+            &["remote", "add", "upstream", upstream.to_str().unwrap()],
+        );
+        git(
+            &work,
+            &[
+                "push",
+                "upstream",
+                "refs/remotes/origin/feat/x:refs/heads/feat/x",
+            ],
+        );
+        git(&work, &["fetch", "upstream"]);
+        git(&work, &["config", "checkout.defaultRemote", "upstream"]);
+        let (_bin, path) = forge_path("gh", &view_query("pr", bare.path(), 7), "false feat/x");
+
+        let output = perch_with_path(&work, args, &path);
+
+        assert!(output.status.success(), "{args:?}: {}", stderr_str(&output));
+        assert_eq!(upstream_of(&work, "feat/x"), "origin/feat/x", "{args:?}");
+    }
+}

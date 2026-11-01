@@ -214,10 +214,15 @@ pub fn stash_pop() -> AppResult<StashPopOutcome> {
     })
 }
 
+/// Checks `branch` out, creating it from [`remote_start_point`] when it isn't
+/// local.
 pub fn checkout(branch: &str) -> AppResult<()> {
-    let output = Command::new("git")
-        .args(["checkout", branch, "--quiet"])
-        .output()?;
+    let start = remote_start_point(branch)?;
+    let args: Vec<&str> = match &start {
+        Some(start) => vec!["checkout", "--quiet", "--track", "-b", branch, start],
+        None => vec!["checkout", "--quiet", branch],
+    };
+    let output = Command::new("git").args(&args).output()?;
     if output.status.success() {
         return Ok(());
     }
@@ -229,7 +234,7 @@ pub fn checkout(branch: &str) -> AppResult<()> {
     // no-op there and the original error still surfaces.
     if is_stale_worktree_error(&stderr) {
         let _ = worktree_prune();
-        run(&["checkout", branch, "--quiet"])?;
+        run(&args)?;
         return Ok(());
     }
 
@@ -248,8 +253,41 @@ pub fn checkout(branch: &str) -> AppResult<()> {
         .stderr(Stdio::null())
         .status();
 
-    run(&["checkout", branch, "--quiet"])?;
+    run(&args)?;
     Ok(())
+}
+
+/// The remote-tracking ref a branch checked out by name starts from when it
+/// isn't local, rather than git's guess, which refuses a name on several
+/// remotes and follows `checkout.defaultRemote` past `origin`. `None` when the
+/// branch is local or no remote has it.
+fn remote_start_point(branch: &str) -> AppResult<Option<String>> {
+    if resolve(None, &format!("refs/heads/{branch}")).is_some() {
+        return Ok(None);
+    }
+    Ok(remote_holding(branch)?.map(|remote| format!("{remote}/{branch}")))
+}
+
+/// The remote a branch that isn't local is taken from: `origin` where it has
+/// the branch, else the one remote that does. Several without `origin` is
+/// refused rather than guessed between.
+pub fn remote_holding(branch: &str) -> AppResult<Option<String>> {
+    let mut holding: Vec<String> = run(&["remote"])?
+        .lines()
+        .filter(|remote| resolve(None, &format!("refs/remotes/{remote}/{branch}")).is_some())
+        .map(String::from)
+        .collect();
+    if holding.iter().any(|remote| remote == DEFAULT_REMOTE) {
+        return Ok(Some(DEFAULT_REMOTE.to_string()));
+    }
+    if holding.len() > 1 {
+        holding.sort();
+        return Err(Error::AmbiguousRemote {
+            branch: branch.to_string(),
+            remotes: holding,
+        });
+    }
+    Ok(holding.pop())
 }
 
 /// Which submodules a fetch recurses into.
@@ -1723,15 +1761,19 @@ pub fn worktree_for_branch(worktrees: &[Worktree], branch: &str) -> Option<Workt
 
 /// Add a worktree at `path` for `branch`. If `base` is `Some`, create the
 /// branch from `base` (e.g. `origin/main`); if `None`, check out an existing
-/// local or remote-tracking branch.
+/// local branch, or create it from [`remote_start_point`].
 pub fn worktree_add(path: &Path, branch: &str, base: Option<&str>) -> AppResult<()> {
     let path_str = path_to_str(path)?;
+    let start = match base {
+        Some(base) => Some(base.to_string()),
+        None => remote_start_point(branch)?,
+    };
     // `--track` rather than relying on git's default: `branch.autoSetupMerge`
     // can be off, and the upstream a new branch carries is what tells
     // `stale_branches` it was branched off the anchor rather than merged
     // into it.
-    let args: Vec<&str> = match base {
-        Some(base) => vec!["worktree", "add", "--track", "-b", branch, path_str, base],
+    let args: Vec<&str> = match &start {
+        Some(start) => vec!["worktree", "add", "--track", "-b", branch, path_str, start],
         None => vec!["worktree", "add", path_str, branch],
     };
 

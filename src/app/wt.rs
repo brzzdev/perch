@@ -439,6 +439,9 @@ fn resolve_target(
         return Ok(Action::CreateForBranch(name.to_string()));
     }
     match existence {
+        Existence::MayCreate if git::remote_holding(name)?.is_some() => {
+            Ok(Action::CreateForBranch(name.to_string()))
+        }
         Existence::MayCreate => Ok(Action::CreateNewBranch(name.to_string())),
         Existence::MustExist => Err(Error::Vanished {
             branch: name.to_string(),

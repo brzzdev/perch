@@ -11,6 +11,16 @@ pub type AppResult<T> = Result<T, Error>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error(
+        "{branch} is not on origin, and more than one remote has it ({}); pick one with \
+         `git switch --track <remote>/{branch}`",
+        remotes.join(", ")
+    )]
+    AmbiguousRemote {
+        branch: String,
+        remotes: Vec<String>,
+    },
+
     #[error("git {command}: {message}")]
     Git { command: String, message: String },
 

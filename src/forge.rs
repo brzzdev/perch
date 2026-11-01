@@ -85,8 +85,11 @@ impl Reference {
             return Ok(None);
         };
         let number = number
-            .parse()
-            .map_err(|_| Error::InvalidForgeReference(argument.to_string()))?;
+            .bytes()
+            .all(|byte| byte.is_ascii_digit())
+            .then(|| number.parse().ok())
+            .flatten()
+            .ok_or_else(|| Error::InvalidForgeReference(argument.to_string()))?;
         Ok(Some(Self { forge, number }))
     }
 
@@ -125,11 +128,11 @@ impl Reference {
         let stdout = String::from_utf8_lossy(&output.stdout);
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            let message = if stderr.trim().is_empty() {
-                stdout.trim()
-            } else {
-                stderr.trim()
-            };
+            // `glab` frames its error in a box of padding lines; the message is last.
+            let message = [&*stderr, &*stdout]
+                .into_iter()
+                .find_map(|text| text.lines().map(str::trim).rfind(|line| !line.is_empty()))
+                .unwrap_or_default();
             return Err(self.error(Problem::Failed(message.to_string())));
         }
         match stdout.trim().split_once(' ') {
@@ -165,16 +168,21 @@ impl Reference {
 /// so one written through an `~/.ssh/config` alias becomes `https://` on the
 /// host the alias stands for.
 fn forge_url(url: &str) -> String {
-    let Some((host, path)) = ssh_parts(url) else {
+    let Some(parts) = ssh_parts(url) else {
         return url.to_string();
     };
-    format!("https://{}/{path}", aliased_host(host))
+    format!("https://{}/{}", aliased_host(&parts), parts.path)
 }
 
-/// The host `ssh -G` connects to for `host`.
-fn aliased_host(host: &str) -> String {
+/// The host `ssh -G` connects to for the remote, asked as its user, which a
+/// `Match user` block can turn on.
+fn aliased_host(parts: &SshParts<'_>) -> String {
+    let destination = match parts.user {
+        Some(user) => format!("{user}@{}", parts.host),
+        None => parts.host.to_string(),
+    };
     let resolved = Command::new("ssh")
-        .args(["-G", host])
+        .args(["-G", &destination])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()
@@ -185,20 +193,32 @@ fn aliased_host(host: &str) -> String {
                 .find_map(|line| line.strip_prefix("hostname "))
                 .map(str::to_string)
         });
-    forge_host(host, resolved.as_deref()).to_string()
+    forge_host(parts.host, resolved.as_deref()).to_string()
 }
 
-/// `resolved` unless it is a subdomain of `host`: `altssh.gitlab.com` and
-/// `ssh.github.com` serve SSH on port 443 for the forge `host` already names.
+/// The forge host behind `host`, as `ssh -G` resolved it. A resolved subdomain
+/// of `host` is an SSH endpoint for the forge `host` already names, and GitLab's
+/// port-443 one, `altssh.gitlab.com`, answers no API under any alias.
 fn forge_host<'a>(host: &'a str, resolved: Option<&'a str>) -> &'a str {
-    match resolved {
+    let host = match resolved {
         Some(resolved) if !resolved.ends_with(&format!(".{host}")) => resolved,
         _ => host,
-    }
+    };
+    host.strip_prefix(GITLAB_PORT_443_PREFIX).unwrap_or(host)
 }
 
-/// The host and repository path of an SSH remote URL, scp-style or `ssh://`.
-fn ssh_parts(url: &str) -> Option<(&str, &str)> {
+/// The subdomain GitLab serves SSH from on port 443.
+const GITLAB_PORT_443_PREFIX: &str = "altssh.";
+
+/// An SSH remote URL's parts, scp-style or `ssh://`.
+#[derive(Debug, PartialEq)]
+struct SshParts<'a> {
+    host: &'a str,
+    path: &'a str,
+    user: Option<&'a str>,
+}
+
+fn ssh_parts(url: &str) -> Option<SshParts<'_>> {
     let (authority, path) = match url.split_once("://") {
         Some(("ssh" | "git+ssh" | "ssh+git", rest)) => rest.split_once('/')?,
         Some(_) => return None,
@@ -208,11 +228,15 @@ fn ssh_parts(url: &str) -> Option<(&str, &str)> {
             _ => return None,
         },
     };
-    let host = authority
-        .rsplit_once('@')
-        .map_or(authority, |(_, host)| host);
-    let host = host.split_once(':').map_or(host, |(host, _)| host);
-    Some((host, path.trim_start_matches('/')))
+    let (user, host) = match authority.rsplit_once('@') {
+        Some((user, host)) => (Some(user), host),
+        None => (None, authority),
+    };
+    Some(SshParts {
+        host: host.split_once(':').map_or(host, |(host, _)| host),
+        path: path.trim_start_matches('/'),
+        user,
+    })
 }
 
 #[cfg(test)]
@@ -236,25 +260,27 @@ mod tests {
         assert_eq!(Reference::parse("PR:1").unwrap(), None);
         assert!(Reference::parse("pr:").is_err());
         assert!(Reference::parse("pr:12a").is_err());
+        assert!(Reference::parse("pr:+7").is_err());
     }
 
     #[test]
-    fn only_an_ssh_remote_has_a_host_and_path_to_rewrite() {
+    fn only_an_ssh_remote_has_parts_to_rewrite() {
+        let parts = |host, path, user| Some(SshParts { host, path, user });
         assert_eq!(
             ssh_parts("git@github-work:o/r.git"),
-            Some(("github-work", "o/r.git"))
+            parts("github-work", "o/r.git", Some("git"))
         );
         assert_eq!(
             ssh_parts("github-work:o/r.git"),
-            Some(("github-work", "o/r.git"))
+            parts("github-work", "o/r.git", None)
         );
         assert_eq!(
             ssh_parts("ssh://git@gitlab-work:2222/group/sub/r.git"),
-            Some(("gitlab-work", "group/sub/r.git"))
+            parts("gitlab-work", "group/sub/r.git", Some("git"))
         );
         assert_eq!(
             ssh_parts("git+ssh://gitlab-work//o/r"),
-            Some(("gitlab-work", "o/r"))
+            parts("gitlab-work", "o/r", None)
         );
         assert_eq!(ssh_parts("https://github.com/o/r.git"), None);
         assert_eq!(ssh_parts("/srv/git/r.git"), None);
@@ -262,7 +288,7 @@ mod tests {
     }
 
     #[test]
-    fn an_alias_resolves_but_a_port_443_endpoint_keeps_the_forge_host() {
+    fn an_alias_resolves_to_the_forge_its_port_443_endpoint_serves() {
         assert_eq!(forge_host("github-work", Some("github.com")), "github.com");
         assert_eq!(
             forge_host("github.com-work", Some("github.com")),
@@ -273,8 +299,17 @@ mod tests {
             "gitlab.com"
         );
         assert_eq!(
+            forge_host("gitlab-work", Some("altssh.gitlab.com")),
+            "gitlab.com"
+        );
+        assert_eq!(forge_host("altssh.gitlab.com", None), "gitlab.com");
+        assert_eq!(
             forge_host("github.com", Some("ssh.github.com")),
             "github.com"
+        );
+        assert_eq!(
+            forge_host("gitlab.corp", Some("ssh.gitlab.corp")),
+            "gitlab.corp"
         );
         assert_eq!(forge_host("github.com", None), "github.com");
     }

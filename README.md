@@ -119,7 +119,7 @@ Local
 
 ### Pull requests
 
-Wherever a branch goes, `pr:<n>` names a GitHub pull request's head branch, and `mr:<n>` a GitLab merge request's:
+Wherever you name a branch to go to, `pr:<n>` names a GitHub pull request's head branch, and `mr:<n>` a GitLab merge request's:
 
 ```sh
 perch wt pr:123      # review it in its own worktree, tracking origin/<branch>
@@ -128,7 +128,7 @@ perch br mr:45       # check it out in place
 perch pr:123         # go to its worktree, or check it out here
 ```
 
-Perch asks `gh` (for `pr:`) or `glab` (for `mr:`) about the request on `origin`, so that CLI must be installed and signed in. From there it behaves exactly as if you had typed the branch name. A request from a fork is refused, as is one whose branch is gone from `origin`, typically deleted on merge.
+Perch asks `gh` (for `pr:`) or `glab` (for `mr:`) about the request on `origin`, so that CLI must be installed and signed in. From there it behaves exactly as if you had typed the branch name. A request from a fork is refused, as is one whose branch is neither on `origin` nor local, typically deleted on merge.
 
 ## Removing branches
 

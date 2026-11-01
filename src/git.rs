@@ -52,11 +52,16 @@ pub(crate) const DEFAULT_REMOTE: &str = "origin";
 /// remote, falling back to `origin`.
 #[must_use]
 pub fn current_remote(current: Option<&str>) -> String {
-    if let Some(name) = current.and_then(tracked_remote) {
+    default_remote(None, current)
+}
+
+/// [`current_remote`] for the repository at `dir`, as git resolves it there.
+fn default_remote(dir: Option<&Path>, branch: Option<&str>) -> String {
+    if let Some(name) = branch.and_then(|branch| configured_remote(dir, branch)) {
         return name;
     }
 
-    if let Ok(output) = run(&["remote"]) {
+    if let Ok(output) = run_in(dir, &["remote"]) {
         let mut remotes = output.lines().filter(|l| !l.is_empty());
         if let Some(only) = remotes.next()
             && remotes.next().is_none()
@@ -71,7 +76,15 @@ pub fn current_remote(current: Option<&str>) -> String {
 /// The remote `branch.<branch>.remote` names, if any.
 #[must_use]
 pub fn tracked_remote(branch: &str) -> Option<String> {
-    let output = run(&["config", "--get", &format!("branch.{branch}.remote")]).ok()?;
+    configured_remote(None, branch)
+}
+
+fn configured_remote(dir: Option<&Path>, branch: &str) -> Option<String> {
+    let output = run_in(
+        dir,
+        &["config", "--get", &format!("branch.{branch}.remote")],
+    )
+    .ok()?;
     let name = output.lines().next()?.trim();
     // `.` means the upstream is a local branch: there is no remote to fetch from.
     (!name.is_empty() && name != ".").then(|| name.to_string())
@@ -327,35 +340,23 @@ fn ref_present(refname: &str) -> AppResult<bool> {
     }
 }
 
-/// Which submodules a fetch recurses into.
-#[derive(Clone, Copy, PartialEq)]
-pub enum SubmoduleFetch {
-    /// Every submodule checked out where the fetch runs.
-    All,
-    /// As the config says; git's own default is on demand.
-    Configured,
-}
-
 /// Fetches `remote`, once more where the first attempt lost a ref lock to a
 /// concurrent fetch of the same remote.
 #[must_use]
-pub fn fetch(dir: Option<&Path>, remote: &str, submodules: SubmoduleFetch) -> FetchOutcome {
-    match fetch_once(dir, remote, submodules) {
-        FetchOutcome::Failed(detail) if is_lost_ref_lock_error(&detail) => {
-            fetch_once(dir, remote, submodules)
-        }
+pub fn fetch(dir: Option<&Path>, remote: &str) -> FetchOutcome {
+    match fetch_once(dir, remote) {
+        FetchOutcome::Failed(detail) if is_lost_ref_lock_error(&detail) => fetch_once(dir, remote),
         outcome => outcome,
     }
 }
 
 /// Runs in the C locale, so git's stderr can be matched by its English text.
-fn fetch_once(dir: Option<&Path>, remote: &str, submodules: SubmoduleFetch) -> FetchOutcome {
-    let mut command = git_cmd(dir);
-    command.env("LC_ALL", "C").args(fetch_args(remote));
-    if submodules == SubmoduleFetch::All {
-        command.arg("--recurse-submodules=yes");
-    }
-    let output = match command.output() {
+fn fetch_once(dir: Option<&Path>, remote: &str) -> FetchOutcome {
+    let output = match git_cmd(dir)
+        .env("LC_ALL", "C")
+        .args(fetch_args(remote))
+        .output()
+    {
         Ok(output) => output,
         Err(e) => return FetchOutcome::Failed(e.to_string()),
     };
@@ -422,46 +423,6 @@ fn fetch_args(remote: &str) -> [&str; 4] {
     ["fetch", "--quiet", "--prune", remote]
 }
 
-/// Whether the worktree at `dir` has a `.gitmodules`. It costs no git process,
-/// but a checkout can leave the file out, sparsely or by deleting it, with
-/// its submodules still populated.
-#[must_use]
-pub fn declares_submodules(dir: &Path) -> bool {
-    dir.join(".gitmodules").exists()
-}
-
-/// Whether the worktree at `dir` has submodules: declared, or populated from
-/// gitlinks in its index where the declaration is missing, which costs a git
-/// process. One it cannot inspect counts as having them.
-#[must_use]
-pub fn has_submodules(dir: &Path) -> bool {
-    declares_submodules(dir) || worktree_has_initialized_submodules(dir) != Some(false)
-}
-
-/// Whether the repository keeps submodule repositories for any worktree: the
-/// main worktree's under `<common>/modules`, and each linked one's under
-/// `<common>/worktrees/<name>/modules`. One git process finds the common
-/// directory and the rest is filesystem reads, so the cost stays flat however
-/// many worktrees there are. One it cannot inspect counts as keeping them, and
-/// so does one whose submodules are gone but whose repositories git leaves
-/// behind: after `git rm` of a submodule, or until a worktree deleted by hand
-/// is pruned.
-#[must_use]
-pub fn holds_submodule_repositories() -> bool {
-    let Ok(common) = common_dir() else {
-        return true;
-    };
-    if common.join("modules").is_dir() {
-        return true;
-    }
-    let Ok(worktrees) = std::fs::read_dir(common.join("worktrees")) else {
-        return false;
-    };
-    worktrees
-        .flatten()
-        .any(|worktree| worktree.path().join("modules").is_dir())
-}
-
 /// The repository's common directory, shared by all its worktrees.
 pub fn common_dir() -> AppResult<PathBuf> {
     let output = Command::new("git")
@@ -478,28 +439,145 @@ pub fn common_dir() -> AppResult<PathBuf> {
     ))
 }
 
-/// Whether the config in force in `dir` switches a fetch's recursion into
-/// submodules off. `fetch.recurseSubmodules` and `submodule.recurse` set the
-/// same thing, so whichever git reads last wins. Reads [`config_entries`],
-/// which leaves out `GIT_CONFIG` as `git fetch` does.
-#[must_use]
-pub fn submodule_fetch_switched_off(dir: &Path) -> bool {
-    last_recursion_is_off(&config_entries(Some(dir)))
-}
+/// The keys that set whether a fetch recurses into submodules at all. Git
+/// reads both into one setting, so whichever it reads last wins.
+const RECURSION_KEYS: [&str; 2] = ["fetch.recursesubmodules", "submodule.recurse"];
 
-/// Takes [`config_entries`]: each a key, lowercased by git, then a newline and
-/// the value where it has one. A key with no value is true, and `on-demand` is
-/// no boolean at all.
-fn last_recursion_is_off(entries: &[String]) -> bool {
-    let Some(value) = last_config_entry(entries, &["fetch.recursesubmodules", "submodule.recurse"])
-        .and_then(config_value)
-    else {
-        return false;
+/// Whether the last of `entries` to set any of `keys` switches recursion into
+/// submodules off, `None` where none of them sets one. Takes
+/// [`config_entries`]: each a key, lowercased by git, then a newline and the
+/// value where it has one. A key with no value is true, and `on-demand` is no
+/// boolean at all.
+fn recursion_switched_off(entries: &[String], keys: &[&str]) -> Option<bool> {
+    let Some(value) = config_value(last_config_entry(entries, keys)?) else {
+        return Some(false);
     };
-    matches!(
+    Some(matches!(
         value.to_ascii_lowercase().as_str(),
         "" | "0" | "false" | "no" | "off"
+    ))
+}
+
+/// Fetches, into each submodule populated in the worktree at `dir`, the commit
+/// `commit` records for it, where that submodule's repository lacks it.
+///
+/// Every worktree shares the remote-tracking refs but keeps submodule
+/// repositories of its own, and git's on-demand recursion follows only the
+/// refs its own fetch moved. Once anything else has moved them, a sibling
+/// worktree's fetch or an IDE's, a fetch here recurses into nothing. So this
+/// asks of each submodule instead. A recursion switched off in config, for
+/// every submodule or for one by name, is honoured as `git fetch` would.
+#[must_use]
+pub fn fetch_missing_submodule_commits(dir: Option<&Path>, commit: &str) -> FetchOutcome {
+    let declared = listed_config(dir, &["--blob", &format!("{commit}:.gitmodules")]);
+    let paths: Vec<(&str, &str)> = declared
+        .iter()
+        .filter_map(|entry| {
+            let (key, path) = entry.split_once('\n')?;
+            let name = key.strip_prefix("submodule.")?.strip_suffix(".path")?;
+            Some((name, path))
+        })
+        .collect();
+    if paths.is_empty() {
+        return FetchOutcome::Ok;
+    }
+    let config = config_entries(dir);
+    if recursion_switched_off(&config, &RECURSION_KEYS) == Some(true) {
+        return FetchOutcome::Ok;
+    }
+    let Ok(top) = run_in(dir, &["rev-parse", "--show-toplevel"]) else {
+        return FetchOutcome::Ok;
+    };
+    let top = PathBuf::from(top.trim_end_matches('\n'));
+    let recorded = gitlinks(&top, commit, paths.iter().map(|(_, path)| *path));
+
+    let mut failures = Vec::new();
+    for (name, path) in paths {
+        // Config overrides `.gitmodules`, as it does for `git fetch`.
+        let key = format!("submodule.{name}.fetchrecursesubmodules");
+        let opted_out = recursion_switched_off(&config, &[&key])
+            .or_else(|| recursion_switched_off(&declared, &[&key]));
+        if opted_out == Some(true) {
+            continue;
+        }
+        let Some(recorded) = recorded.get(path) else {
+            continue;
+        };
+        let repository = top.join(path);
+        if !repository.join(".git").exists() {
+            continue;
+        }
+        if let Err(detail) = fetch_submodule_commit(&repository, recorded) {
+            failures.push(format!("submodule {path}: {detail}"));
+        }
+    }
+    if failures.is_empty() {
+        FetchOutcome::Ok
+    } else {
+        FetchOutcome::Failed(failures.join("\n"))
+    }
+}
+
+/// The commit `commit` records at each of `paths` that is a gitlink, by path.
+fn gitlinks<'a>(
+    top: &Path,
+    commit: &str,
+    paths: impl Iterator<Item = &'a str>,
+) -> HashMap<String, String> {
+    let Ok(output) = git_cmd(Some(top))
+        .args(["--literal-pathspecs", "ls-tree", "-z", commit, "--"])
+        .args(paths)
+        .output()
+    else {
+        return HashMap::new();
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .split('\0')
+        .filter_map(|entry| {
+            let (info, path) = entry.split_once('\t')?;
+            let recorded = info.strip_prefix("160000 commit ")?;
+            Some((path.to_string(), recorded.to_string()))
+        })
+        .collect()
+}
+
+/// Fetches `commit` into the submodule repository at `repository` unless it is
+/// there already. As git's own recursion does, it fetches what the refspec
+/// brings first, and asks for the commit by name only if that left it out.
+fn fetch_submodule_commit(repository: &Path, commit: &str) -> Result<(), String> {
+    let object = format!("{commit}^{{commit}}");
+    let has_commit = || {
+        git_cmd(Some(repository))
+            .args(["cat-file", "-e", &object])
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    };
+    if has_commit() {
+        return Ok(());
+    }
+    fetch_into(repository, &[])?;
+    if has_commit() {
+        return Ok(());
+    }
+    let branch = run_in(Some(repository), &["branch", "--show-current"]).unwrap_or_default();
+    let branch = Some(branch.trim()).filter(|branch| !branch.is_empty());
+    fetch_into(
+        repository,
+        &[&default_remote(Some(repository), branch), commit],
     )
+}
+
+fn fetch_into(repository: &Path, args: &[&str]) -> Result<(), String> {
+    let output = git_cmd(Some(repository))
+        .args(["fetch", "--quiet"])
+        .args(args)
+        .output()
+        .map_err(|error| error.to_string())?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
 }
 
 /// The key of a [`config_entries`] entry.
@@ -580,8 +658,16 @@ pub(crate) fn names_one_repository(url: &str) -> bool {
 /// `git fetch` ignores it and reads the config actually in force.
 #[must_use]
 pub fn config_entries(dir: Option<&Path>) -> Vec<String> {
+    listed_config(dir, &[])
+}
+
+/// [`config_entries`] from `source`, such as a `--blob`, rather than from the
+/// config in force. Empty where git cannot read it.
+fn listed_config(dir: Option<&Path>, source: &[&str]) -> Vec<String> {
     let Some(output) = git_cmd(dir)
-        .args(["config", "--null", "--list"])
+        .arg("config")
+        .args(source)
+        .args(["--null", "--list"])
         .env_remove("GIT_CONFIG")
         .output()
         .ok()
@@ -2302,8 +2388,8 @@ fn output_text(command: &str, output: Output) -> AppResult<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Anchor, Ground, StaleBranch, Unmerged, branch_refs, is_lost_ref_lock_error,
-        last_recursion_is_off, parse_track, stale_from, unmerged_from,
+        Anchor, Ground, RECURSION_KEYS, StaleBranch, Unmerged, branch_refs, is_lost_ref_lock_error,
+        parse_track, recursion_switched_off, stale_from, unmerged_from,
     };
     use std::collections::{HashMap, HashSet};
 
@@ -2358,7 +2444,8 @@ mod tests {
             (&["submodule.recurse"], false),
         ] {
             let entries: Vec<String> = entries.iter().map(ToString::to_string).collect();
-            assert_eq!(last_recursion_is_off(&entries), off, "{entries:?}");
+            let switched_off = recursion_switched_off(&entries, &RECURSION_KEYS) == Some(true);
+            assert_eq!(switched_off, off, "{entries:?}");
         }
     }
 

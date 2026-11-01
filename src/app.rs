@@ -166,9 +166,7 @@ fn run_verb(verb: Verb, target: Option<&str>) -> AppResult<()> {
     }
 
     // Started before the picker, as in `wt`, and joined before the checkout, so
-    // a named target this clone has never fetched is found on the remote. Unlike
-    // `wt`'s, it runs where there are submodules: the in-place update fetches
-    // from this same worktree, and a *Held* one with submodules is never covered.
+    // a named target this clone has never fetched is found on the remote.
     let prefetch = (target.is_some() || is_interactive()).then(|| Prefetch::start(&remote));
 
     // A picked row was listed from `remote`, so that is where it is taken from.
@@ -316,12 +314,14 @@ fn refresh_current(remote: &str, current: &str) -> AppResult<()> {
     let has_remote = {
         let (spinner, _cursor) = spinner(format!("Fetching {remote}…"));
 
-        let fetch_outcome = git::fetch(None, remote, git::SubmoduleFetch::Configured);
+        let fetch_outcome = git::fetch(None, remote);
+        let submodule_outcome = git::fetch_missing_submodule_commits(None, &remote_ref);
         let has_remote = git::remote_branch_exists(remote, current);
 
         spinner.finish_and_clear();
 
         report_fetch_failure(&fetch_outcome);
+        report_fetch_failure(&submodule_outcome);
         has_remote
     };
 
@@ -498,17 +498,20 @@ pub(crate) fn fetch_and_ff(
     remote: &str,
     fetched: Option<&FetchedRemote>,
 ) -> AppResult<git::FastForwardResult> {
-    let (fetch_outcome, merge_result) = {
+    let (fetch_outcome, submodule_outcome, merge_result) = {
         let (spinner, _cursor) = spinner(format!("Updating {branch}…"));
 
         let fetch_outcome = prefetch::fetch_unless_covered(dir, remote, fetched);
+        let submodule_outcome =
+            git::fetch_missing_submodule_commits(dir, &format!("{remote}/{branch}"));
         let result = git::fast_forward_merge(dir, branch, remote);
 
         spinner.finish_and_clear();
-        (fetch_outcome, result)
+        (fetch_outcome, submodule_outcome, result)
     };
 
     report_fetch_failure(&fetch_outcome);
+    report_fetch_failure(&submodule_outcome);
 
     merge_result
 }

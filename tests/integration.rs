@@ -1,7 +1,6 @@
 use std::assert_matches;
 use std::env;
 use std::ffi::OsString;
-use std::fmt::Write as _;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -2504,158 +2503,194 @@ fn wt_still_fetches_a_worktree_whose_origin_points_elsewhere() {
     );
 }
 
-/// How the target worktree comes to have the submodule it gets fetched.
-#[derive(Clone, Copy, Debug, PartialEq)]
-enum SubmoduleCase {
-    AtStartup,
-    GainedMidRun,
-    GainedMidRunLeftOutOfTheCheckout,
-    GainedMidRunUnderGitConfig,
-    LeftOutOfTheCheckout,
+/// Where the commit a superproject records for its submodule sits on the
+/// submodule's remote.
+#[derive(Clone, Copy, Debug)]
+enum Recorded {
+    OnABranch,
+    OutsideTheRefspec,
 }
 
-/// Each worktree keeps its own submodule repositories, and a fetch recurses on
-/// demand only into those where it runs, for gitlinks moved by the commits it
-/// fetched. A prefetch that had already moved the shared remote refs would
-/// leave the target's own fetch nothing new to recurse for. So a repository
-/// with submodules skips the prefetch, and the target fetches for itself, once,
-/// even where the checkout leaves `.gitmodules` out. A worktree that gains
-/// submodules only once the prefetch is under way, found by its `.gitmodules`
-/// or its index, has its own fetch recurse into all of them, which a
-/// `GIT_CONFIG` switching recursion off must not stop, since `git fetch`
-/// ignores that file. Either way its submodule gets the commit its advanced
-/// gitlink names.
-#[test]
-fn wt_still_fetches_a_worktree_with_submodules() {
+/// A `feature` worktree with its `sub` submodule initialised, behind a remote
+/// `feature` that records a submodule commit the worktree's repository lacks.
+/// The main checkout has already fetched it, as any other fetch might, so the
+/// shared refs are where the worktree's own fetch would move them.
+struct LeftBehind {
+    _bare: TempDir,
+    parent: TempDir,
+    _submodule: TempDir,
+    work: PathBuf,
+    worktree: PathBuf,
+    recorded: String,
+}
+
+/// Submodules clone and fetch over the file transport only when allowed.
+const ALLOW_FILE: [&str; 2] = ["-c", "protocol.file.allow=always"];
+
+fn submodule_left_behind(recorded: Recorded) -> LeftBehind {
     // The mode git records a submodule's commit under in its superproject.
     const GITLINK_MODE: &str = "160000";
-    for case in [
-        SubmoduleCase::AtStartup,
-        SubmoduleCase::GainedMidRun,
-        SubmoduleCase::GainedMidRunLeftOutOfTheCheckout,
-        SubmoduleCase::GainedMidRunUnderGitConfig,
-        SubmoduleCase::LeftOutOfTheCheckout,
-    ] {
-        let (bare, parent, work) = setup_with_parent();
-        let submodule = TempDir::new().unwrap();
-        git(submodule.path(), &["init", "--initial-branch=main"]);
-        commit_in(submodule.path(), "s.txt", "sub initial");
-        // Submodules clone and fetch over the file transport only when allowed.
-        let allow_file = ["-c", "protocol.file.allow=always"];
-        let url = submodule.path().to_str().unwrap();
+    let (bare, parent, work) = setup_with_parent();
+    let submodule = TempDir::new().unwrap();
+    git(submodule.path(), &["init", "--initial-branch=main"]);
+    commit_in(submodule.path(), "s.txt", "sub initial");
+    let url = submodule.path().to_str().unwrap();
+    git(
+        &work,
+        &[&ALLOW_FILE[..], &["submodule", "add", url, "sub"]].concat(),
+    );
+    git(&work, &["commit", "-m", "add sub"]);
+    git(&work, &["push", "origin", "main"]);
+    let worktree = add_worktree(&work, &parent, "feature");
+    git(&work, &["push", "origin", "feature"]);
+    git(
+        &worktree,
+        &[&ALLOW_FILE[..], &["submodule", "update", "--init"]].concat(),
+    );
+
+    commit_in(submodule.path(), "s2.txt", "sub ahead");
+    let sub_tip = stdout_str(&git(submodule.path(), &["rev-parse", "HEAD"]))
+        .trim()
+        .to_string();
+    if let Recorded::OutsideTheRefspec = recorded {
         git(
-            &work,
-            &[&allow_file[..], &["submodule", "add", url, "sub"]].concat(),
+            submodule.path(),
+            &["update-ref", "refs/pinned/ahead", "HEAD"],
         );
-        git(&work, &["commit", "-m", "add sub"]);
-        git(&work, &["push", "origin", "main"]);
-        let worktree = add_worktree(&work, &parent, "feature");
-        git(&work, &["push", "origin", "feature"]);
-        git(
-            &worktree,
-            &[&allow_file[..], &["submodule", "update", "--init"]].concat(),
-        );
-        // Advance the submodule, and the gitlink on the remote's `feature` to
-        // match.
-        commit_in(submodule.path(), "s2.txt", "sub ahead");
-        let sub_tip = stdout_str(&git(submodule.path(), &["rev-parse", "HEAD"]))
-            .trim()
-            .to_string();
-        let pusher = clone_bare(bare.path());
-        git(pusher.path(), &["switch", "feature"]);
-        git(
-            pusher.path(),
-            &[
-                "update-index",
-                "--cacheinfo",
-                &format!("{GITLINK_MODE},{sub_tip},sub"),
-            ],
-        );
-        git(pusher.path(), &["commit", "-m", "advance sub"]);
-        git(pusher.path(), &["push", "origin", "feature"]);
-        let left_out = matches!(
-            case,
-            SubmoduleCase::GainedMidRunLeftOutOfTheCheckout | SubmoduleCase::LeftOutOfTheCheckout
-        );
-        if left_out {
-            // As a sparse checkout leaves it: absent, yet the tree stays clean.
-            for dir in [&work, &worktree] {
-                git(dir, &["update-index", "--skip-worktree", ".gitmodules"]);
-                fs::remove_file(dir.join(".gitmodules")).unwrap();
-            }
-        }
-        let gained_mid_run = !matches!(
-            case,
-            SubmoduleCase::AtStartup | SubmoduleCase::LeftOutOfTheCheckout
-        );
-        if gained_mid_run {
-            let mut hidden = vec![
-                work.join(".git/modules"),
-                work.join(".git/worktrees/feature/modules"),
-            ];
-            if !left_out {
-                hidden.extend([work.join(".gitmodules"), worktree.join(".gitmodules")]);
-            }
-            restore_as_the_prefetch_commits(&parent, &work, &hidden);
-        }
-        let mut command = perch_command(&work, &["wt", "feature", "--no-switch"]);
-        // `allow_file` for perch's own git, including the submodule fetches.
+        git(submodule.path(), &["reset", "--hard", "HEAD~1"]);
+    }
+    let pusher = clone_bare(bare.path());
+    git(pusher.path(), &["switch", "feature"]);
+    git(
+        pusher.path(),
+        &[
+            "update-index",
+            "--cacheinfo",
+            &format!("{GITLINK_MODE},{sub_tip},sub"),
+        ],
+    );
+    git(pusher.path(), &["commit", "-m", "advance sub"]);
+    git(pusher.path(), &["push", "origin", "feature"]);
+    git(&work, &[&ALLOW_FILE[..], &["fetch", "origin"]].concat());
+
+    LeftBehind {
+        _bare: bare,
+        parent,
+        _submodule: submodule,
+        work,
+        worktree,
+        recorded: sub_tip,
+    }
+}
+
+impl LeftBehind {
+    /// Runs perch in `dir` with no global config, which could switch recursion
+    /// on and fetch the submodule whatever perch does. Returns the fetches run
+    /// inside submodules alongside the output.
+    fn perch(&self, dir: &Path, args: &[&str]) -> (Output, Vec<String>) {
+        let mut command = perch_command(dir, args);
         command
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_COUNT", "1")
             .env("GIT_CONFIG_KEY_0", "protocol.file.allow")
             .env("GIT_CONFIG_VALUE_0", "always");
-        if case == SubmoduleCase::GainedMidRunUnderGitConfig {
-            let file = parent.path().join("git-config");
-            let config = fs::read_to_string(work.join(".git/config")).unwrap();
-            fs::write(&file, format!("{config}[submodule]\n\trecurse = false\n")).unwrap();
-            command.env("GIT_CONFIG", file);
-        }
+        let (output, fetches) = perch_traced_with(&self.parent, command);
+        // A superproject's fetch prunes; a submodule's does not.
+        let submodule_fetches = fetches
+            .into_iter()
+            .filter(|line| !line.contains("--prune"))
+            .collect();
+        (output, submodule_fetches)
+    }
 
-        let (output, fetches) = perch_traced_with(&parent, command);
+    fn submodule_has_recorded(&self) -> bool {
+        Command::new("git")
+            .args(["cat-file", "-e", &format!("{}^{{commit}}", self.recorded)])
+            .current_dir(self.worktree.join("sub"))
+            .status()
+            .unwrap()
+            .success()
+    }
+}
+
+/// Git's on-demand recursion follows only the refs its own fetch moved, so
+/// once another fetch has moved them, neither `perch .` nor `perch wt`
+/// updating a worktree would reach the submodule. Perch asks of each
+/// submodule instead, and asks the remote by SHA for a commit no refspec
+/// fetches.
+#[test]
+fn a_submodule_commit_another_fetch_left_behind_is_fetched() {
+    for recorded in [Recorded::OnABranch, Recorded::OutsideTheRefspec] {
+        for update_from_main in [false, true] {
+            let fixture = submodule_left_behind(recorded);
+            let (dir, args) = if update_from_main {
+                (&fixture.work, &["wt", "feature", "--no-switch"][..])
+            } else {
+                (&fixture.worktree, &["."][..])
+            };
+
+            let (output, _) = fixture.perch(dir, args);
+
+            assert!(
+                output.status.success(),
+                "{recorded:?}, {args:?}: stderr: {}",
+                stderr_str(&output)
+            );
+            assert!(
+                fixture.submodule_has_recorded(),
+                "{recorded:?}, {args:?}: stderr: {}",
+                stderr_str(&output)
+            );
+        }
+    }
+}
+
+/// Why perch must leave a submodule's remote alone.
+#[derive(Clone, Copy, Debug)]
+enum NoSubmoduleFetch {
+    AlreadyPresent,
+    OptedOutByName,
+    RecursionSwitchedOff,
+}
+
+#[test]
+fn a_submodule_is_not_fetched_where_present_or_opted_out() {
+    for case in [
+        NoSubmoduleFetch::AlreadyPresent,
+        NoSubmoduleFetch::OptedOutByName,
+        NoSubmoduleFetch::RecursionSwitchedOff,
+    ] {
+        let fixture = submodule_left_behind(Recorded::OnABranch);
+        let worktree = &fixture.worktree;
+        match case {
+            NoSubmoduleFetch::AlreadyPresent => git(
+                &worktree.join("sub"),
+                &[&ALLOW_FILE[..], &["fetch", "origin"]].concat(),
+            ),
+            NoSubmoduleFetch::OptedOutByName => git(
+                worktree,
+                &["config", "submodule.sub.fetchRecurseSubmodules", "false"],
+            ),
+            NoSubmoduleFetch::RecursionSwitchedOff => {
+                git(worktree, &["config", "fetch.recurseSubmodules", "false"])
+            }
+        };
+
+        let (output, submodule_fetches) = fixture.perch(worktree, &["."]);
 
         assert!(
             output.status.success(),
             "{case:?}: stderr: {}",
             stderr_str(&output)
         );
-        // The trace also carries each fetch's recursion into its submodule.
-        let own = fetches
-            .iter()
-            .filter(|line| line.contains("git fetch --quiet --prune origin"))
-            .count();
-        let expected = if gained_mid_run { 2 } else { 1 };
-        assert_eq!(own, expected, "{case:?}: fetches: {fetches:?}");
-        // Fails unless the target's submodule repository holds the new commit.
-        git(
-            &worktree.join("sub"),
-            &["cat-file", "-e", &format!("{sub_tip}^{{commit}}")],
+        assert_eq!(submodule_fetches, Vec::<String>::new(), "{case:?}");
+        assert_eq!(
+            fixture.submodule_has_recorded(),
+            matches!(case, NoSubmoduleFetch::AlreadyPresent),
+            "{case:?}"
         );
     }
-}
-
-/// Moves each of `paths` aside, under `parent`, and has the repository at
-/// `work` put them back as the prefetch commits its ref updates: after the
-/// startup scan, before the target's own fetch.
-fn restore_as_the_prefetch_commits(parent: &TempDir, work: &Path, paths: &[PathBuf]) {
-    let mut restore = String::new();
-    for (index, path) in paths.iter().enumerate() {
-        let hidden = parent.path().join(format!("hidden-{index}"));
-        fs::rename(path, &hidden).unwrap();
-        writeln!(
-            restore,
-            "[ -e '{0}' ] && mv '{0}' '{1}'",
-            hidden.display(),
-            path.display(),
-        )
-        .unwrap();
-    }
-    let hook = work.join(".git/hooks/reference-transaction");
-    fs::write(
-        &hook,
-        format!("#!/bin/sh\ncat >/dev/null\n[ \"$1\" = committed ] || exit 0\n{restore}exit 0\n"),
-    )
-    .unwrap();
-    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
 /// A relative `core.hooksPath` resolves from each worktree's root, so each

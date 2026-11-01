@@ -214,10 +214,15 @@ pub fn stash_pop() -> AppResult<StashPopOutcome> {
     })
 }
 
-pub fn checkout(branch: &str) -> AppResult<()> {
-    let output = Command::new("git")
-        .args(["checkout", branch, "--quiet"])
-        .output()?;
+/// Checks `branch` out, creating it from `preferred` or another remote by
+/// [`remote_holding`] when it isn't local.
+pub fn checkout(branch: &str, preferred: &str) -> AppResult<()> {
+    let start = remote_start_point(branch, preferred)?;
+    let args: Vec<&str> = match &start {
+        Some(start) => vec!["checkout", "--quiet", "--track", "-b", branch, start],
+        None => vec!["checkout", "--quiet", branch],
+    };
+    let output = Command::new("git").args(&args).output()?;
     if output.status.success() {
         return Ok(());
     }
@@ -229,7 +234,7 @@ pub fn checkout(branch: &str) -> AppResult<()> {
     // no-op there and the original error still surfaces.
     if is_stale_worktree_error(&stderr) {
         let _ = worktree_prune();
-        run(&["checkout", branch, "--quiet"])?;
+        run(&args)?;
         return Ok(());
     }
 
@@ -248,8 +253,78 @@ pub fn checkout(branch: &str) -> AppResult<()> {
         .stderr(Stdio::null())
         .status();
 
-    run(&["checkout", branch, "--quiet"])?;
+    run(&args)?;
     Ok(())
+}
+
+/// Chosen here rather than left to git, which refuses a name on several
+/// remotes and follows `checkout.defaultRemote` past `preferred`.
+fn remote_start_point(branch: &str, preferred: &str) -> AppResult<Option<String>> {
+    if is_local_branch(branch)? {
+        return Ok(None);
+    }
+    Ok(remote_holding(branch, preferred)?.map(|remote| remote_ref(&remote, branch)))
+}
+
+pub fn is_local_branch(branch: &str) -> AppResult<bool> {
+    ref_present(&format!("refs/heads/{branch}"))
+}
+
+#[must_use]
+pub fn remote_ref(remote: &str, branch: &str) -> String {
+    format!("refs/remotes/{remote}/{branch}")
+}
+
+/// `preferred` where it has `branch`, else the one remote that does; several,
+/// or a ref that can't be read, are refused rather than guessed past.
+pub fn remote_holding(branch: &str, preferred: &str) -> AppResult<Option<String>> {
+    let mut holding = remotes_holding(branch)?;
+    if holding.iter().any(|remote| remote == preferred) {
+        return Ok(Some(preferred.to_string()));
+    }
+    if holding.len() > 1 {
+        return Err(Error::AmbiguousRemote {
+            branch: branch.to_string(),
+            preferred: preferred.to_string(),
+            remotes: holding,
+        });
+    }
+    Ok(holding.pop())
+}
+
+/// The remotes with a ref for `branch`, sorted.
+pub fn remotes_holding(branch: &str) -> AppResult<Vec<String>> {
+    let mut holding = Vec::new();
+    for remote in run(&["remote"])?.lines() {
+        if ref_present(&remote_ref(remote, branch))? {
+            holding.push(remote.to_string());
+        }
+    }
+    holding.sort();
+    Ok(holding)
+}
+
+/// Whether `refname` names a ref exactly; unlike [`resolve`], revision syntax
+/// such as `main~1` matches nothing. A ref that is there but broken is an error.
+fn ref_present(refname: &str) -> AppResult<bool> {
+    let output = git_cmd(None)
+        .args(["show-ref", "--verify", "--quiet", refname])
+        .output()?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        // `show-ref` answers 1 for a malformed ref too, which `rev-parse` tells apart.
+        Some(1) => match ref_state(None, refname) {
+            RefState::Unreadable(message) => Err(Error::Git {
+                command: "rev-parse".to_string(),
+                message,
+            }),
+            RefState::At(_) | RefState::Missing => Ok(false),
+        },
+        _ => Err(Error::Git {
+            command: "show-ref".to_string(),
+            message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        }),
+    }
 }
 
 /// Which submodules a fetch recurses into.
@@ -590,13 +665,7 @@ pub fn fast_forward_merge(
 /// True if `<remote>/<branch>` exists as a remote-tracking ref.
 #[must_use]
 pub fn remote_branch_exists(remote: &str, branch: &str) -> bool {
-    let remote_ref = format!("{remote}/{branch}");
-    git_cmd(None)
-        .args(["rev-parse", "--verify", &remote_ref])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
+    ref_present(&remote_ref(remote, branch)).unwrap_or(false)
 }
 
 /// `(ahead, behind)` for `HEAD` relative to `<remote>/<branch>`: how many
@@ -1742,21 +1811,30 @@ pub fn worktree_for_branch(worktrees: &[Worktree], branch: &str) -> Option<Workt
         .cloned()
 }
 
-/// Add a worktree at `path` for `branch`. If `base` is `Some`, create the
-/// branch from `base` (e.g. `origin/main`); if `None`, check out an existing
-/// local or remote-tracking branch.
-pub fn worktree_add(path: &Path, branch: &str, base: Option<&str>) -> AppResult<()> {
+/// Add a worktree at `path` for `branch`, created from `start` (e.g.
+/// `refs/remotes/origin/main`) unless `branch` is already local.
+pub fn worktree_add(path: &Path, branch: &str, start: Option<&str>) -> AppResult<()> {
     let path_str = path_to_str(path)?;
-    // `--track` rather than relying on git's default: `branch.autoSetupMerge`
-    // can be off, and the upstream a new branch carries is what tells
-    // `stale_branches` it was branched off the anchor rather than merged
-    // into it.
-    let args: Vec<&str> = match base {
-        Some(base) => vec!["worktree", "add", "--track", "-b", branch, path_str, base],
-        None => vec!["worktree", "add", path_str, branch],
+    let build_args = || -> AppResult<Vec<String>> {
+        let start = match start {
+            Some(_) if is_local_branch(branch)? => None,
+            start => start,
+        };
+        // `--track` rather than relying on git's default: `branch.autoSetupMerge`
+        // can be off, and the upstream a new branch carries is what tells
+        // `stale_branches` it was branched off the anchor rather than merged
+        // into it.
+        let mut args = vec!["worktree".to_string(), "add".to_string()];
+        match start {
+            Some(start) => {
+                args.extend(["--track", "-b", branch, path_str, start].map(String::from));
+            }
+            None => args.extend([path_str, branch].map(String::from)),
+        }
+        Ok(args)
     };
 
-    let output = Command::new("git").args(&args).output()?;
+    let output = Command::new("git").args(build_args()?).output()?;
     if output.status.success() {
         return Ok(());
     }
@@ -1767,7 +1845,9 @@ pub fn worktree_add(path: &Path, branch: &str, base: Option<&str>) -> AppResult<
     let stderr = String::from_utf8_lossy(&output.stderr);
     if is_stale_worktree_error(&stderr) {
         let _ = worktree_prune();
-        let retry = Command::new("git").args(&args).output()?;
+        // Built again: the refused attempt may have created the branch, which a
+        // second `-b` would then refuse.
+        let retry = Command::new("git").args(build_args()?).output()?;
         if retry.status.success() {
             return Ok(());
         }

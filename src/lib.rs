@@ -11,6 +11,16 @@ pub type AppResult<T> = Result<T, Error>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error(
+        "{branch} is not on {preferred}, and more than one remote has it; pick one with {}",
+        track_commands(branch, remotes)
+    )]
+    AmbiguousRemote {
+        branch: String,
+        preferred: String,
+        remotes: Vec<String>,
+    },
+
     #[error("git {command}: {message}")]
     Git { command: String, message: String },
 
@@ -84,6 +94,17 @@ pub enum Error {
     /// default in place of the one they chose.
     #[error("{branch} no longer exists; it was deleted after the list was drawn")]
     Vanished { branch: String },
+}
+
+fn track_commands(branch: &str, remotes: &[String]) -> String {
+    let commands: Vec<String> = remotes
+        .iter()
+        .map(|remote| {
+            let start = app::shell_quote(&git::remote_ref(remote, branch));
+            format!("`git branch --track {} {start}`", app::shell_quote(branch))
+        })
+        .collect();
+    commands.join(" or ")
 }
 
 impl Error {

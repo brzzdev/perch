@@ -7480,8 +7480,10 @@ fn a_typed_name_on_several_remotes_but_not_origin_is_refused() {
 
         assert!(!output.status.success(), "{verb} should refuse");
         assert!(
-            stderr_str(&output)
-                .contains("x is not on origin, and more than one remote has it (fork, upstream)"),
+            stderr_str(&output).contains(
+                "x is not on origin, and more than one remote has it; pick one with \
+                 `git switch --track fork/x` or `git switch --track upstream/x`"
+            ),
             "{verb}: {}",
             stderr_str(&output)
         );
@@ -7545,6 +7547,23 @@ fn wt_takes_a_branch_on_another_remote_from_a_fresh_fetch_of_it() {
     assert!(output.status.success(), "stderr: {}", stderr_str(&output));
     let worktree = parent.path().join("worktrees").join("repo").join("x");
     assert_eq!(stdout_str(&git(&worktree, &["rev-parse", "HEAD"])), pushed);
+}
+
+/// Submodules switch the prefetch off, so `origin` is fetched only when the
+/// worktree is created.
+#[test]
+fn wt_prefers_an_unfetched_origin_branch_to_a_fetched_one_elsewhere() {
+    let (bare, parent, work) = setup_with_parent();
+    publish_branch_on(parent.path(), &work, &["upstream"], "x");
+    fs::write(work.join(".gitmodules"), "").unwrap();
+    let other = clone_bare(bare.path());
+    git(other.path(), &["switch", "-c", "x"]);
+    git(other.path(), &["push", "origin", "x"]);
+
+    let output = perch_args(&work, &["wt", "x"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert_eq!(upstream_of(&work, "x"), "origin/x");
 }
 
 #[test]

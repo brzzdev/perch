@@ -260,15 +260,15 @@ pub fn checkout(branch: &str, preferred: &str) -> AppResult<()> {
 /// Chosen here rather than left to git, which refuses a name on several
 /// remotes and follows `checkout.defaultRemote` past `preferred`.
 fn remote_start_point(branch: &str, preferred: &str) -> AppResult<Option<String>> {
-    Ok(source_remote(branch, preferred)?.map(|remote| format!("refs/remotes/{remote}/{branch}")))
-}
-
-/// The remote [`remote_holding`] picks for `branch`, or `None` when it is local.
-pub fn source_remote(branch: &str, preferred: &str) -> AppResult<Option<String>> {
-    if ref_exists(&format!("refs/heads/{branch}")) {
+    if is_local_branch(branch) {
         return Ok(None);
     }
-    remote_holding(branch, preferred)
+    Ok(remote_holding(branch, preferred)?.map(|remote| format!("refs/remotes/{remote}/{branch}")))
+}
+
+#[must_use]
+pub fn is_local_branch(branch: &str) -> bool {
+    ref_exists(&format!("refs/heads/{branch}"))
 }
 
 /// `preferred` where it has `branch`, else the one remote that does; several
@@ -1782,7 +1782,7 @@ pub fn worktree_add(
     preferred: &str,
 ) -> AppResult<()> {
     let path_str = path_to_str(path)?;
-    let args = || -> AppResult<Vec<String>> {
+    let build_args = || -> AppResult<Vec<String>> {
         let start = match base {
             Some(base) => Some(base.to_string()),
             None => remote_start_point(branch, preferred)?,
@@ -1791,19 +1791,17 @@ pub fn worktree_add(
         // can be off, and the upstream a new branch carries is what tells
         // `stale_branches` it was branched off the anchor rather than merged
         // into it.
-        let args = match start {
-            Some(start) => vec!["worktree", "add", "--track", "-b", branch, path_str, &start]
-                .into_iter()
-                .map(String::from)
-                .collect(),
-            None => ["worktree", "add", path_str, branch]
-                .map(String::from)
-                .to_vec(),
-        };
+        let mut args = vec!["worktree".to_string(), "add".to_string()];
+        match start {
+            Some(start) => {
+                args.extend(["--track", "-b", branch, path_str, &start].map(String::from));
+            }
+            None => args.extend([path_str, branch].map(String::from)),
+        }
         Ok(args)
     };
 
-    let output = Command::new("git").args(args()?).output()?;
+    let output = Command::new("git").args(build_args()?).output()?;
     if output.status.success() {
         return Ok(());
     }
@@ -1812,11 +1810,11 @@ pub fn worktree_add(
     // blocks re-adding ("missing but already registered"). Clear the dead
     // registrations and try once more.
     let stderr = String::from_utf8_lossy(&output.stderr);
-    // Read the arguments again: the refused attempt may have created a
-    // remote-only branch, which a second `-b` would then refuse.
     if is_stale_worktree_error(&stderr) {
         let _ = worktree_prune();
-        let retry = Command::new("git").args(args()?).output()?;
+        // Built again: the refused attempt may have created a remote-only
+        // branch, which a second `-b` would then refuse.
+        let retry = Command::new("git").args(build_args()?).output()?;
         if retry.status.success() {
             return Ok(());
         }

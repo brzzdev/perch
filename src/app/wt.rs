@@ -131,18 +131,12 @@ pub(crate) fn run(
             (wt.path, branch)
         }
         Action::CreateForBranch(branch) => {
-            let preferred = existence.preferred_remote(&remote);
-            let branch_remote = match git::source_remote(&branch, preferred)? {
-                Some(source) => source,
-                None => git::current_remote(Some(branch.as_str())),
-            };
             let path = create_worktree(
                 &main.path,
                 worktree_name.unwrap_or(&branch),
                 &branch,
                 None,
-                preferred,
-                &branch_remote,
+                existence.preferred_remote(&remote),
                 fetched.as_ref(),
             )?;
             (path, branch)
@@ -158,7 +152,6 @@ pub(crate) fn run(
                 worktree_name.unwrap_or(&branch),
                 &branch,
                 Some(&base),
-                &remote,
                 &remote,
                 fetched.as_ref(),
             )?;
@@ -355,15 +348,14 @@ pub(crate) fn update_in(
 /// consequence of creation and of nothing else rather than a line each creation
 /// arm has to remember.
 ///
-/// Fetches `remote` first unless `fetched` covers it. A failed fetch is
-/// reported and creation goes ahead regardless: a new branch made offline is
-/// legitimate.
+/// Fetches what the branch comes from first, as [`fetch_branch_sources`]
+/// says. A failed fetch is reported and creation goes ahead regardless: a new
+/// branch made offline is legitimate.
 fn create_worktree(
     main_path: &Path,
     worktree_name: &str,
     branch: &str,
     base: Option<&str>,
-    preferred: &str,
     remote: &str,
     fetched: Option<&FetchedRemote>,
 ) -> AppResult<PathBuf> {
@@ -371,15 +363,17 @@ fn create_worktree(
     ensure_path_clear(&path)?;
     ensure_parent(&path);
 
-    let (fetch_outcome, result) = {
+    let (fetch_outcomes, result) = {
         let (spinner, _cursor) = spinner(format!("Fetching {remote}…"));
-        let fetch_outcome = fetch_unless_covered(None, remote, fetched);
+        let fetch_outcomes = fetch_branch_sources(branch, base, remote, fetched);
         spinner.set_message(format!("Creating worktree for {branch}…"));
-        let outcome = git::worktree_add(&path, branch, base, preferred);
+        let outcome = git::worktree_add(&path, branch, base, remote);
         spinner.finish_and_clear();
-        (fetch_outcome, outcome)
+        (fetch_outcomes, outcome)
     };
-    report_fetch_failure(&fetch_outcome);
+    for outcome in &fetch_outcomes {
+        report_fetch_failure(outcome);
+    }
     result?;
 
     if let Some(base) = base {
@@ -400,6 +394,32 @@ fn create_worktree(
     seed::seed(main_path, &path);
     hook::fire(hook::Event::Created, &path, Some(branch), main_path);
     Ok(path)
+}
+
+/// Fetches, unless `fetched` covers it, `remote` for a new branch off `base`
+/// and a local branch's own remote. A branch that isn't local is looked for on
+/// `remote` only once that is fresh, so a stale copy elsewhere can't win, and
+/// then on whichever remote holds it; a refusal is left to `worktree_add`.
+fn fetch_branch_sources(
+    branch: &str,
+    base: Option<&str>,
+    remote: &str,
+    fetched: Option<&FetchedRemote>,
+) -> Vec<git::FetchOutcome> {
+    if base.is_some() {
+        return vec![fetch_unless_covered(None, remote, fetched)];
+    }
+    if git::is_local_branch(branch) {
+        let own = git::current_remote(Some(branch));
+        return vec![fetch_unless_covered(None, &own, fetched)];
+    }
+    let mut outcomes = vec![fetch_unless_covered(None, remote, fetched)];
+    if let Ok(Some(source)) = git::remote_holding(branch, remote)
+        && source != remote
+    {
+        outcomes.push(fetch_unless_covered(None, &source, fetched));
+    }
+    outcomes
 }
 
 /// Which branch the user picked, by name, and what picking it claimed. Deciding

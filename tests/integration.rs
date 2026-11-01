@@ -2592,6 +2592,47 @@ fn wt_updates_its_own_worktree_through_a_relative_git_dir() {
     );
 }
 
+/// A relative `GIT_INDEX_FILE` resolves from the work-tree top, not from where
+/// perch started, for git perch roots there as for git it runs where it started.
+#[test]
+fn wt_honours_a_relative_index_from_a_subdirectory() {
+    let (_bare, parent, work) = setup_with_parent();
+    add_worktree(&work, &parent, "feature");
+    push_upstream_change(&work, "file.txt", "incoming\n", "incoming change");
+    let before = stdout_str(&git(&work, &["rev-parse", "HEAD"]));
+    for args in [
+        &["read-tree", "HEAD"][..],
+        &["rm", "--cached", "--quiet", "file.txt"],
+    ] {
+        let staged = Command::new("git")
+            .args(args)
+            .current_dir(&work)
+            .env("GIT_INDEX_FILE", "index.alt")
+            .status()
+            .unwrap();
+        assert!(staged.success(), "git {args:?}");
+    }
+    // A clean index where the value would lead from the subdirectory.
+    let sub = work.join("sub");
+    fs::create_dir(&sub).unwrap();
+    fs::copy(work.join(".git").join("index"), sub.join("index.alt")).unwrap();
+
+    let output = perch_command(&sub, &["wt", "main", "--no-switch"])
+        .env("GIT_DIR", "../.git")
+        .env("GIT_INDEX_FILE", "index.alt")
+        .env("GIT_WORK_TREE", "..")
+        .env("PERCH_NO_HOOKS", "1")
+        .output()
+        .expect("failed to run perch");
+
+    assert_eq!(
+        stdout_str(&git(&work, &["rev-parse", "HEAD"])),
+        before,
+        "fast-forwarded over the inherited index; stderr: {}",
+        stderr_str(&output)
+    );
+}
+
 /// Where the commit a superproject records for its submodule sits on the
 /// submodule's remote, and where the superproject records it.
 #[derive(Clone, Copy, Debug)]

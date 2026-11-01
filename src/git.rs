@@ -2416,32 +2416,22 @@ const REPOSITORY_VARIABLES: [&str; 13] = [
     "GIT_WORK_TREE",
 ];
 
-/// The worktree and git dir the inherited [`REPOSITORY_VARIABLES`] lead to
-/// from where perch started, canonicalised. Unset where none is inherited.
+/// Where the inherited [`REPOSITORY_VARIABLES`] lead from where perch started.
+/// Unset where none is inherited.
 static INHERITED_REPOSITORY: OnceLock<InheritedRepository> = OnceLock::new();
 
 struct InheritedRepository {
     /// Its git dir and toplevel, canonicalised.
-    paths: Vec<PathBuf>,
-    /// The [`PATH_VARIABLES`] inherited, made absolute, since git resolves a
-    /// relative one from where `-C` puts it.
-    absolute: Vec<(&'static str, OsString)>,
+    roots: Vec<PathBuf>,
+    /// What a command rooted at one of [`Self::roots`] runs under, so that it
+    /// finds the work-tree top perch started under, which the top-relative
+    /// variables resolve from.
+    env: Vec<(&'static str, OsString)>,
 }
 
-/// The [`REPOSITORY_VARIABLES`] that hold a path, or for alternates a list.
-const PATH_VARIABLES: [&str; 9] = [
-    ALTERNATES_VARIABLE,
-    "GIT_COMMON_DIR",
-    "GIT_CONFIG",
-    "GIT_DIR",
-    "GIT_GRAFT_FILE",
-    "GIT_INDEX_FILE",
-    "GIT_OBJECT_DIRECTORY",
-    "GIT_SHALLOW_FILE",
-    "GIT_WORK_TREE",
-];
-
-const ALTERNATES_VARIABLE: &str = "GIT_ALTERNATE_OBJECT_DIRECTORIES";
+/// The [`REPOSITORY_VARIABLES`] git resolves from the working directory rather
+/// than from the work-tree top.
+const CWD_RELATIVE_VARIABLES: [&str; 3] = ["GIT_CONFIG", "GIT_DIR", "GIT_WORK_TREE"];
 
 /// Records [`INHERITED_REPOSITORY`], before anything moves the working
 /// directory a relative `GIT_DIR` resolves from.
@@ -2456,34 +2446,37 @@ pub fn record_inherited_repository() {
         return;
     };
     // Without a work tree, `--show-toplevel` fails after the git dir is printed.
-    let Ok(output) = Command::new("git")
+    let Ok(output) = git_cmd(None)
         .args(["rev-parse", "--absolute-git-dir", "--show-toplevel"])
         .output()
     else {
         return;
     };
-    let paths = String::from_utf8_lossy(&output.stdout)
-        .lines()
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let printed: Vec<&str> = stdout.lines().collect();
+    let roots = printed
+        .iter()
         .filter_map(|line| Path::new(line).canonicalize().ok())
         .collect();
-    let absolute = PATH_VARIABLES
+    let mut env: Vec<(&'static str, OsString)> = CWD_RELATIVE_VARIABLES
         .into_iter()
         .filter_map(|name| {
             let value = std::env::var_os(name).filter(|value| !value.is_empty())?;
-            let absolute = if name == ALTERNATES_VARIABLE {
-                std::env::join_paths(std::env::split_paths(&value).map(|path| cwd.join(path)))
-                    .ok()?
-            } else {
-                cwd.join(value).into_os_string()
-            };
-            Some((name, absolute))
+            Some((name, cwd.join(value).into_os_string()))
         })
         .collect();
-    let _ = INHERITED_REPOSITORY.set(InheritedRepository { paths, absolute });
+    // A `GIT_DIR` with no work tree takes the working directory as the top.
+    let pins_the_top = env.iter().any(|(name, _)| *name == "GIT_DIR")
+        && !env.iter().any(|(name, _)| *name == "GIT_WORK_TREE");
+    if let (true, [_, toplevel]) = (pins_the_top, printed.as_slice()) {
+        env.push(("GIT_WORK_TREE", OsString::from(toplevel)));
+    }
+    let _ = INHERITED_REPOSITORY.set(InheritedRepository { roots, env });
 }
 
-/// A `git` command, optionally rooted in `dir` via `-C`, which an inherited
-/// `GIT_DIR` overrides unless cleared.
+/// A `git` command, optionally rooted in `dir` via `-C`, with the inherited
+/// repository variables cleared unless `dir` is the git dir or toplevel they
+/// lead to.
 fn git_cmd(dir: Option<&Path>) -> Command {
     let mut cmd = Command::new("git");
     let Some(dir) = dir else {
@@ -2492,10 +2485,10 @@ fn git_cmd(dir: Option<&Path>) -> Command {
     cmd.arg("-C").arg(dir);
     let inherited_here = INHERITED_REPOSITORY.get().filter(|inherited| {
         dir.canonicalize()
-            .is_ok_and(|dir| inherited.paths.contains(&dir))
+            .is_ok_and(|dir| inherited.roots.contains(&dir))
     });
     if let Some(inherited) = inherited_here {
-        cmd.envs(inherited.absolute.iter().map(|(name, value)| (name, value)));
+        cmd.envs(inherited.env.iter().map(|(name, value)| (name, value)));
         return cmd;
     }
     for name in REPOSITORY_VARIABLES {

@@ -274,7 +274,7 @@ pub fn is_local_branch(branch: &str) -> bool {
 /// `preferred` where it has `branch`, else the one remote that does; several
 /// are refused rather than guessed between.
 pub fn remote_holding(branch: &str, preferred: &str) -> AppResult<Option<String>> {
-    let holds = |remote: &str| ref_exists(&format!("refs/remotes/{remote}/{branch}"));
+    let holds = |remote: &str| remote_branch_exists(remote, branch);
     if holds(preferred) {
         return Ok(Some(preferred.to_string()));
     }
@@ -620,13 +620,7 @@ pub fn fast_forward_merge(
 /// True if `<remote>/<branch>` exists as a remote-tracking ref.
 #[must_use]
 pub fn remote_branch_exists(remote: &str, branch: &str) -> bool {
-    let remote_ref = format!("{remote}/{branch}");
-    git_cmd(None)
-        .args(["rev-parse", "--verify", &remote_ref])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
+    ref_exists(&format!("refs/remotes/{remote}/{branch}"))
 }
 
 /// `(ahead, behind)` for `HEAD` relative to `<remote>/<branch>`: how many

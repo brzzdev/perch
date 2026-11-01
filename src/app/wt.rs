@@ -131,28 +131,35 @@ pub(crate) fn run(
             (wt.path, branch)
         }
         Action::CreateForBranch(branch) => {
+            // A typed name only stale refs had claimed is a new branch after all.
+            let fallback = match existence {
+                Existence::MayCreate => new_branch_base(&remote).ok(),
+                Existence::MustExist | Existence::Requested(_) => None,
+            };
+            let source = Source::Named {
+                fallback: fallback.as_deref(),
+                preferred: existence.preferred_remote(&remote),
+            };
             let path = create_worktree(
                 &main.path,
                 worktree_name.unwrap_or(&branch),
                 &branch,
-                None,
-                existence.preferred_remote(&remote),
+                source,
                 fetched.as_ref(),
             )?;
             (path, branch)
         }
         Action::CreateNewBranch(branch) => {
-            let default = git::default_branch(&remote).ok_or_else(|| Error::Git {
-                command: "worktree add".into(),
-                message: format!("no default branch on {remote}; cannot pick a base"),
-            })?;
-            let base = format!("{remote}/{default}");
+            let base = new_branch_base(&remote)?;
+            let source = Source::New {
+                base: &base,
+                remote: &remote,
+            };
             let path = create_worktree(
                 &main.path,
                 worktree_name.unwrap_or(&branch),
                 &branch,
-                Some(&base),
-                &remote,
+                source,
                 fetched.as_ref(),
             )?;
             (path, branch)
@@ -348,35 +355,36 @@ pub(crate) fn update_in(
 /// consequence of creation and of nothing else rather than a line each creation
 /// arm has to remember.
 ///
-/// Fetches what the branch comes from first, as [`fetch_branch_sources`]
-/// says. A failed fetch is reported and creation goes ahead regardless: a new
-/// branch made offline is legitimate.
+/// Fetches what the branch comes from first, as [`fetch_start`] says. A
+/// failed fetch is reported and creation goes ahead regardless: a new branch
+/// made offline is legitimate.
 fn create_worktree(
     main_path: &Path,
     worktree_name: &str,
     branch: &str,
-    base: Option<&str>,
-    remote: &str,
+    source: Source,
     fetched: Option<&FetchedRemote>,
 ) -> AppResult<PathBuf> {
     let path = worktrees_root(main_path)?.join(worktree_name);
     ensure_path_clear(&path)?;
     ensure_parent(&path);
 
-    let (fetch_outcomes, result) = {
-        let (spinner, _cursor) = spinner(format!("Fetching {remote}…"));
-        let fetch_outcomes = fetch_branch_sources(branch, base, remote, fetched);
-        spinner.set_message(format!("Creating worktree for {branch}…"));
-        let outcome = git::worktree_add(&path, branch, base, remote);
+    let mut fetch_outcomes = Vec::new();
+    let result = {
+        let (spinner, _cursor) = spinner(format!("Fetching {}…", source.remote()));
+        let result = fetch_start(branch, source, fetched, &mut fetch_outcomes).and_then(|start| {
+            spinner.set_message(format!("Creating worktree for {branch}…"));
+            git::worktree_add(&path, branch, start.git_start())?;
+            Ok(start)
+        });
         spinner.finish_and_clear();
-        (fetch_outcomes, outcome)
+        result
     };
     for outcome in &fetch_outcomes {
         report_fetch_failure(outcome);
     }
-    result?;
 
-    if let Some(base) = base {
+    if let Start::NewOff(base) = result? {
         eprintln!(
             "{} created {} from {} at {}",
             style("✓").green().bold(),
@@ -396,31 +404,106 @@ fn create_worktree(
     Ok(path)
 }
 
-/// A branch that isn't local is looked for only once `remote` is fresh, so a
-/// stale copy on another remote can't win over it.
-fn fetch_branch_sources(
+/// Where a new worktree's branch comes from.
+#[derive(Clone, Copy)]
+enum Source<'a> {
+    /// The branch by name: local, or taken from a remote with `preferred` first;
+    /// a new branch off `fallback` where no remote has it once fetched.
+    Named {
+        fallback: Option<&'a str>,
+        preferred: &'a str,
+    },
+    /// A new branch off `base`, which is on `remote`.
+    New { base: &'a str, remote: &'a str },
+}
+
+impl<'a> Source<'a> {
+    fn remote(self) -> &'a str {
+        match self {
+            Source::Named { preferred, .. } => preferred,
+            Source::New { remote, .. } => remote,
+        }
+    }
+}
+
+/// What `git worktree add` starts the branch from.
+enum Start {
+    Local,
+    NewOff(String),
+    Tracking(String),
+}
+
+impl Start {
+    fn git_start(&self) -> Option<&str> {
+        match self {
+            Start::Local => None,
+            Start::NewOff(start) | Start::Tracking(start) => Some(start),
+        }
+    }
+}
+
+/// Fetches what `source` names, unless `fetched` covers it, then decides where
+/// the branch starts. A branch that isn't local is looked for only once
+/// `preferred` is fresh, and again once the remotes holding it are, so a stale
+/// ref can neither win nor refuse.
+fn fetch_start(
     branch: &str,
-    base: Option<&str>,
-    remote: &str,
+    source: Source,
     fetched: Option<&FetchedRemote>,
-) -> Vec<git::FetchOutcome> {
-    if base.is_some() {
-        return vec![fetch_unless_covered(None, remote, fetched)];
+    outcomes: &mut Vec<git::FetchOutcome>,
+) -> AppResult<Start> {
+    let mut fetch = |remote: &str| outcomes.push(fetch_unless_covered(None, remote, fetched));
+    let (fallback, preferred) = match source {
+        Source::Named {
+            fallback,
+            preferred,
+        } => (fallback, preferred),
+        Source::New { base, remote } => {
+            fetch(remote);
+            return Ok(Start::NewOff(base.to_string()));
+        }
+    };
+    if git::is_local_branch(branch)? {
+        fetch(&git::current_remote(Some(branch)));
+        return Ok(Start::Local);
     }
-    if git::is_local_branch(branch) {
-        let own = git::current_remote(Some(branch));
-        return vec![fetch_unless_covered(None, &own, fetched)];
+    if git::remote_url(None, preferred).is_some() {
+        fetch(preferred);
     }
-    let mut outcomes = Vec::new();
-    if git::remote_url(None, remote).is_some() {
-        outcomes.push(fetch_unless_covered(None, remote, fetched));
+    let holders = match git::remote_holding(branch, preferred) {
+        Ok(Some(holder)) if holder == preferred => {
+            return Ok(Start::Tracking(git::remote_ref(preferred, branch)));
+        }
+        Ok(Some(holder)) => vec![holder],
+        Ok(None) => Vec::new(),
+        Err(Error::AmbiguousRemote { remotes, .. }) => remotes,
+        Err(e) => return Err(e),
+    };
+    for holder in &holders {
+        fetch(holder);
     }
-    if let Ok(Some(source)) = git::remote_holding(branch, remote)
-        && source != remote
-    {
-        outcomes.push(fetch_unless_covered(None, &source, fetched));
+    let holder = if holders.is_empty() {
+        None
+    } else {
+        git::remote_holding(branch, preferred)?
+    };
+    match (holder, fallback) {
+        (Some(holder), _) => Ok(Start::Tracking(git::remote_ref(&holder, branch))),
+        (None, Some(base)) => Ok(Start::NewOff(base.to_string())),
+        (None, None) => Err(Error::Git {
+            command: "worktree add".into(),
+            message: format!("no remote has {branch}"),
+        }),
     }
-    outcomes
+}
+
+/// The default branch on `remote`, which a new branch is cut from.
+fn new_branch_base(remote: &str) -> AppResult<String> {
+    let default = git::default_branch(remote).ok_or_else(|| Error::Git {
+        command: "worktree add".into(),
+        message: format!("no default branch on {remote}; cannot pick a base"),
+    })?;
+    Ok(format!("{remote}/{default}"))
 }
 
 /// Which branch the user picked, by name, and what picking it claimed. Deciding
@@ -478,8 +561,8 @@ fn resolve_target(
         return Ok(Action::CreateForBranch(name.to_string()));
     }
     match existence {
-        // A refusal can be stale until `origin` is fetched, so it is left to
-        // `create_worktree`.
+        // Read before `origin` is fetched, a refusal may be stale, so it stops
+        // nothing here.
         Existence::MayCreate
             if !matches!(git::remote_holding(name, git::DEFAULT_REMOTE), Ok(None)) =>
         {

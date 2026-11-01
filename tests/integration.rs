@@ -1022,7 +1022,7 @@ fn worktree_add_sets_upstream_with_auto_setup_merge_off() {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
 
     let _cwd = cwd_at(&work);
-    perch::git::worktree_add(&path, "feature", Some("origin/main"), "origin").unwrap();
+    perch::git::worktree_add(&path, "feature", Some("origin/main")).unwrap();
 
     let upstream = git(
         &work,
@@ -7586,6 +7586,39 @@ fn wt_takes_a_branch_from_the_only_remote_without_fetching_origin() {
         "stderr: {}",
         stderr_str(&output)
     );
+    assert_eq!(upstream_of(&work, "x"), "upstream/x");
+}
+
+/// Deletes `branch` on `remote`'s server, leaving the remote-tracking ref.
+fn delete_on_server(parent: &Path, remote: &str, branch: &str) {
+    let bare = parent.join(format!("{remote}.git"));
+    git(
+        &bare,
+        &["update-ref", "-d", &format!("refs/heads/{branch}")],
+    );
+}
+
+#[test]
+fn wt_creates_a_new_branch_where_only_a_stale_ref_had_the_name() {
+    let (_bare, parent, work) = setup_with_parent();
+    publish_branch_on(parent.path(), &work, &["upstream"], "x");
+    delete_on_server(parent.path(), "upstream", "x");
+
+    let output = perch_args(&work, &["wt", "x"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert_eq!(upstream_of(&work, "x"), "origin/main");
+}
+
+#[test]
+fn wt_is_not_refused_over_a_stale_ref() {
+    let (_bare, parent, work) = setup_with_parent();
+    publish_branch_on(parent.path(), &work, &["fork", "upstream"], "x");
+    delete_on_server(parent.path(), "fork", "x");
+
+    let output = perch_args(&work, &["wt", "x"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
     assert_eq!(upstream_of(&work, "x"), "upstream/x");
 }
 

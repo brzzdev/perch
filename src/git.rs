@@ -260,29 +260,33 @@ pub fn checkout(branch: &str, preferred: &str) -> AppResult<()> {
 /// Chosen here rather than left to git, which refuses a name on several
 /// remotes and follows `checkout.defaultRemote` past `preferred`.
 fn remote_start_point(branch: &str, preferred: &str) -> AppResult<Option<String>> {
-    if is_local_branch(branch) {
+    if is_local_branch(branch)? {
         return Ok(None);
     }
-    Ok(remote_holding(branch, preferred)?.map(|remote| format!("refs/remotes/{remote}/{branch}")))
+    Ok(remote_holding(branch, preferred)?.map(|remote| remote_ref(&remote, branch)))
+}
+
+pub fn is_local_branch(branch: &str) -> AppResult<bool> {
+    ref_present(&format!("refs/heads/{branch}"))
 }
 
 #[must_use]
-pub fn is_local_branch(branch: &str) -> bool {
-    ref_exists(&format!("refs/heads/{branch}"))
+pub fn remote_ref(remote: &str, branch: &str) -> String {
+    format!("refs/remotes/{remote}/{branch}")
 }
 
-/// `preferred` where it has `branch`, else the one remote that does; several
-/// are refused rather than guessed between.
+/// `preferred` where it has `branch`, else the one remote that does; several,
+/// or a ref that can't be read, are refused rather than guessed past.
 pub fn remote_holding(branch: &str, preferred: &str) -> AppResult<Option<String>> {
-    let holds = |remote: &str| remote_branch_exists(remote, branch);
-    if holds(preferred) {
+    if ref_present(&remote_ref(preferred, branch))? {
         return Ok(Some(preferred.to_string()));
     }
-    let mut holding: Vec<String> = run(&["remote"])?
-        .lines()
-        .filter(|remote| holds(remote))
-        .map(String::from)
-        .collect();
+    let mut holding = Vec::new();
+    for remote in run(&["remote"])?.lines() {
+        if ref_present(&remote_ref(remote, branch))? {
+            holding.push(remote.to_string());
+        }
+    }
     if holding.len() > 1 {
         holding.sort();
         return Err(Error::AmbiguousRemote {
@@ -294,13 +298,20 @@ pub fn remote_holding(branch: &str, preferred: &str) -> AppResult<Option<String>
     Ok(holding.pop())
 }
 
-/// True when `refname` names a ref exactly; unlike [`resolve`], revision syntax
-/// such as `main~1` matches nothing.
-fn ref_exists(refname: &str) -> bool {
-    git_cmd(None)
+/// Whether `refname` names a ref exactly; unlike [`resolve`], revision syntax
+/// such as `main~1` matches nothing. A ref that is there but broken is an error.
+fn ref_present(refname: &str) -> AppResult<bool> {
+    let output = git_cmd(None)
         .args(["show-ref", "--verify", "--quiet", refname])
-        .status()
-        .is_ok_and(|s| s.success())
+        .output()?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(Error::Git {
+            command: "show-ref".to_string(),
+            message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        }),
+    }
 }
 
 /// Which submodules a fetch recurses into.
@@ -620,7 +631,7 @@ pub fn fast_forward_merge(
 /// True if `<remote>/<branch>` exists as a remote-tracking ref.
 #[must_use]
 pub fn remote_branch_exists(remote: &str, branch: &str) -> bool {
-    ref_exists(&format!("refs/remotes/{remote}/{branch}"))
+    ref_present(&remote_ref(remote, branch)).unwrap_or(false)
 }
 
 /// `(ahead, behind)` for `HEAD` relative to `<remote>/<branch>`: how many
@@ -1766,21 +1777,14 @@ pub fn worktree_for_branch(worktrees: &[Worktree], branch: &str) -> Option<Workt
         .cloned()
 }
 
-/// Add a worktree at `path` for `branch`. If `base` is `Some`, create the
-/// branch from `base` (e.g. `origin/main`); if `None`, check out an existing
-/// local branch, or create it as [`checkout`] does.
-pub fn worktree_add(
-    path: &Path,
-    branch: &str,
-    base: Option<&str>,
-    preferred: &str,
-) -> AppResult<()> {
+/// Add a worktree at `path` for `branch`. If `start` is `Some`, create the
+/// branch from it (e.g. `origin/main`); if `None`, check out the local branch.
+pub fn worktree_add(path: &Path, branch: &str, start: Option<&str>) -> AppResult<()> {
     let path_str = path_to_str(path)?;
     let build_args = || -> AppResult<Vec<String>> {
-        let start = match base {
-            Some(base) if !is_local_branch(branch) => Some(base.to_string()),
-            Some(_) => None,
-            None => remote_start_point(branch, preferred)?,
+        let start = match start {
+            Some(_) if is_local_branch(branch)? => None,
+            start => start,
         };
         // `--track` rather than relying on git's default: `branch.autoSetupMerge`
         // can be off, and the upstream a new branch carries is what tells
@@ -1789,7 +1793,7 @@ pub fn worktree_add(
         let mut args = vec!["worktree".to_string(), "add".to_string()];
         match start {
             Some(start) => {
-                args.extend(["--track", "-b", branch, path_str, &start].map(String::from));
+                args.extend(["--track", "-b", branch, path_str, start].map(String::from));
             }
             None => args.extend([path_str, branch].map(String::from)),
         }

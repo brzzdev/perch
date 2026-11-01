@@ -214,8 +214,10 @@ pub fn stash_pop() -> AppResult<StashPopOutcome> {
     })
 }
 
-pub fn checkout(branch: &str) -> AppResult<()> {
-    let start = remote_start_point(branch)?;
+/// Checks `branch` out, creating it from `preferred` or another remote by
+/// [`remote_holding`] when it isn't local.
+pub fn checkout(branch: &str, preferred: &str) -> AppResult<()> {
+    let start = remote_start_point(branch, preferred)?;
     let args: Vec<&str> = match &start {
         Some(start) => vec!["checkout", "--quiet", "--track", "-b", branch, start],
         None => vec!["checkout", "--quiet", branch],
@@ -255,24 +257,26 @@ pub fn checkout(branch: &str) -> AppResult<()> {
     Ok(())
 }
 
-/// The remote-tracking ref a branch checked out by name starts from when it
-/// isn't local, rather than git's guess, which refuses a name on several
-/// remotes and follows `checkout.defaultRemote` past `origin`. `None` when the
-/// branch is local or no remote has it.
-fn remote_start_point(branch: &str) -> AppResult<Option<String>> {
-    if resolve(None, &format!("refs/heads/{branch}")).is_some() {
-        return Ok(None);
-    }
-    Ok(remote_holding(branch)?.map(|remote| format!("{remote}/{branch}")))
+/// Chosen here rather than left to git, which refuses a name on several
+/// remotes and follows `checkout.defaultRemote` past `preferred`.
+fn remote_start_point(branch: &str, preferred: &str) -> AppResult<Option<String>> {
+    Ok(source_remote(branch, preferred)?.map(|remote| format!("refs/remotes/{remote}/{branch}")))
 }
 
-/// The remote a branch that isn't local is taken from: `origin` where it has
-/// the branch, else the one remote that does. Several without `origin` is
-/// refused rather than guessed between.
-pub fn remote_holding(branch: &str) -> AppResult<Option<String>> {
-    let holds = |remote: &str| resolve(None, &format!("refs/remotes/{remote}/{branch}")).is_some();
-    if holds(DEFAULT_REMOTE) {
-        return Ok(Some(DEFAULT_REMOTE.to_string()));
+/// The remote [`remote_holding`] picks for `branch`, or `None` when it is local.
+pub fn source_remote(branch: &str, preferred: &str) -> AppResult<Option<String>> {
+    if ref_exists(&format!("refs/heads/{branch}")) {
+        return Ok(None);
+    }
+    remote_holding(branch, preferred)
+}
+
+/// `preferred` where it has `branch`, else the one remote that does; several
+/// are refused rather than guessed between.
+pub fn remote_holding(branch: &str, preferred: &str) -> AppResult<Option<String>> {
+    let holds = |remote: &str| ref_exists(&format!("refs/remotes/{remote}/{branch}"));
+    if holds(preferred) {
+        return Ok(Some(preferred.to_string()));
     }
     let mut holding: Vec<String> = run(&["remote"])?
         .lines()
@@ -283,10 +287,20 @@ pub fn remote_holding(branch: &str) -> AppResult<Option<String>> {
         holding.sort();
         return Err(Error::AmbiguousRemote {
             branch: branch.to_string(),
+            preferred: preferred.to_string(),
             remotes: holding,
         });
     }
     Ok(holding.pop())
+}
+
+/// True when `refname` names a ref exactly; unlike [`resolve`], revision syntax
+/// such as `main~1` matches nothing.
+fn ref_exists(refname: &str) -> bool {
+    git_cmd(None)
+        .args(["show-ref", "--verify", "--quiet", refname])
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
 /// Which submodules a fetch recurses into.
@@ -1760,23 +1774,36 @@ pub fn worktree_for_branch(worktrees: &[Worktree], branch: &str) -> Option<Workt
 
 /// Add a worktree at `path` for `branch`. If `base` is `Some`, create the
 /// branch from `base` (e.g. `origin/main`); if `None`, check out an existing
-/// local branch, or create it from [`remote_start_point`].
-pub fn worktree_add(path: &Path, branch: &str, base: Option<&str>) -> AppResult<()> {
+/// local branch, or create it as [`checkout`] does.
+pub fn worktree_add(
+    path: &Path,
+    branch: &str,
+    base: Option<&str>,
+    preferred: &str,
+) -> AppResult<()> {
     let path_str = path_to_str(path)?;
-    let start = match base {
-        Some(base) => Some(base.to_string()),
-        None => remote_start_point(branch)?,
-    };
-    // `--track` rather than relying on git's default: `branch.autoSetupMerge`
-    // can be off, and the upstream a new branch carries is what tells
-    // `stale_branches` it was branched off the anchor rather than merged
-    // into it.
-    let args: Vec<&str> = match &start {
-        Some(start) => vec!["worktree", "add", "--track", "-b", branch, path_str, start],
-        None => vec!["worktree", "add", path_str, branch],
+    let args = || -> AppResult<Vec<String>> {
+        let start = match base {
+            Some(base) => Some(base.to_string()),
+            None => remote_start_point(branch, preferred)?,
+        };
+        // `--track` rather than relying on git's default: `branch.autoSetupMerge`
+        // can be off, and the upstream a new branch carries is what tells
+        // `stale_branches` it was branched off the anchor rather than merged
+        // into it.
+        let args = match start {
+            Some(start) => vec!["worktree", "add", "--track", "-b", branch, path_str, &start]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+            None => ["worktree", "add", path_str, branch]
+                .map(String::from)
+                .to_vec(),
+        };
+        Ok(args)
     };
 
-    let output = Command::new("git").args(&args).output()?;
+    let output = Command::new("git").args(args()?).output()?;
     if output.status.success() {
         return Ok(());
     }
@@ -1785,9 +1812,11 @@ pub fn worktree_add(path: &Path, branch: &str, base: Option<&str>) -> AppResult<
     // blocks re-adding ("missing but already registered"). Clear the dead
     // registrations and try once more.
     let stderr = String::from_utf8_lossy(&output.stderr);
+    // Read the arguments again: the refused attempt may have created a
+    // remote-only branch, which a second `-b` would then refuse.
     if is_stale_worktree_error(&stderr) {
         let _ = worktree_prune();
-        let retry = Command::new("git").args(&args).output()?;
+        let retry = Command::new("git").args(args()?).output()?;
         if retry.status.success() {
             return Ok(());
         }

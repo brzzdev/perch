@@ -171,16 +171,17 @@ fn run_verb(verb: Verb, target: Option<&str>) -> AppResult<()> {
     // from this same worktree, and a *Held* one with submodules is never covered.
     let prefetch = (target.is_some() || is_interactive()).then(|| Prefetch::start(&remote));
 
-    let target = if let Some(request) = request {
-        look_up_head(request)?
+    // A picked row was listed from `remote`, so that is where it is taken from.
+    let (target, preferred) = if let Some(request) = request {
+        (look_up_head(request)?, git::DEFAULT_REMOTE)
     } else if let Some(name) = target {
-        name.to_string()
+        (name.to_string(), git::DEFAULT_REMOTE)
     } else {
         let listed = live_worktrees()?;
         let Some(picked) = select_branch(old_branch.as_deref(), &remote, &listed, verb)? else {
             return Ok(());
         };
-        picked
+        (picked, remote.as_str())
     };
 
     // Joined before the *Held* check and any stash, so both see the fetched
@@ -237,14 +238,20 @@ fn run_verb(verb: Verb, target: Option<&str>) -> AppResult<()> {
         git::stash_push()?;
     }
 
-    let result = switch_and_update(&target, old_branch.as_deref(), &remote, fetched.as_ref());
+    let result = switch_and_update(
+        &target,
+        preferred,
+        old_branch.as_deref(),
+        &remote,
+        fetched.as_ref(),
+    );
 
     if stashed {
         if result.is_err()
             && let Some(old) = old_branch.as_deref()
         {
             eprintln!("Switching back to {old} and restoring stashed changes.");
-            let _ = git::checkout(old);
+            let _ = git::checkout(old, &remote);
         }
         report_stash_pop();
     }
@@ -449,6 +456,7 @@ fn prompt_keep_discard(
 /// and updates a `target` that tracks no remote of its own.
 fn switch_and_update(
     target: &str,
+    preferred: &str,
     old_branch: Option<&str>,
     remote: &str,
     fetched: Option<&FetchedRemote>,
@@ -456,7 +464,7 @@ fn switch_and_update(
     let already_on_target = old_branch == Some(target);
 
     if !already_on_target {
-        git::checkout(target)?;
+        git::checkout(target, preferred)?;
     }
 
     // Read after the checkout, which is what sets up tracking for a branch

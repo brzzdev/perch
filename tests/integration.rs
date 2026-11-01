@@ -1022,7 +1022,7 @@ fn worktree_add_sets_upstream_with_auto_setup_merge_off() {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
 
     let _cwd = cwd_at(&work);
-    perch::git::worktree_add(&path, "feature", Some("origin/main")).unwrap();
+    perch::git::worktree_add(&path, "feature", Some("origin/main"), "origin").unwrap();
 
     let upstream = git(
         &work,
@@ -7487,6 +7487,82 @@ fn a_typed_name_on_several_remotes_but_not_origin_is_refused() {
         );
         assert!(!local_branch_exists(&work, "x"), "{verb}");
     }
+}
+
+#[test]
+fn a_branch_named_like_a_remote_ref_does_not_shadow_the_start_point() {
+    for verb in ["br", "wt"] {
+        let (_bare, parent, work) = setup_with_parent();
+        publish_branch_on(parent.path(), &work, &["origin"], "x");
+        git(&work, &["branch", "origin/x", "main"]);
+
+        let output = perch_args(&work, &[verb, "x"]);
+
+        assert!(output.status.success(), "{verb}: {}", stderr_str(&output));
+        let upstream = git(
+            &work,
+            &["for-each-ref", "--format=%(upstream)", "refs/heads/x"],
+        );
+        assert_eq!(
+            stdout_str(&upstream).trim(),
+            "refs/remotes/origin/x",
+            "{verb}"
+        );
+    }
+}
+
+#[test]
+fn a_revision_is_not_taken_for_a_remote_branch() {
+    let (_bare, parent, work) = setup_with_parent();
+    commit_in(&work, "second.txt", "second");
+    git(&work, &["push", "origin", "main"]);
+
+    let output = perch_args(&work, &["wt", "main~1"]);
+
+    assert!(!output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(
+        !parent
+            .path()
+            .join("worktrees")
+            .join("repo")
+            .join("main~1")
+            .exists()
+    );
+}
+
+#[test]
+fn wt_takes_a_branch_on_another_remote_from_a_fresh_fetch_of_it() {
+    let (_bare, parent, work) = setup_with_parent();
+    publish_branch_on(parent.path(), &work, &["upstream"], "x");
+    let other = clone_bare(&parent.path().join("upstream.git"));
+    git(other.path(), &["switch", "x"]);
+    commit_in(other.path(), "later.txt", "later on x");
+    git(other.path(), &["push", "origin", "x"]);
+    let pushed = stdout_str(&git(other.path(), &["rev-parse", "HEAD"]));
+
+    let output = perch_args(&work, &["wt", "x"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    let worktree = parent.path().join("worktrees").join("repo").join("x");
+    assert_eq!(stdout_str(&git(&worktree, &["rev-parse", "HEAD"])), pushed);
+}
+
+#[test]
+fn wt_creates_a_remote_branch_where_a_deleted_worktree_is_still_registered() {
+    let (_bare, parent, work) = setup_with_parent();
+    publish_branch_on(parent.path(), &work, &["origin"], "x");
+    let path = parent.path().join("worktrees").join("repo").join("x");
+    git(
+        &work,
+        &["worktree", "add", "--detach", path.to_str().unwrap()],
+    );
+    fs::remove_dir_all(&path).unwrap();
+
+    let output = perch_args(&work, &["wt", "x"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert_eq!(upstream_of(&work, "x"), "origin/x");
+    assert!(path.exists());
 }
 
 #[test]

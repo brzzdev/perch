@@ -35,6 +35,17 @@ enum Existence {
     Requested(forge::Request),
 }
 
+impl Existence {
+    /// The remote a branch that isn't local is taken from when several have it:
+    /// the one a picked row was listed from, else `origin`.
+    fn preferred_remote(self, remote: &str) -> &str {
+        match self {
+            Existence::MustExist => remote,
+            Existence::MayCreate | Existence::Requested(_) => git::DEFAULT_REMOTE,
+        }
+    }
+}
+
 pub(crate) fn run(
     worktree_name: Option<&str>,
     target: Option<&str>,
@@ -120,12 +131,17 @@ pub(crate) fn run(
             (wt.path, branch)
         }
         Action::CreateForBranch(branch) => {
-            let branch_remote = git::current_remote(Some(branch.as_str()));
+            let preferred = existence.preferred_remote(&remote);
+            let branch_remote = match git::source_remote(&branch, preferred)? {
+                Some(source) => source,
+                None => git::current_remote(Some(branch.as_str())),
+            };
             let path = create_worktree(
                 &main.path,
                 worktree_name.unwrap_or(&branch),
                 &branch,
                 None,
+                preferred,
                 &branch_remote,
                 fetched.as_ref(),
             )?;
@@ -142,6 +158,7 @@ pub(crate) fn run(
                 worktree_name.unwrap_or(&branch),
                 &branch,
                 Some(&base),
+                &remote,
                 &remote,
                 fetched.as_ref(),
             )?;
@@ -346,6 +363,7 @@ fn create_worktree(
     worktree_name: &str,
     branch: &str,
     base: Option<&str>,
+    preferred: &str,
     remote: &str,
     fetched: Option<&FetchedRemote>,
 ) -> AppResult<PathBuf> {
@@ -357,7 +375,7 @@ fn create_worktree(
         let (spinner, _cursor) = spinner(format!("Fetching {remote}…"));
         let fetch_outcome = fetch_unless_covered(None, remote, fetched);
         spinner.set_message(format!("Creating worktree for {branch}…"));
-        let outcome = git::worktree_add(&path, branch, base);
+        let outcome = git::worktree_add(&path, branch, base, preferred);
         spinner.finish_and_clear();
         (fetch_outcome, outcome)
     };
@@ -439,7 +457,7 @@ fn resolve_target(
         return Ok(Action::CreateForBranch(name.to_string()));
     }
     match existence {
-        Existence::MayCreate if git::remote_holding(name)?.is_some() => {
+        Existence::MayCreate if git::remote_holding(name, git::DEFAULT_REMOTE)?.is_some() => {
             Ok(Action::CreateForBranch(name.to_string()))
         }
         Existence::MayCreate => Ok(Action::CreateNewBranch(name.to_string())),

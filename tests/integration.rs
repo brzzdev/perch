@@ -406,6 +406,63 @@ fn refresh_dot_already_up_to_date_reports_so() {
     );
 }
 
+/// Has the next fetch in `work` lose its lock on `origin/main`, as when a
+/// concurrent fetch moves it to `target` first. Returns the marker the hook
+/// removes as it fires. The `preparing` state needs git 2.54.
+fn lose_the_next_ref_lock_on_origin_main(work: &Path, target: &str) -> PathBuf {
+    let marker = work.join(".git/race-once");
+    fs::write(&marker, "").unwrap();
+    let hook = work.join(".git/hooks/reference-transaction");
+    fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\ncat >/dev/null\n[ \"$1\" = preparing ] || exit 0\n\
+             [ -e '{0}' ] || exit 0\nrm '{0}'\n\
+             git update-ref refs/remotes/origin/main {target}\n",
+            marker.display(),
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    marker
+}
+
+#[test]
+fn refresh_dot_retries_a_fetch_that_lost_a_ref_lock_race() {
+    let (_bare, parent, work) = setup_with_parent();
+    push_upstream_change(&work, "file.txt", "updated\n", "upstream change");
+    let upstream = remote_branch_tip(&work, "origin", "main").unwrap();
+    git(&work, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    let marker = lose_the_next_ref_lock_on_origin_main(&work, &upstream);
+
+    let (output, fetches) = perch_traced(&parent, &work, &["."]);
+
+    let stderr = stderr_str(&output);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert!(!marker.exists(), "the hook never forced the lost lock");
+    assert_eq!(fetches.len(), 2, "fetches: {fetches:?}");
+    assert!(!stderr.contains("fetch failed"), "stderr: {stderr}");
+    assert!(stderr.contains("Pulled 1 commit"), "stderr: {stderr}");
+}
+
+#[test]
+fn refresh_dot_reports_an_unreachable_remote_after_one_fetch() {
+    let (_bare, parent, work) = setup_with_parent();
+    git(
+        &work,
+        &["remote", "set-url", "origin", "/nonexistent/nowhere"],
+    );
+
+    let (output, fetches) = perch_traced(&parent, &work, &["."]);
+
+    let stderr = stderr_str(&output);
+    assert_eq!(fetches.len(), 1, "fetches: {fetches:?}");
+    assert!(
+        stderr.contains("fetch failed; results may be stale"),
+        "stderr: {stderr}"
+    );
+}
+
 #[test]
 fn refresh_dot_clean_diverge_rebases_onto_remote() {
     let (bare, work) = setup();

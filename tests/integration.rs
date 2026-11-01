@@ -2752,16 +2752,9 @@ fn a_submodule_commit_is_fetched_whatever_git_dir_names() {
         let (output, _) = fixture.run(command);
         fs::write(&dot_git, gitfile).unwrap();
 
-        assert!(
-            output.status.success(),
-            "{exported:?}: stderr: {}",
-            stderr_str(&output)
-        );
-        assert!(
-            fixture.submodule_has_recorded(),
-            "{exported:?}: stderr: {}",
-            stderr_str(&output)
-        );
+        let context = format!("{exported:?}: stderr: {}", stderr_str(&output));
+        assert!(output.status.success(), "{context}");
+        assert!(fixture.submodule_has_recorded(), "{context}");
     }
 }
 

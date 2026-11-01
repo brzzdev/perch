@@ -536,10 +536,12 @@ fn recursion_switched_off_in_checkout(
         return recursion_switched_off(config, &RECURSION_KEYS);
     }
     let checked_out = toplevel.join(".gitmodules");
+    let file = checked_out.to_string_lossy();
     // Git falls back to the index's copy where the checkout leaves it out.
-    let source = match checked_out.to_str() {
-        Some(file) if checked_out.exists() => ["--file", file],
-        _ => ["--blob", ":.gitmodules"],
+    let source = if checked_out.exists() {
+        ["--file", &file]
+    } else {
+        ["--blob", ":.gitmodules"]
     };
     let gitmodules = listed_config(dir, &source);
     recursion_switched_off(&gitmodules, &[FETCH_RECURSION_KEY])
@@ -2402,7 +2404,7 @@ fn rev_parse(dir: Option<&Path>, refname: &str) -> AppResult<String> {
 /// The environment variables that choose the repository, or part of it, in
 /// place of the directory git runs in: git's own `local_repo_env`, less the
 /// config it passes on to a submodule.
-pub(crate) const REPOSITORY_VARIABLES: [&str; 13] = [
+const REPOSITORY_VARIABLES: [&str; 13] = [
     "GIT_ALTERNATE_OBJECT_DIRECTORIES",
     "GIT_COMMON_DIR",
     "GIT_CONFIG",

@@ -315,12 +315,8 @@ fn refresh_current(remote: &str, current: &str) -> AppResult<()> {
         let (spinner, _cursor) = spinner(format!("Fetching {remote}…"));
 
         let fetch_outcome = git::fetch(None, remote);
+        let submodule_outcome = git::fetch_missing_submodule_commits(None, &remote_ref);
         let has_remote = git::remote_branch_exists(remote, current);
-        let submodule_outcome = if has_remote {
-            git::fetch_missing_submodule_commits(None, &remote_ref)
-        } else {
-            git::FetchOutcome::Ok
-        };
 
         spinner.finish_and_clear();
 

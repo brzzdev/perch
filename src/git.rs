@@ -449,17 +449,14 @@ fn recursion_switched_off(entries: &[String], keys: &[&str]) -> bool {
 }
 
 /// Fetches, into each submodule populated in the worktree at `dir`, the commit
-/// `commit` records for it, where that submodule's repository lacks it.
+/// `rev` records for it, where that submodule's repository lacks it.
 ///
-/// Every worktree shares the remote-tracking refs but keeps submodule
-/// repositories of its own, and git's on-demand recursion follows only the
-/// refs its own fetch moved. Once anything else has moved them, a sibling
-/// worktree's fetch or an IDE's, a fetch here recurses into nothing. So this
-/// asks of each submodule instead. A recursion switched off in config, for
-/// every submodule or for one by name, is honoured as `git fetch` would.
+/// Worktrees share remote-tracking refs but not submodule repositories, and
+/// git's on-demand recursion follows only the refs its own fetch moved. Once
+/// another fetch has moved them, a fetch here recurses into nothing.
 #[must_use]
-pub fn fetch_missing_submodule_commits(dir: Option<&Path>, commit: &str) -> FetchOutcome {
-    let declared = listed_config(dir, &["--blob", &format!("{commit}:.gitmodules")]);
+pub fn fetch_missing_submodule_commits(dir: Option<&Path>, rev: &str) -> FetchOutcome {
+    let declared = listed_config(dir, &["--blob", &format!("{rev}:.gitmodules")]);
     let paths: Vec<(&str, &str)> = declared
         .iter()
         .filter_map(|entry| {
@@ -475,11 +472,11 @@ pub fn fetch_missing_submodule_commits(dir: Option<&Path>, commit: &str) -> Fetc
     if recursion_switched_off(&config, &RECURSION_KEYS) {
         return FetchOutcome::Ok;
     }
-    let Ok(top) = run_in(dir, &["rev-parse", "--show-toplevel"]) else {
+    let Ok(toplevel) = run_in(dir, &["rev-parse", "--show-toplevel"]) else {
         return FetchOutcome::Ok;
     };
-    let top = PathBuf::from(top.trim_end_matches('\n'));
-    let recorded = gitlinks(&top, commit, paths.iter().map(|(_, path)| *path));
+    let toplevel = PathBuf::from(toplevel.trim_end_matches('\n'));
+    let recorded = gitlinks(&toplevel, rev, paths.iter().map(|(_, path)| *path));
     // Read last, config overrides `.gitmodules`, as it does for `git fetch`.
     let declared_then_config = [declared.as_slice(), config.as_slice()].concat();
 
@@ -492,12 +489,12 @@ pub fn fetch_missing_submodule_commits(dir: Option<&Path>, commit: &str) -> Fetc
         let Some(recorded) = recorded.get(path) else {
             continue;
         };
-        let repository = top.join(path);
+        let repository = toplevel.join(path);
         if !repository.join(".git").exists() {
             continue;
         }
-        if let Err(detail) = fetch_submodule_commit(&repository, recorded) {
-            failures.push(format!("submodule {path}: {detail}"));
+        if let Err(error) = fetch_submodule_commit(&repository, recorded) {
+            failures.push(format!("submodule {path}: {error}"));
         }
     }
     if failures.is_empty() {
@@ -507,16 +504,18 @@ pub fn fetch_missing_submodule_commits(dir: Option<&Path>, commit: &str) -> Fetc
     }
 }
 
-/// The commit `commit` records at each of `paths` that is a gitlink, by path.
+/// The commit `rev` records at each of `paths` that is a gitlink, by path.
 fn gitlinks<'a>(
-    top: &Path,
-    commit: &str,
+    toplevel: &Path,
+    rev: &str,
     paths: impl Iterator<Item = &'a str>,
 ) -> HashMap<String, String> {
-    let Ok(output) = git_cmd(Some(top))
-        .args(["--literal-pathspecs", "ls-tree", "-z", commit, "--"])
+    let Some(output) = git_cmd(Some(toplevel))
+        .args(["--literal-pathspecs", "ls-tree", "-z", rev, "--"])
         .args(paths)
         .output()
+        .ok()
+        .filter(|output| output.status.success())
     else {
         return HashMap::new();
     };
@@ -532,32 +531,27 @@ fn gitlinks<'a>(
 
 /// Fetches `commit` into the submodule repository at `repository` unless it is
 /// there already. As git's own recursion does, it fetches what the refspec
-/// brings first, and asks for the commit by name only if that left it out.
-fn fetch_submodule_commit(repository: &Path, commit: &str) -> Result<(), String> {
+/// brings first, and asks for the commit by name where that left it out, even
+/// where that fetch failed.
+fn fetch_submodule_commit(repository: &Path, commit: &str) -> AppResult<()> {
     let object = format!("{commit}^{{commit}}");
     let has_commit = || run_in(Some(repository), &["cat-file", "-e", &object]).is_ok();
     if has_commit() {
         return Ok(());
     }
-    fetch_into(repository, &[])?;
+    let refspec_fetch = run_in(Some(repository), &["fetch", "--quiet"]);
     if has_commit() {
         return Ok(());
     }
     let branch = current_branch(Some(repository)).ok().flatten();
     let remote = current_remote(Some(repository), branch.as_deref());
-    fetch_into(repository, &[&remote, commit])
-}
-
-fn fetch_into(repository: &Path, args: &[&str]) -> Result<(), String> {
-    let output = git_cmd(Some(repository))
-        .args(["fetch", "--quiet"])
-        .args(args)
-        .output()
-        .map_err(|error| error.to_string())?;
-    if output.status.success() {
-        return Ok(());
+    match (
+        run_in(Some(repository), &["fetch", "--quiet", &remote, commit]),
+        refspec_fetch,
+    ) {
+        (Ok(_), _) => Ok(()),
+        (Err(_), Err(first)) | (Err(first), Ok(_)) => Err(first),
     }
-    Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
 }
 
 /// The key of a [`config_entries`] entry.

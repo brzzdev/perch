@@ -2507,6 +2507,9 @@ fn wt_still_fetches_a_worktree_whose_origin_points_elsewhere() {
 /// submodule's remote.
 #[derive(Clone, Copy, Debug)]
 enum Recorded {
+    /// Outside the refspec too, which also names a branch the remote lacks,
+    /// so the submodule's plain fetch fails.
+    BehindAFailingFetch,
     OnABranch,
     OutsideTheRefspec,
 }
@@ -2517,11 +2520,11 @@ enum Recorded {
 /// shared refs are where the worktree's own fetch would move them.
 struct LeftBehind {
     _bare: TempDir,
-    parent: TempDir,
     _submodule: TempDir,
+    parent: TempDir,
+    recorded: String,
     work: PathBuf,
     worktree: PathBuf,
-    recorded: String,
 }
 
 /// Submodules clone and fetch over the file transport only when allowed.
@@ -2538,7 +2541,18 @@ fn submodule_left_behind(recorded: Recorded) -> LeftBehind {
     let sub_tip = stdout_str(&git(submodule.path(), &["rev-parse", "HEAD"]))
         .trim()
         .to_string();
-    if let Recorded::OutsideTheRefspec = recorded {
+    if let Recorded::BehindAFailingFetch = recorded {
+        git(
+            &worktree.join("module"),
+            &[
+                "config",
+                "--add",
+                "remote.origin.fetch",
+                "+refs/heads/gone:refs/remotes/origin/gone",
+            ],
+        );
+    }
+    if !matches!(recorded, Recorded::OnABranch) {
         git(
             submodule.path(),
             &["update-ref", "refs/pinned/ahead", "HEAD"],
@@ -2561,11 +2575,11 @@ fn submodule_left_behind(recorded: Recorded) -> LeftBehind {
 
     LeftBehind {
         _bare: bare,
-        parent,
         _submodule: submodule,
+        parent,
+        recorded: sub_tip,
         work,
         worktree,
-        recorded: sub_tip,
     }
 }
 
@@ -2613,10 +2627,14 @@ enum Run {
 /// once another fetch has moved them, neither `perch .` nor `perch wt`
 /// updating a worktree would reach the submodule. Perch asks of each
 /// submodule instead, and asks the remote by SHA for a commit no refspec
-/// fetches.
+/// fetches, even where the refspec fetch failed.
 #[test]
 fn a_submodule_commit_another_fetch_left_behind_is_fetched() {
-    for recorded in [Recorded::OnABranch, Recorded::OutsideTheRefspec] {
+    for recorded in [
+        Recorded::BehindAFailingFetch,
+        Recorded::OnABranch,
+        Recorded::OutsideTheRefspec,
+    ] {
         for run in [Run::Refresh, Run::UpdateWorktree] {
             let fixture = submodule_left_behind(recorded);
             let (dir, args) = match run {

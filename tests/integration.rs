@@ -4,7 +4,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
@@ -2504,9 +2504,11 @@ fn wt_still_fetches_a_worktree_whose_origin_points_elsewhere() {
 }
 
 /// Where the commit a superproject records for its submodule sits on the
-/// submodule's remote.
+/// submodule's remote, and where the superproject records it.
 #[derive(Clone, Copy, Debug)]
 enum Recorded {
+    /// On a branch, at a path the submodule moves to, away from its checkout.
+    AtAMovedPath,
     /// Outside the refspec too, which also names a branch the remote lacks,
     /// so the submodule's plain fetch fails.
     BehindAFailingFetch,
@@ -2552,7 +2554,10 @@ fn submodule_left_behind(recorded: Recorded) -> LeftBehind {
             ],
         );
     }
-    if !matches!(recorded, Recorded::OnABranch) {
+    if matches!(
+        recorded,
+        Recorded::BehindAFailingFetch | Recorded::OutsideTheRefspec
+    ) {
         git(
             submodule.path(),
             &["update-ref", "refs/pinned/ahead", "HEAD"],
@@ -2561,12 +2566,18 @@ fn submodule_left_behind(recorded: Recorded) -> LeftBehind {
     }
     let pusher = clone_bare(bare.path());
     git(pusher.path(), &["switch", "feature"]);
+    let gitlink = if let Recorded::AtAMovedPath = recorded {
+        git(pusher.path(), &["mv", "module", "moved"]);
+        "moved"
+    } else {
+        "module"
+    };
     git(
         pusher.path(),
         &[
             "update-index",
             "--cacheinfo",
-            &format!("{GITLINK_MODE},{sub_tip},module"),
+            &format!("{GITLINK_MODE},{sub_tip},{gitlink}"),
         ],
     );
     git(pusher.path(), &["commit", "-m", "advance sub"]);
@@ -2608,6 +2619,7 @@ impl LeftBehind {
         Command::new("git")
             .args(["cat-file", "-e", &format!("{}^{{commit}}", self.recorded)])
             .current_dir(self.worktree.join("module"))
+            .stderr(Stdio::null())
             .status()
             .unwrap()
             .success()
@@ -2631,6 +2643,7 @@ enum Run {
 #[test]
 fn a_submodule_commit_another_fetch_left_behind_is_fetched() {
     for recorded in [
+        Recorded::AtAMovedPath,
         Recorded::BehindAFailingFetch,
         Recorded::OnABranch,
         Recorded::OutsideTheRefspec,

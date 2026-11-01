@@ -430,6 +430,9 @@ pub fn common_dir() -> AppResult<PathBuf> {
     ))
 }
 
+/// The mode git records a submodule's commit under in its superproject's tree.
+const GITLINK_MODE: &str = "160000";
+
 /// The keys that set whether a fetch recurses into submodules at all. Git
 /// reads both into one setting, so whichever it reads last wins.
 const RECURSION_KEYS: [&str; 2] = ["fetch.recursesubmodules", "submodule.recurse"];
@@ -489,10 +492,9 @@ pub fn fetch_missing_submodule_commits(dir: Option<&Path>, rev: &str) -> FetchOu
         let Some(recorded) = recorded.get(path) else {
             continue;
         };
-        let repository = toplevel.join(path);
-        if !repository.join(".git").exists() {
+        let Some(repository) = submodule_repository(&toplevel, name, path) else {
             continue;
-        }
+        };
         if let Err(error) = fetch_submodule_commit(&repository, recorded) {
             failures.push(format!("submodule {path}: {error}"));
         }
@@ -523,17 +525,39 @@ fn gitlinks<'a>(
         .split('\0')
         .filter_map(|entry| {
             let (info, path) = entry.split_once('\t')?;
-            let recorded = info.strip_prefix("160000 commit ")?;
+            let recorded = info.strip_prefix(GITLINK_MODE)?.strip_prefix(" commit ")?;
             Some((path.to_string(), recorded.to_string()))
         })
         .collect()
+}
+
+/// Where the submodule `name` keeps its repository in the worktree at
+/// `toplevel`: checked out at `path`, or else among those git keeps by name,
+/// as it does for one the commit being moved to relocates.
+fn submodule_repository(toplevel: &Path, name: &str, path: &str) -> Option<PathBuf> {
+    let checkout = toplevel.join(path);
+    if checkout.join(".git").exists() {
+        return Some(checkout);
+    }
+    let kept = run_in(
+        Some(toplevel),
+        &[
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            &format!("modules/{name}"),
+        ],
+    )
+    .ok()?;
+    let kept = PathBuf::from(kept.trim_end_matches('\n'));
+    kept.is_dir().then_some(kept)
 }
 
 /// Fetches `commit` into the submodule repository at `repository` unless it is
 /// there already. As git's own recursion does, it fetches what the refspec
 /// brings first, and asks for the commit by name where that left it out, even
 /// where that fetch failed.
-fn fetch_submodule_commit(repository: &Path, commit: &str) -> AppResult<()> {
+fn fetch_submodule_commit(repository: &Path, commit: &str) -> Result<(), String> {
     let object = format!("{commit}^{{commit}}");
     let has_commit = || run_in(Some(repository), &["cat-file", "-e", &object]).is_ok();
     if has_commit() {
@@ -545,12 +569,13 @@ fn fetch_submodule_commit(repository: &Path, commit: &str) -> AppResult<()> {
     }
     let branch = current_branch(Some(repository)).ok().flatten();
     let remote = current_remote(Some(repository), branch.as_deref());
-    match (
-        run_in(Some(repository), &["fetch", "--quiet", &remote, commit]),
-        refspec_fetch,
-    ) {
-        (Ok(_), _) => Ok(()),
-        (Err(_), Err(first)) | (Err(first), Ok(_)) => Err(first),
+    let Err(by_sha) = run_in(Some(repository), &["fetch", "--quiet", &remote, commit]) else {
+        return Ok(());
+    };
+    let by_sha = by_sha.to_string();
+    match refspec_fetch {
+        Err(refspec) if refspec.to_string() != by_sha => Err(format!("{refspec}\n{by_sha}")),
+        _ => Err(by_sha),
     }
 }
 
@@ -1138,7 +1163,10 @@ pub fn worktree_has_initialized_submodules(path: &Path) -> Option<bool> {
         .filter(|output| output.status.success())?;
 
     for entry in output.stdout.split(|byte| *byte == b'\0') {
-        let Some(rest) = entry.strip_prefix(b"160000 ") else {
+        let Some(rest) = entry
+            .strip_prefix(GITLINK_MODE.as_bytes())
+            .and_then(|rest| rest.strip_prefix(b" "))
+        else {
             continue;
         };
         let tab = rest.iter().position(|byte| *byte == b'\t')?;

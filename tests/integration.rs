@@ -2503,6 +2503,33 @@ fn wt_still_fetches_a_worktree_whose_origin_points_elsewhere() {
     );
 }
 
+/// An inherited `GIT_DIR` and `GIT_WORK_TREE` override `-C`, which once had
+/// `wt` fast-forward the main checkout's branch in place of the worktree's.
+#[test]
+fn wt_updates_the_worktree_whatever_git_dir_names() {
+    let (_bare, parent, work) = setup_with_parent();
+    let worktree = add_worktree(&work, &parent, "feature");
+    commit_in(&worktree, "b.txt", "feature ahead");
+    git(&worktree, &["push", "origin", "feature"]);
+    git(&worktree, &["reset", "--hard", "HEAD~1"]);
+    let tip = remote_branch_tip(&worktree, "origin", "feature").unwrap();
+    let main_before = stdout_str(&git(&work, &["rev-parse", "main"]));
+
+    let output = perch_command(&work, &["wt", "feature", "--no-switch"])
+        .env("GIT_DIR", work.join(".git"))
+        .env("GIT_WORK_TREE", &work)
+        .env("PERCH_NO_HOOKS", "1")
+        .output()
+        .expect("failed to run perch");
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    let head = git(&worktree, &["rev-parse", "HEAD"]);
+    assert_eq!(stdout_str(&head).trim(), tip);
+    assert_eq!(stdout_str(&git(&work, &["rev-parse", "main"])), main_before);
+    let branch = git(&work, &["branch", "--show-current"]);
+    assert_eq!(stdout_str(&branch).trim(), "main");
+}
+
 /// Where the commit a superproject records for its submodule sits on the
 /// submodule's remote, and where the superproject records it.
 #[derive(Clone, Copy, Debug)]
@@ -2599,7 +2626,11 @@ impl LeftBehind {
     /// on and fetch the submodule whatever perch does. Returns the fetches run
     /// inside submodules alongside the output.
     fn perch(&self, dir: &Path, args: &[&str]) -> (Output, Vec<String>) {
-        let mut command = perch_command(dir, args);
+        self.run(perch_command(dir, args))
+    }
+
+    /// Like [`Self::perch`], for a command with its own environment.
+    fn run(&self, mut command: Command) -> (Output, Vec<String>) {
         command
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -2683,6 +2714,54 @@ fn a_submodule_commit_another_fetch_left_behind_is_fetched() {
                 stderr_str(&output)
             );
         }
+    }
+}
+
+/// Where perch runs with the `feature` worktree's `GIT_DIR` and `GIT_WORK_TREE`
+/// exported, as git exports them to a hook.
+#[derive(Clone, Copy, Debug)]
+enum Exported {
+    /// In the worktree.
+    FromTheWorktree,
+    /// Outside any repository, with the worktree's `.git` file gone, so only
+    /// the variables lead to its repository.
+    FromOutside,
+}
+
+/// An inherited `GIT_DIR` overrides `-C`, so perch clears it for git it runs in
+/// a submodule, while the superproject is still found through it.
+#[test]
+fn a_submodule_commit_is_fetched_whatever_git_dir_names() {
+    for exported in [Exported::FromOutside, Exported::FromTheWorktree] {
+        let fixture = submodule_left_behind(Recorded::OutsideTheRefspec);
+        let git_dir = git(&fixture.worktree, &["rev-parse", "--absolute-git-dir"]);
+        let dot_git = fixture.worktree.join(".git");
+        let gitfile = fs::read(&dot_git).unwrap();
+        let dir = match exported {
+            Exported::FromOutside => {
+                fs::remove_file(&dot_git).unwrap();
+                fixture.parent.path()
+            }
+            Exported::FromTheWorktree => &fixture.worktree,
+        };
+        let mut command = perch_command(dir, &["."]);
+        command
+            .env("GIT_DIR", stdout_str(&git_dir).trim())
+            .env("GIT_WORK_TREE", &fixture.worktree);
+
+        let (output, _) = fixture.run(command);
+        fs::write(&dot_git, gitfile).unwrap();
+
+        assert!(
+            output.status.success(),
+            "{exported:?}: stderr: {}",
+            stderr_str(&output)
+        );
+        assert!(
+            fixture.submodule_has_recorded(),
+            "{exported:?}: stderr: {}",
+            stderr_str(&output)
+        );
     }
 }
 

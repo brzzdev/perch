@@ -136,7 +136,7 @@ fn environment_resolves_per_directory() -> bool {
         .is_some_and(|path| std::env::split_paths(&path).any(|entry| entry.is_relative()));
     let relative_exec_path = std::env::var_os("GIT_EXEC_PATH")
         .is_some_and(|exec_path| Path::new(&exec_path).is_relative());
-    let picks_the_repository = REPOSITORY_VARIABLES
+    let picks_the_repository = git::REPOSITORY_VARIABLES
         .iter()
         .any(|name| std::env::var_os(name).is_some());
     runs_a_program || relative_path || relative_exec_path || picks_the_repository
@@ -145,16 +145,6 @@ fn environment_resolves_per_directory() -> bool {
 /// The environment variables through which a fetch runs a program of the
 /// user's choosing, in place of the config settings of the same purpose.
 const PROGRAM_VARIABLES: [&str; 3] = ["GIT_PROXY_COMMAND", "GIT_SSH", "GIT_SSH_COMMAND"];
-
-/// The environment variables that choose the repository, or part of it, in
-/// place of the directory git runs in.
-const REPOSITORY_VARIABLES: [&str; 5] = [
-    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-    "GIT_COMMON_DIR",
-    "GIT_DIR",
-    "GIT_OBJECT_DIRECTORY",
-    "GIT_WORK_TREE",
-];
 
 /// A remote this run has already fetched and reported on, handed to the steps
 /// that would otherwise fetch it again. A failed fetch earns the token too:

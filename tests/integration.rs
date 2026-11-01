@@ -2675,16 +2675,20 @@ fn a_submodule_commit_another_fetch_left_behind_is_fetched() {
 #[derive(Clone, Copy, Debug)]
 enum NoSubmoduleFetch {
     AlreadyPresent,
+    Deinitialised,
     OptedOutByName,
     RecursionSwitchedOff,
+    RecursionSwitchedOffInGitmodules,
 }
 
 #[test]
 fn a_submodule_is_not_fetched_where_present_or_opted_out() {
     for case in [
         NoSubmoduleFetch::AlreadyPresent,
+        NoSubmoduleFetch::Deinitialised,
         NoSubmoduleFetch::OptedOutByName,
         NoSubmoduleFetch::RecursionSwitchedOff,
+        NoSubmoduleFetch::RecursionSwitchedOffInGitmodules,
     ] {
         let fixture = submodule_left_behind(Recorded::OnABranch);
         let worktree = &fixture.worktree;
@@ -2697,9 +2701,22 @@ fn a_submodule_is_not_fetched_where_present_or_opted_out() {
                 worktree,
                 &["config", "submodule.module.fetchRecurseSubmodules", "false"],
             ),
+            NoSubmoduleFetch::Deinitialised => {
+                git(worktree, &["submodule", "deinit", "--force", "module"])
+            }
             NoSubmoduleFetch::RecursionSwitchedOff => {
                 git(worktree, &["config", "fetch.recurseSubmodules", "false"])
             }
+            NoSubmoduleFetch::RecursionSwitchedOffInGitmodules => git(
+                worktree,
+                &[
+                    "config",
+                    "--file",
+                    ".gitmodules",
+                    "fetch.recurseSubmodules",
+                    "false",
+                ],
+            ),
         };
 
         let (output, submodule_fetches) = fixture.perch(worktree, &["."]);

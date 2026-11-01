@@ -460,43 +460,51 @@ fn recursion_switched_off(entries: &[String], keys: &[&str]) -> bool {
 #[must_use]
 pub fn fetch_missing_submodule_commits(dir: Option<&Path>, rev: &str) -> FetchOutcome {
     let declared = listed_config(dir, &["--blob", &format!("{rev}:.gitmodules")]);
-    let paths: Vec<(&str, &str)> = declared
+    // `.gitmodules` comes from the remote, so a name or path that could reach
+    // outside the repository is dropped, as git drops it.
+    let submodules: Vec<(&str, &str)> = declared
         .iter()
         .filter_map(|entry| {
             let (key, path) = entry.split_once('\n')?;
             let name = key.strip_prefix("submodule.")?.strip_suffix(".path")?;
             Some((name, path))
         })
+        .filter(|(name, path)| stays_inside(name) && stays_inside(path))
         .collect();
-    if paths.is_empty() {
-        return FetchOutcome::Ok;
-    }
-    let config = config_entries(dir);
-    if recursion_switched_off(&config, &RECURSION_KEYS) {
+    if submodules.is_empty() {
         return FetchOutcome::Ok;
     }
     let Ok(toplevel) = run_in(dir, &["rev-parse", "--show-toplevel"]) else {
         return FetchOutcome::Ok;
     };
     let toplevel = PathBuf::from(toplevel.trim_end_matches('\n'));
-    let recorded = gitlinks(&toplevel, rev, paths.iter().map(|(_, path)| *path));
+    let config = config_entries(dir);
+    if recursion_switched_off_in_checkout(&toplevel, &config) {
+        return FetchOutcome::Ok;
+    }
+    let gitlinks = gitlinks(&toplevel, rev, submodules.iter().map(|(_, path)| *path));
     // Read last, config overrides `.gitmodules`, as it does for `git fetch`.
     let declared_then_config = [declared.as_slice(), config.as_slice()].concat();
 
     let mut failures = Vec::new();
-    for (name, path) in paths {
+    for (name, path) in submodules {
         let key = format!("submodule.{name}.fetchrecursesubmodules");
         if recursion_switched_off(&declared_then_config, &[&key]) {
             continue;
         }
-        let Some(recorded) = recorded.get(path) else {
+        // `submodule deinit` drops the URL but keeps the repository.
+        let url = format!("submodule.{name}.url");
+        if !config.iter().any(|entry| config_key(entry) == url) {
+            continue;
+        }
+        let Some(commit) = gitlinks.get(path) else {
             continue;
         };
         let Some(repository) = submodule_repository(&toplevel, name, path) else {
             continue;
         };
-        if let Err(error) = fetch_submodule_commit(&repository, recorded) {
-            failures.push(format!("submodule {path}: {error}"));
+        if let FetchOutcome::Failed(detail) = fetch_submodule_commit(&repository, commit) {
+            failures.push(format!("submodule {path}: {detail}"));
         }
     }
     if failures.is_empty() {
@@ -504,6 +512,32 @@ pub fn fetch_missing_submodule_commits(dir: Option<&Path>, rev: &str) -> FetchOu
     } else {
         FetchOutcome::Failed(failures.join("\n"))
     }
+}
+
+/// Whether `relative`, a submodule's name or path, stays inside the directory it
+/// is joined to: not empty, not absolute, and with no `..` component.
+fn stays_inside(relative: &str) -> bool {
+    !relative.is_empty()
+        && !relative.starts_with('/')
+        && relative
+            .split(['/', '\\'])
+            .all(|component| component != "..")
+}
+
+/// Whether recursion is switched off for the worktree at `toplevel`: by
+/// `config`, or, where it sets neither key, by its checked-out `.gitmodules`.
+fn recursion_switched_off_in_checkout(toplevel: &Path, config: &[String]) -> bool {
+    if last_config_entry(config, &RECURSION_KEYS).is_some() {
+        return recursion_switched_off(config, &RECURSION_KEYS);
+    }
+    // Git falls back to the index's copy where the checkout leaves it out.
+    let source = if toplevel.join(".gitmodules").exists() {
+        ["--file", ".gitmodules"]
+    } else {
+        ["--blob", ":.gitmodules"]
+    };
+    let gitmodules = listed_config(Some(toplevel), &source);
+    recursion_switched_off(&gitmodules, &["fetch.recursesubmodules"])
 }
 
 /// The commit `rev` records at each of `paths` that is a gitlink, by path.
@@ -532,13 +566,9 @@ fn gitlinks<'a>(
 }
 
 /// Where the submodule `name` keeps its repository in the worktree at
-/// `toplevel`: checked out at `path`, or else among those git keeps by name,
-/// as it does for one the commit being moved to relocates.
+/// `toplevel`: under `modules/<name>`, which follows the name wherever its
+/// checkout moves, or else in a `.git` directory checked out at `path`.
 fn submodule_repository(toplevel: &Path, name: &str, path: &str) -> Option<PathBuf> {
-    let checkout = toplevel.join(path);
-    if checkout.join(".git").exists() {
-        return Some(checkout);
-    }
     let kept = run_in(
         Some(toplevel),
         &[
@@ -550,33 +580,38 @@ fn submodule_repository(toplevel: &Path, name: &str, path: &str) -> Option<PathB
     )
     .ok()?;
     let kept = PathBuf::from(kept.trim_end_matches('\n'));
-    kept.is_dir().then_some(kept)
+    if kept.is_dir() {
+        return Some(kept);
+    }
+    let checkout = toplevel.join(path);
+    checkout.join(".git").is_dir().then_some(checkout)
 }
 
 /// Fetches `commit` into the submodule repository at `repository` unless it is
 /// there already. As git's own recursion does, it fetches what the refspec
 /// brings first, and asks for the commit by name where that left it out, even
 /// where that fetch failed.
-fn fetch_submodule_commit(repository: &Path, commit: &str) -> Result<(), String> {
+fn fetch_submodule_commit(repository: &Path, commit: &str) -> FetchOutcome {
     let object = format!("{commit}^{{commit}}");
     let has_commit = || run_in(Some(repository), &["cat-file", "-e", &object]).is_ok();
     if has_commit() {
-        return Ok(());
+        return FetchOutcome::Ok;
     }
     let refspec_fetch = run_in(Some(repository), &["fetch", "--quiet"]);
     if has_commit() {
-        return Ok(());
+        return FetchOutcome::Ok;
     }
     let branch = current_branch(Some(repository)).ok().flatten();
     let remote = current_remote(Some(repository), branch.as_deref());
     let Err(by_sha) = run_in(Some(repository), &["fetch", "--quiet", &remote, commit]) else {
-        return Ok(());
+        return FetchOutcome::Ok;
     };
     let by_sha = by_sha.to_string();
-    match refspec_fetch {
-        Err(refspec) if refspec.to_string() != by_sha => Err(format!("{refspec}\n{by_sha}")),
-        _ => Err(by_sha),
-    }
+    // Both errors, where they differ: either can be the one that explains it.
+    FetchOutcome::Failed(match refspec_fetch {
+        Err(refspec) if refspec.to_string() != by_sha => format!("{refspec}\n{by_sha}"),
+        _ => by_sha,
+    })
 }
 
 /// The key of a [`config_entries`] entry.
@@ -2391,7 +2426,7 @@ fn output_text(command: &str, output: Output) -> AppResult<String> {
 mod tests {
     use super::{
         Anchor, Ground, RECURSION_KEYS, StaleBranch, Unmerged, branch_refs, is_lost_ref_lock_error,
-        parse_track, recursion_switched_off, stale_from, unmerged_from,
+        parse_track, recursion_switched_off, stale_from, stays_inside, unmerged_from,
     };
     use std::collections::{HashMap, HashSet};
 
@@ -2451,6 +2486,22 @@ mod tests {
                 off,
                 "{entries:?}"
             );
+        }
+    }
+
+    #[test]
+    fn a_submodule_name_or_path_must_stay_inside() {
+        for (relative, inside) in [
+            ("", false),
+            ("..", false),
+            ("../../victim/.git", false),
+            ("/abs", false),
+            ("libs/..\\x", false),
+            ("libs/sub", true),
+            ("sub", true),
+            ("sub..name", true),
+        ] {
+            assert_eq!(stays_inside(relative), inside, "{relative}");
         }
     }
 

@@ -524,7 +524,7 @@ fn parse_worktree_subverb(word: &str) -> Option<WorktreeSubverb> {
 macro_rules! request_note {
     () => {
         concat!(
-            "A <branch> to go to can also be `pr:<n>` or `mr:<n>`, naming the head\n",
+            "Except with `rm`, <branch> can also be `pr:<n>` or `mr:<n>`: the head\n",
             "branch of a GitHub pull request or a GitLab merge request.\n",
         )
     };

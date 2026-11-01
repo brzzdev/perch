@@ -3,7 +3,7 @@ Usage: perch br [<branch>]    Check the branch out here
                                   Remove local branches
        perch br -- <branch>   Check out a branch named rm
 
-A <branch> to go to can also be `pr:<n>` or `mr:<n>`, naming the head
+Except with `rm`, <branch> can also be `pr:<n>` or `mr:<n>`: the head
 branch of a GitHub pull request or a GitLab merge request.
 
 Options:

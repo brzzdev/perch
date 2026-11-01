@@ -7482,7 +7482,7 @@ fn a_typed_name_on_several_remotes_but_not_origin_is_refused() {
         assert!(
             stderr_str(&output).contains(
                 "x is not on origin, and more than one remote has it; pick one with \
-                 `git switch --track fork/x` or `git switch --track upstream/x`"
+                 `git branch --track x fork/x` or `git branch --track x upstream/x`"
             ),
             "{verb}: {}",
             stderr_str(&output)
@@ -7552,18 +7552,41 @@ fn wt_takes_a_branch_on_another_remote_from_a_fresh_fetch_of_it() {
 /// Submodules switch the prefetch off, so `origin` is fetched only when the
 /// worktree is created.
 #[test]
-fn wt_prefers_an_unfetched_origin_branch_to_a_fetched_one_elsewhere() {
-    let (bare, parent, work) = setup_with_parent();
-    publish_branch_on(parent.path(), &work, &["upstream"], "x");
-    fs::write(work.join(".gitmodules"), "").unwrap();
-    let other = clone_bare(bare.path());
-    git(other.path(), &["switch", "-c", "x"]);
-    git(other.path(), &["push", "origin", "x"]);
+fn wt_prefers_an_unfetched_origin_branch_to_fetched_ones_elsewhere() {
+    for elsewhere in [&["upstream"][..], &["fork", "upstream"]] {
+        let (bare, parent, work) = setup_with_parent();
+        publish_branch_on(parent.path(), &work, elsewhere, "x");
+        fs::write(work.join(".gitmodules"), "").unwrap();
+        let other = clone_bare(bare.path());
+        git(other.path(), &["switch", "-c", "x"]);
+        git(other.path(), &["push", "origin", "x"]);
+
+        let output = perch_args(&work, &["wt", "x"]);
+
+        assert!(
+            output.status.success(),
+            "{elsewhere:?}: {}",
+            stderr_str(&output)
+        );
+        assert_eq!(upstream_of(&work, "x"), "origin/x", "{elsewhere:?}");
+    }
+}
+
+#[test]
+fn wt_takes_a_branch_from_the_only_remote_without_fetching_origin() {
+    let (_bare, parent, work) = setup_with_parent();
+    publish_branch_on(parent.path(), &work, &["origin"], "x");
+    git(&work, &["remote", "rename", "origin", "upstream"]);
 
     let output = perch_args(&work, &["wt", "x"]);
 
     assert!(output.status.success(), "stderr: {}", stderr_str(&output));
-    assert_eq!(upstream_of(&work, "x"), "origin/x");
+    assert!(
+        !stderr_str(&output).contains("fetch failed"),
+        "stderr: {}",
+        stderr_str(&output)
+    );
+    assert_eq!(upstream_of(&work, "x"), "upstream/x");
 }
 
 #[test]
@@ -7581,6 +7604,22 @@ fn wt_creates_a_remote_branch_where_a_deleted_worktree_is_still_registered() {
 
     assert!(output.status.success(), "stderr: {}", stderr_str(&output));
     assert_eq!(upstream_of(&work, "x"), "origin/x");
+    assert!(path.exists());
+}
+
+#[test]
+fn wt_creates_a_new_branch_where_a_deleted_worktree_is_still_registered() {
+    let (_bare, parent, work) = setup_with_parent();
+    let path = parent.path().join("worktrees").join("repo").join("newb");
+    git(
+        &work,
+        &["worktree", "add", "--detach", path.to_str().unwrap()],
+    );
+    fs::remove_dir_all(&path).unwrap();
+
+    let output = perch_args(&work, &["wt", "newb"]);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
     assert!(path.exists());
 }
 

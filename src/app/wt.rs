@@ -396,10 +396,8 @@ fn create_worktree(
     Ok(path)
 }
 
-/// Fetches, unless `fetched` covers it, `remote` for a new branch off `base`
-/// and a local branch's own remote. A branch that isn't local is looked for on
-/// `remote` only once that is fresh, so a stale copy elsewhere can't win, and
-/// then on whichever remote holds it; a refusal is left to `worktree_add`.
+/// A branch that isn't local is looked for only once `remote` is fresh, so a
+/// stale copy on another remote can't win over it.
 fn fetch_branch_sources(
     branch: &str,
     base: Option<&str>,
@@ -413,7 +411,10 @@ fn fetch_branch_sources(
         let own = git::current_remote(Some(branch));
         return vec![fetch_unless_covered(None, &own, fetched)];
     }
-    let mut outcomes = vec![fetch_unless_covered(None, remote, fetched)];
+    let mut outcomes = Vec::new();
+    if git::remote_url(None, remote).is_some() {
+        outcomes.push(fetch_unless_covered(None, remote, fetched));
+    }
     if let Ok(Some(source)) = git::remote_holding(branch, remote)
         && source != remote
     {
@@ -477,7 +478,11 @@ fn resolve_target(
         return Ok(Action::CreateForBranch(name.to_string()));
     }
     match existence {
-        Existence::MayCreate if git::remote_holding(name, git::DEFAULT_REMOTE)?.is_some() => {
+        // A refusal can be stale until `origin` is fetched, so it is left to
+        // `create_worktree`.
+        Existence::MayCreate
+            if !matches!(git::remote_holding(name, git::DEFAULT_REMOTE), Ok(None)) =>
+        {
             Ok(Action::CreateForBranch(name.to_string()))
         }
         Existence::MayCreate => Ok(Action::CreateNewBranch(name.to_string())),

@@ -1778,7 +1778,8 @@ pub fn worktree_add(
     let path_str = path_to_str(path)?;
     let build_args = || -> AppResult<Vec<String>> {
         let start = match base {
-            Some(base) => Some(base.to_string()),
+            Some(base) if !is_local_branch(branch) => Some(base.to_string()),
+            Some(_) => None,
             None => remote_start_point(branch, preferred)?,
         };
         // `--track` rather than relying on git's default: `branch.autoSetupMerge`
@@ -1806,8 +1807,8 @@ pub fn worktree_add(
     let stderr = String::from_utf8_lossy(&output.stderr);
     if is_stale_worktree_error(&stderr) {
         let _ = worktree_prune();
-        // Built again: the refused attempt may have created a remote-only
-        // branch, which a second `-b` would then refuse.
+        // Built again: the refused attempt may have created the branch, which a
+        // second `-b` would then refuse.
         let retry = Command::new("git").args(build_args()?).output()?;
         if retry.status.success() {
             return Ok(());

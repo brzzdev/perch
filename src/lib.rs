@@ -101,7 +101,7 @@ fn track_commands(branch: &str, remotes: &[String]) -> String {
         .iter()
         .map(|remote| {
             let start = app::shell_quote(&format!("{remote}/{branch}"));
-            format!("`git switch --track {start}`")
+            format!("`git branch --track {} {start}`", app::shell_quote(branch))
         })
         .collect();
     commands.join(" or ")

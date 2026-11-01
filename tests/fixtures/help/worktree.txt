@@ -1,6 +1,6 @@
-Usage: perch wt [<branch>] [--no-switch]
+Usage: perch wt [<branch>|pr:<n>|mr:<n>] [--no-switch]
                                   Give the branch its own worktree
-       perch wt <worktree-directory-name> <branch> [--no-switch]
+       perch wt <worktree-directory-name> <branch>|pr:<n>|mr:<n> [--no-switch]
                                   Use a custom worktree directory name
        perch wt ls            List worktrees
        perch wt rm [<branch>] Remove a worktree (deletes branch if merged)

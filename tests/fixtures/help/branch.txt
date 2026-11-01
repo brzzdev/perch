@@ -1,4 +1,5 @@
-Usage: perch br [<branch>]    Check the branch out here
+Usage: perch br [<branch>|pr:<n>|mr:<n>]
+                                  Check the branch out here
        perch br rm [<branch>] [--upstream] [--force]
                                   Remove local branches
        perch br -- <branch>   Check out a branch named rm

@@ -522,10 +522,13 @@ fn parse_worktree_subverb(word: &str) -> Option<WorktreeSubverb> {
 }
 
 const MAIN_HELP: &str = concat!(
-    "Usage: perch [<branch>]       Go to the branch, wherever it lives\n",
-    "       perch br [<branch>]    Check the branch out here\n",
-    "       perch wt [<branch>]    Give the branch its own worktree\n",
-    "       perch wt <name> <branch>\n",
+    "Usage: perch [<branch>|pr:<n>|mr:<n>]\n",
+    "                                  Go to the branch, wherever it lives\n",
+    "       perch br [<branch>|pr:<n>|mr:<n>]\n",
+    "                                  Check the branch out here\n",
+    "       perch wt [<branch>|pr:<n>|mr:<n>]\n",
+    "                                  Give the branch its own worktree\n",
+    "       perch wt <name> <branch>|pr:<n>|mr:<n>\n",
     "                                  Use a custom worktree directory name\n",
     "\n",
     "       perch .                Refresh the current branch from its remote\n",
@@ -540,7 +543,8 @@ const MAIN_HELP: &str = concat!(
 );
 
 const BRANCH_HELP: &str = concat!(
-    "Usage: perch br [<branch>]    Check the branch out here\n",
+    "Usage: perch br [<branch>|pr:<n>|mr:<n>]\n",
+    "                                  Check the branch out here\n",
     "       perch br rm [<branch>] [--upstream] [--force]\n",
     "                                  Remove local branches\n",
     "       perch br -- <branch>   Check out a branch named rm\n",
@@ -561,9 +565,9 @@ const SHELL_HELP: &str = concat!(
 );
 
 const WORKTREE_HELP: &str = concat!(
-    "Usage: perch wt [<branch>] [--no-switch]\n",
+    "Usage: perch wt [<branch>|pr:<n>|mr:<n>] [--no-switch]\n",
     "                                  Give the branch its own worktree\n",
-    "       perch wt <worktree-directory-name> <branch> [--no-switch]\n",
+    "       perch wt <worktree-directory-name> <branch>|pr:<n>|mr:<n> [--no-switch]\n",
     "                                  Use a custom worktree directory name\n",
     "       perch wt ls            List worktrees\n",
     "       perch wt rm [<branch>] Remove a worktree (deletes branch if merged)\n",

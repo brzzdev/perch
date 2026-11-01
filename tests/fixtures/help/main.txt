@@ -11,5 +11,8 @@ Usage: perch [<branch>]       Go to the branch, wherever it lives
        perch wt rm [<branch>|.]
        perch shell install    Add the shell integration to your rc file
 
+A <branch> to go to can also be `pr:<n>`, a GitHub pull request, or
+`mr:<n>`, a GitLab merge request.
+
 With the shell integration loaded, `br` and `wt` stand in for `perch br`
 and `perch wt`. Set PERCH_NO_SHORTCUTS to leave both names alone.

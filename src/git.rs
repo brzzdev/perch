@@ -273,8 +273,7 @@ pub fn fetch(dir: Option<&Path>, remote: &str, submodules: SubmoduleFetch) -> Fe
     }
 }
 
-/// Runs in the C locale, so that [`is_lost_ref_lock_error`] reads git's message
-/// untranslated.
+/// Runs in the C locale, so git's stderr can be matched by its English text.
 fn fetch_once(dir: Option<&Path>, remote: &str, submodules: SubmoduleFetch) -> FetchOutcome {
     let mut command = git_cmd(dir);
     command.env("LC_ALL", "C").args(fetch_args(remote));

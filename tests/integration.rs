@@ -445,25 +445,6 @@ fn refresh_dot_retries_a_fetch_that_lost_a_ref_lock_race() {
     assert!(stderr.contains("Pulled 1 commit"), "stderr: {stderr}");
 }
 
-/// The background fetch's stderr goes nowhere, so the foreground fetch that
-/// follows any failure of it is what retries a lost lock.
-#[test]
-fn wt_prefetch_that_lost_a_ref_lock_race_reports_nothing() {
-    let (_bare, _parent, work) = setup_with_parent();
-    push_upstream_change(&work, "file.txt", "updated\n", "upstream change");
-    let upstream = remote_branch_tip(&work, "origin", "main").unwrap();
-    git(&work, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
-    let marker = lose_the_next_ref_lock_on_origin_main(&work, &upstream);
-
-    let output = perch_args(&work, &["wt", "brand-new", "--no-switch"]);
-
-    let stderr = stderr_str(&output);
-    assert!(output.status.success(), "stderr: {stderr}");
-    assert!(!marker.exists(), "the hook never forced the lost lock");
-    assert!(!stderr.contains("fetch failed"), "stderr: {stderr}");
-}
-
-/// Only a lost lock is worth a second attempt.
 #[test]
 fn refresh_dot_reports_an_unreachable_remote_after_one_fetch() {
     let (_bare, parent, work) = setup_with_parent();

@@ -2421,10 +2421,10 @@ const REPOSITORY_VARIABLES: [&str; 13] = [
 static INHERITED_REPOSITORY: OnceLock<InheritedRepository> = OnceLock::new();
 
 struct InheritedRepository {
-    /// Its git dir and toplevel, canonicalised.
-    roots: Vec<PathBuf>,
     /// The cwd-relative variables made absolute, and the top a lone `GIT_DIR` implies.
     env: Vec<(&'static str, OsString)>,
+    /// Its git dir and toplevel, canonicalised.
+    roots: Vec<PathBuf>,
 }
 
 /// The [`REPOSITORY_VARIABLES`] git resolves from the working directory rather
@@ -2451,9 +2451,11 @@ pub fn record_inherited_repository() {
         return;
     };
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let git_dir_and_toplevel: Vec<&str> = stdout.lines().collect();
-    let roots = git_dir_and_toplevel
-        .iter()
+    let mut lines = stdout.lines();
+    let (git_dir, toplevel) = (lines.next(), lines.next());
+    let roots = [git_dir, toplevel]
+        .into_iter()
+        .flatten()
         .filter_map(|line| Path::new(line).canonicalize().ok())
         .collect();
     let mut env: Vec<(&'static str, OsString)> = CWD_RELATIVE_VARIABLES
@@ -2466,15 +2468,13 @@ pub fn record_inherited_repository() {
     // A `GIT_DIR` with no work tree takes the working directory as the top.
     let pins_the_top = env.iter().any(|(name, _)| *name == "GIT_DIR")
         && !env.iter().any(|(name, _)| *name == "GIT_WORK_TREE");
-    if pins_the_top && let [_, toplevel] = git_dir_and_toplevel.as_slice() {
+    if pins_the_top && let Some(toplevel) = toplevel {
         env.push(("GIT_WORK_TREE", OsString::from(toplevel)));
     }
-    let _ = INHERITED_REPOSITORY.set(InheritedRepository { roots, env });
+    let _ = INHERITED_REPOSITORY.set(InheritedRepository { env, roots });
 }
 
-/// A `git` command, optionally rooted in `dir` via `-C`, with the inherited
-/// repository variables cleared unless `dir` is the git dir or toplevel they
-/// lead to.
+/// A `git` command rooted in `dir`, clearing inherited repository variables unless they lead there.
 fn git_cmd(dir: Option<&Path>) -> Command {
     let mut cmd = Command::new("git");
     let Some(dir) = dir else {

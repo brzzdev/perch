@@ -261,8 +261,19 @@ pub enum SubmoduleFetch {
     Configured,
 }
 
+/// Fetches `remote`, once more where the first attempt lost a ref lock to a
+/// concurrent fetch of the same remote.
 #[must_use]
 pub fn fetch(dir: Option<&Path>, remote: &str, submodules: SubmoduleFetch) -> FetchOutcome {
+    match fetch_once(dir, remote, submodules) {
+        FetchOutcome::Failed(detail) if lost_a_ref_lock(&detail) => {
+            fetch_once(dir, remote, submodules)
+        }
+        outcome => outcome,
+    }
+}
+
+fn fetch_once(dir: Option<&Path>, remote: &str, submodules: SubmoduleFetch) -> FetchOutcome {
     let mut command = git_cmd(dir);
     command.args(fetch_args(remote));
     if submodules == SubmoduleFetch::All {
@@ -276,6 +287,15 @@ pub fn fetch(dir: Option<&Path>, remote: &str, submodules: SubmoduleFetch) -> Fe
         return FetchOutcome::Ok;
     }
     FetchOutcome::Failed(String::from_utf8_lossy(&output.stderr).trim().to_string())
+}
+
+/// Whether git refused a ref update because the ref moved after the fetch read
+/// it. A stale `.lock` file fails as "cannot lock ref" too, but with "File
+/// exists", and a retry would only fail the same way.
+fn lost_a_ref_lock(stderr: &str) -> bool {
+    stderr
+        .lines()
+        .any(|line| line.contains("cannot lock ref") && line.contains("but expected"))
 }
 
 /// Starts `git fetch` without waiting for it, for a caller with something to

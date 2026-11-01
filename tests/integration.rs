@@ -406,6 +406,61 @@ fn refresh_dot_already_up_to_date_reports_so() {
     );
 }
 
+/// Another fetch moving `origin/main` to the very commit this one wanted
+/// makes git refuse the update as a lost lock, which a second attempt clears.
+#[test]
+fn refresh_dot_retries_a_fetch_that_lost_a_ref_lock_race() {
+    let (_bare, work) = setup();
+    push_upstream_change(work.path(), "file.txt", "updated\n", "upstream change");
+    let upstream = stdout_str(&git(work.path(), &["rev-parse", "origin/main"]));
+    git(
+        work.path(),
+        &["update-ref", "refs/remotes/origin/main", "HEAD"],
+    );
+    let marker = work.path().join("race-once");
+    fs::write(&marker, "").unwrap();
+    let hook = work.path().join(".git/hooks/reference-transaction");
+    fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\ncat >/dev/null\n[ \"$1\" = preparing ] || exit 0\n\
+             [ -e '{0}' ] || exit 0\nrm '{0}'\n\
+             git update-ref refs/remotes/origin/main {1}\n",
+            marker.display(),
+            upstream.trim(),
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let output = perch(work.path(), ".");
+
+    let stderr = stderr_str(&output);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert!(!marker.exists(), "the hook never forced the lost lock");
+    assert!(!stderr.contains("fetch failed"), "stderr: {stderr}");
+    assert!(stderr.contains("Pulled 1 commit"), "stderr: {stderr}");
+}
+
+/// Only a lost lock is worth a second attempt.
+#[test]
+fn refresh_dot_reports_an_unreachable_remote_after_one_fetch() {
+    let (_bare, parent, work) = setup_with_parent();
+    git(
+        &work,
+        &["remote", "set-url", "origin", "/nonexistent/nowhere"],
+    );
+
+    let (output, fetches) = perch_traced(&parent, &work, &["."]);
+
+    let stderr = stderr_str(&output);
+    assert_eq!(fetches.len(), 1, "fetches: {fetches:?}");
+    assert!(
+        stderr.contains("fetch failed; results may be stale"),
+        "stderr: {stderr}"
+    );
+}
+
 #[test]
 fn refresh_dot_clean_diverge_rebases_onto_remote() {
     let (bare, work) = setup();

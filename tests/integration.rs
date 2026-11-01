@@ -2529,8 +2529,7 @@ fn wt_updates_the_worktree_whatever_git_dir_names() {
     assert_eq!(stdout_str(&branch).trim(), "main");
 }
 
-/// Writes, to the index at `index`, the commit `work` has checked out less
-/// `file.txt`.
+/// Fills `index` from `work`'s checked-out commit.
 fn stage_deletion_of_file_txt(work: &Path, index: impl AsRef<OsStr>) {
     for args in [
         &["read-tree", "HEAD"][..],
@@ -2819,14 +2818,14 @@ fn a_submodule_commit_another_fetch_left_behind_is_fetched() {
 /// exported.
 #[derive(Clone, Copy, Debug)]
 enum Exported {
-    /// Outside any repository, with the worktree's `.git` file gone, so only
-    /// the variables lead to its repository.
+    /// Outside any repository, the worktree's `.git` file removed.
     FromOutside,
     FromTheWorktree,
 }
 
 /// An inherited `GIT_DIR` overrides `-C`, so perch clears it for git it runs in
-/// a submodule, while the superproject is still found through it.
+/// a submodule, while the superproject is still found through it. The variables
+/// name the worktree, since `perch .` would otherwise act on the repository they name.
 #[test]
 fn a_submodule_commit_is_fetched_whatever_git_dir_names() {
     for exported in [Exported::FromOutside, Exported::FromTheWorktree] {

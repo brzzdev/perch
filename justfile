@@ -1,8 +1,6 @@
 # prettier-ignore
 
-[private]
-default:
-  just --list
+set default-list
 
 # Format the source code.
 format:

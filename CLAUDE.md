@@ -7,11 +7,6 @@ Interactive Git branch and worktree switcher with merged branch cleanup, written
 `just release <tag>` opens the version-bump PR. Run it again once that has merged, to tag and
 trigger the release build.
 
-## Style
-
-- Rust 2024 edition
-- Keep dependencies minimal
-
 ## Agent skills
 
 ### Issue tracker

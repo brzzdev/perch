@@ -166,10 +166,10 @@ release tag:
 test:
   cargo test
 
-# Install git pre-commit hooks (clippy + fmt check).
+# Install a git pre-commit hook that runs `format-check` and `lint`.
 tools:
   #!/usr/bin/env sh
   hook="$(git rev-parse --git-dir)/hooks/pre-commit"
-  printf '%s\n' '#!/usr/bin/env sh' 'set -e' 'cargo fmt --check' 'cargo clippy -- -D warnings' > "$hook"
+  printf '%s\n' '#!/usr/bin/env sh' 'set -e' 'just format-check' 'just lint' > "$hook"
   chmod +x "$hook"
   echo "Installed pre-commit hook."

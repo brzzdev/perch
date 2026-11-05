@@ -1,6 +1,6 @@
 #![expect(
     clippy::unwrap_used,
-    reason = "fixture helpers panic to fail the test that calls them"
+    reason = "test helpers panic to fail the test that calls them"
 )]
 
 use std::assert_matches;

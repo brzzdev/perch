@@ -8,6 +8,10 @@ default:
 format:
   cargo fmt
 
+# Check the source code is formatted, without rewriting it. Mirrors CI.
+format-check:
+  cargo fmt --check
+
 # Install the release binary locally.
 install: build-release
   mkdir -p ~/.local/bin
@@ -58,6 +62,10 @@ install-completions:
     *) \
       echo "Unsupported shell: $SHELL" && exit 1 ;; \
   esac
+
+# Lint the source code.
+lint:
+  cargo clippy --all-targets -- -D warnings
 
 # Build a release binary.
 build-release:

@@ -1,3 +1,8 @@
+#![expect(
+    clippy::unwrap_used,
+    reason = "fixture helpers panic to fail the test that calls them"
+)]
+
 use std::assert_matches;
 use std::env;
 use std::ffi::{OsStr, OsString};

@@ -70,23 +70,53 @@ _perch_rm_wants_target() {
   return 0
 }
 
+# Prints a word as typed with its quoting removed, without evaluating it: a
+# whole-word '…' or "…" is unwrapped, otherwise backslashes are dropped, and a
+# leading `~` stands for $HOME.
+_perch_dequote() {
+  local word=$1
+  case "$word" in
+    \'*\' | \"*\") word="${word:1:${#word}-2}" ;;
+    *) word="${word//\\/}"; word="${word/#\~/$HOME}" ;;
+  esac
+  printf '%s' "$word"
+}
+
 _perch_completions() {
+  # Readline splits words at COMP_WORDBREAKS, `=` among them, so `--hook-env
+  # K=V` arrives as `--hook-env K = V`. Rejoin the words before the cursor that
+  # no whitespace separated in the line.
+  local -a typed=()
+  local line="${COMP_LINE-${COMP_WORDS[*]}}" word gap i
+  for (( i = 0; i < COMP_CWORD; i++ )); do
+    word="${COMP_WORDS[i]}"
+    gap="${line%%[![:space:]]*}"
+    line="${line#"$gap"}"
+    if (( i > 0 )) && [[ -z "$gap" ]]; then
+      typed[${#typed[@]}-1]+="$word"
+    else
+      typed+=("$word")
+    fi
+    line="${line#"$word"}"
+  done
+  typed+=("${COMP_WORDS[COMP_CWORD]}")
+
   # `br` and `wt` are the shell wrapper's shorthand for `perch br` and `perch wt`,
   # so every rule below reads a word list with the verb spelled out. One offset
   # is all that separates the three names.
   local -a cmdline
-  local pos name="${COMP_WORDS[0]##*/}"
+  local pos name="${typed[0]##*/}"
   case "$name" in
     br | wt)
       # The registration below was made when this file loaded, and a name can be
       # taken back after that. Re-read it here, where completion actually runs.
       _perch_owns "$name" || return
-      cmdline=(perch "$name" "${COMP_WORDS[@]:1}")
-      pos=$(( COMP_CWORD + 1 ))
+      cmdline=(perch "$name" "${typed[@]:1}")
+      pos=${#typed[@]}
       ;;
     *)
-      cmdline=("${COMP_WORDS[@]}")
-      pos=$COMP_CWORD
+      cmdline=("${typed[@]}")
+      pos=$(( ${#typed[@]} - 1 ))
       ;;
   esac
 
@@ -107,7 +137,7 @@ _perch_completions() {
   # count from it and the binary still answers for the same run.
   local -a _perch_global_options=()
   while (( pos > 2 )) && [[ "${cmdline[1]}" == -C || "${cmdline[1]}" == --hook-env ]]; do
-    _perch_global_options+=("${cmdline[1]}" "${cmdline[2]/#\~/$HOME}")
+    _perch_global_options+=("${cmdline[1]}" "$(_perch_dequote "${cmdline[2]}")")
     cmdline=("${cmdline[0]}" "${cmdline[@]:3}")
     (( pos -= 2 ))
   done

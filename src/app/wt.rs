@@ -216,18 +216,17 @@ pub(crate) fn run_ls() -> AppResult<()> {
     Ok(())
 }
 
-pub(crate) fn run_rm(options: &WorktreeRemoval) -> AppResult<()> {
+pub(crate) fn run_rm(options: &WorktreeRemoval, shell_directory: Option<PathBuf>) -> AppResult<()> {
     let worktrees = git::worktree_list()?;
     let cwd = env::current_dir()
         .ok()
         .and_then(|dir| dir.canonicalize().ok());
+    let shell_directory = shell_directory.and_then(|dir| dir.canonicalize().ok());
     let forcing = git::Forcing::from(options.force());
-    let assessment = removal::assess(removal::Request::Worktrees(removal::WorktreeRequest::new(
-        worktrees,
-        cwd,
-        options.target(),
-        forcing,
-    )))?;
+    let assessment = removal::assess(removal::Request::Worktrees(
+        removal::WorktreeRequest::new(worktrees, cwd, options.target(), forcing)
+            .with_shell_directory(shell_directory),
+    ))?;
     if assessment.offers().is_empty() {
         eprintln!("No worktrees to remove.");
         return Ok(());

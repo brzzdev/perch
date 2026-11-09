@@ -126,10 +126,11 @@ impl Error {
 
 pub fn run(args: &[String]) -> AppResult<()> {
     let command_line = grammar::parse_command_line(args)?;
-    if let Some(path) = command_line.directory {
+    let shell_directory = std::env::current_dir().ok();
+    for path in command_line.directories {
         std::env::set_current_dir(&path).map_err(|source| Error::Directory { path, source })?;
     }
     git::record_inherited_repository();
     app::hook::set_environment(command_line.hook_environment);
-    app::run_invocation(command_line.invocation)
+    app::run_invocation(command_line.invocation, shell_directory)
 }

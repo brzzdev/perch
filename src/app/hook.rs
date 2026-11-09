@@ -19,7 +19,7 @@ use super::warn;
 use crate::git;
 use crate::grammar::HookVariable;
 
-/// The `--hook-env` pairs every hook this run fires is given.
+/// The `--hook-env` pairs given to every hook this run fires.
 static ENVIRONMENT: OnceLock<Vec<HookVariable>> = OnceLock::new();
 
 pub(crate) fn set_environment(variables: Vec<HookVariable>) {
@@ -139,9 +139,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_payload_wins_a_clashing_hook_env_key() {
-        let extra = ["PERCH_EVENT=spoofed", "TOKEN="]
-            .map(|pair| HookVariable::parse(pair).expect("valid pair"));
+    fn the_payload_wins_every_clashing_hook_env_key() {
+        let payload = [
+            ("PERCH_BRANCH", "topic"),
+            ("PERCH_EVENT", "removed"),
+            ("PERCH_MAIN", "/main"),
+            ("PERCH_WORKTREE", "/worktrees/topic"),
+        ];
+        let extra = payload
+            .map(|(key, _)| HookVariable::parse(&format!("{key}=spoofed")).expect("valid pair"));
 
         let hook = prepare(
             "true",
@@ -153,10 +159,12 @@ mod tests {
         );
 
         let environment: HashMap<&OsStr, Option<&OsStr>> = hook.get_envs().collect();
-        assert_eq!(
-            environment[OsStr::new("PERCH_EVENT")],
-            Some(OsStr::new("removed"))
-        );
-        assert_eq!(environment[OsStr::new("TOKEN")], Some(OsStr::new("")));
+        for (key, value) in payload {
+            assert_eq!(
+                environment[OsStr::new(key)],
+                Some(OsStr::new(value)),
+                "{key}"
+            );
+        }
     }
 }

@@ -1282,10 +1282,17 @@ fn complete_drops_only_the_words_that_position_eats() {
 /// space, and an unsourced completion file would leave COMPREPLY empty and an
 /// assertion of absence passing for the wrong reason.
 fn bash_complete(dir: &Path, words: &str, cword: usize) -> Output {
+    bash_complete_line(dir, "unset COMP_LINE", words, cword)
+}
+
+/// Like [`bash_complete`], with `COMP_LINE` set to `line` as readline would,
+/// for words split at `COMP_WORDBREAKS`.
+fn bash_complete_line(dir: &Path, line: &str, words: &str, cword: usize) -> Output {
     let bin = Path::new(env!("CARGO_BIN_EXE_perch")).parent().unwrap();
     let script = format!(
         "PATH=\"{bin}\":$PATH\n\
          source \"{completions}\"\n\
+         {line}\n\
          COMP_WORDS=({words}); COMP_CWORD={cword}; COMPREPLY=()\n\
          _perch_completions\n\
          printf '%s\\n' \"${{COMPREPLY[@]}}\"\n",
@@ -1396,17 +1403,22 @@ fn bash_completion_answers_from_the_dash_c_repo_past_the_global_options() {
     let (_bare, work) = setup();
     git(work.path(), &["branch", "feature"]);
     let elsewhere = TempDir::new().unwrap();
-    let output = bash_complete(
+    std::os::unix::fs::symlink(work.path(), elsewhere.path().join("repo space")).unwrap();
+
+    // Readline keeps the quotes and splits `K=V` at `=`, as COMP_WORDBREAKS says.
+    let output = bash_complete_line(
         elsewhere.path(),
-        &format!(
-            "perch -C '{}' --hook-env K=V wt short ''",
-            work.path().display()
-        ),
-        7,
+        "COMP_LINE=\"perch -C 'repo space' --hook-env K=V wt short \"",
+        "perch -C \"'repo space'\" --hook-env K = V wt short ''",
+        9,
     );
 
     assert!(output.status.success(), "stderr: {}", stderr_str(&output));
-    assert!(stdout_str(&output).lines().any(|line| line == "feature"));
+    assert!(
+        stdout_str(&output).lines().any(|line| line == "feature"),
+        "stdout: {}",
+        stdout_str(&output)
+    );
 }
 
 #[test]
@@ -6759,10 +6771,13 @@ fn hooks_fired_through_dash_c_see_hook_env_beneath_the_payload() {
 }
 
 #[test]
-fn dash_c_into_a_missing_directory_fails_before_anything_runs() {
-    let parent = TempDir::new().unwrap();
+fn dash_c_stops_at_the_first_directory_it_cannot_enter() {
+    let (_bare, parent, work) = setup_with_parent();
 
-    let output = perch_args(parent.path(), &["-C", "absent", "wt", "ls"]);
+    let output = perch_args(
+        parent.path(),
+        &["-C", "absent", "-C", work.to_str().unwrap(), "wt", "ls"],
+    );
 
     assert_eq!(output.status.code(), Some(1));
     assert!(
@@ -6770,6 +6785,50 @@ fn dash_c_into_a_missing_directory_fails_before_anything_runs() {
         "stderr: {}",
         stderr_str(&output)
     );
+}
+
+/// `-C` moves perch, not the shell: the handoff follows the directory the
+/// shell wrapper is in, while `.` names the one `-C` chose.
+#[test]
+fn wt_rm_hands_off_only_a_shell_standing_in_the_removed_worktree() {
+    let (_bare, parent, work) = setup_with_parent();
+    let feature = add_worktree(&work, &parent, "feature");
+    let other = add_worktree(&work, &parent, "other");
+
+    let from_inside = perch_args(
+        &feature,
+        &[
+            "-C",
+            work.to_str().unwrap(),
+            "wt",
+            "rm",
+            "feature",
+            "--force",
+        ],
+    );
+    assert!(
+        from_inside.status.success(),
+        "stderr: {}",
+        stderr_str(&from_inside)
+    );
+    let printed = stdout_str(&from_inside).trim().to_string();
+    assert_eq!(
+        Path::new(&printed).canonicalize().ok(),
+        work.canonicalize().ok(),
+        "a shell in the removed worktree is handed the main one; got: {printed}"
+    );
+
+    let from_outside = perch_args(
+        parent.path(),
+        &["-C", other.to_str().unwrap(), "wt", "rm", ".", "--force"],
+    );
+    assert!(
+        from_outside.status.success(),
+        "stderr: {}",
+        stderr_str(&from_outside)
+    );
+    assert!(!other.exists(), "`.` names the -C worktree");
+    assert_eq!(stdout_str(&from_outside), "", "a shell elsewhere stays put");
 }
 
 /// A hook is told, never asked: one that fails is warned about and otherwise

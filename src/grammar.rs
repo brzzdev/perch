@@ -3,14 +3,14 @@ use std::path::PathBuf;
 /// An [`Invocation`] and the global options that set up the run around it.
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct CommandLine {
-    /// Where `-C` says the run starts, joined in order like git's.
-    pub(crate) directory: Option<PathBuf>,
+    /// Each `-C` path in order, to change directory to one after another.
+    pub(crate) directories: Vec<PathBuf>,
     pub(crate) hook_environment: Vec<HookVariable>,
     pub(crate) invocation: Invocation,
 }
 
 /// One `--hook-env KEY=VALUE` pair.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub(crate) struct HookVariable {
     key: String,
     value: String,
@@ -241,6 +241,12 @@ enum GrammarErrorKind {
     #[error("invalid `perch br rm` invocation: {0}")]
     BranchRemoval(String),
 
+    #[error("invalid `{command}` invocation: unexpected extra argument '{extra}'")]
+    ExtraArgument {
+        command: &'static str,
+        extra: String,
+    },
+
     #[error("invalid `--hook-env` pair '{0}'; expected KEY=VALUE with a non-empty KEY")]
     InvalidHookVariable(String),
 
@@ -271,6 +277,13 @@ enum GrammarErrorKind {
 impl GrammarError {
     fn branch_removal(message: String) -> Self {
         Self(GrammarErrorKind::BranchRemoval(message))
+    }
+
+    fn extra_argument(command: &'static str, extra: &str) -> Self {
+        Self(GrammarErrorKind::ExtraArgument {
+            command,
+            extra: extra.to_string(),
+        })
     }
 
     fn invalid_hook_variable(pair: &str) -> Self {
@@ -316,28 +329,34 @@ const HOOK_ENVIRONMENT_OPTION: &str = "--hook-env";
 /// Reads the global options ahead of the command word, in any order, then
 /// [`parse`]s the rest.
 pub(crate) fn parse_command_line(args: &[String]) -> Result<CommandLine, GrammarError> {
-    let mut directory: Option<PathBuf> = None;
+    let mut directories = Vec::new();
     let mut hook_environment = Vec::new();
     let mut rest = args;
-    while let [option, tail @ ..] = rest {
-        let option = match option.as_str() {
-            DIRECTORY_OPTION => DIRECTORY_OPTION,
-            HOOK_ENVIRONMENT_OPTION => HOOK_ENVIRONMENT_OPTION,
+    loop {
+        rest = match rest {
+            [option, path, tail @ ..] if option == DIRECTORY_OPTION => {
+                // As in git, an empty path leaves the directory unchanged.
+                if !path.is_empty() {
+                    directories.push(PathBuf::from(path));
+                }
+                tail
+            }
+            [option, pair, tail @ ..] if option == HOOK_ENVIRONMENT_OPTION => {
+                hook_environment.push(HookVariable::parse(pair)?);
+                tail
+            }
+            [option] if option == DIRECTORY_OPTION => {
+                return Err(GrammarError::missing_value(DIRECTORY_OPTION));
+            }
+            [option] if option == HOOK_ENVIRONMENT_OPTION => {
+                return Err(GrammarError::missing_value(HOOK_ENVIRONMENT_OPTION));
+            }
             _ => break,
         };
-        let [value, tail @ ..] = tail else {
-            return Err(GrammarError::missing_value(option));
-        };
-        if option == DIRECTORY_OPTION {
-            directory.get_or_insert_default().push(value);
-        } else {
-            hook_environment.push(HookVariable::parse(value)?);
-        }
-        rest = tail;
     }
 
     Ok(CommandLine {
-        directory,
+        directories,
         hook_environment,
         invocation: parse(rest)?,
     })
@@ -348,12 +367,18 @@ fn parse(args: &[String]) -> Result<Invocation, GrammarError> {
         Some("--help" | "-h") => Ok(Invocation::Help(HelpPage::Main)),
         Some("--version" | "-V") => Ok(Invocation::Version),
         Some("--complete") => Ok(branch_completion(Position::Bare)),
-        Some("--") => Ok(parse_escaped(args.get(1), Verb::Go)),
+        Some("--") => {
+            reject_extra(args, 2, Verb::Go)?;
+            Ok(parse_escaped(args.get(1), Verb::Go))
+        }
         Some(word) => match parse_command_word(word) {
             Some(CommandWord::Branch) => parse_branch(&args[1..]),
             Some(CommandWord::Shell) => parse_shell(&args[1..]),
             Some(CommandWord::Worktree) => parse_worktree(&args[1..]),
-            None => Ok(navigate(Verb::Go, Some(word))),
+            None => {
+                reject_extra(args, 1, Verb::Go)?;
+                Ok(navigate(Verb::Go, Some(word)))
+            }
         },
         None => Ok(navigate(Verb::Go, None)),
     }
@@ -381,9 +406,15 @@ fn parse_branch(args: &[String]) -> Result<Invocation, GrammarError> {
     match args.first().map(String::as_str) {
         Some("--help" | "-h") => Ok(Invocation::Help(HelpPage::Branch)),
         Some("--complete") => Ok(branch_completion(Position::Branch)),
-        Some("--") => Ok(parse_escaped(args.get(1), Verb::Here)),
+        Some("--") => {
+            reject_extra(args, 2, Verb::Here)?;
+            Ok(parse_escaped(args.get(1), Verb::Here))
+        }
         Some(word) if parse_branch_subverb(word).is_some() => parse_branch_removal(&args[1..]),
-        Some(word) => Ok(navigate(Verb::Here, Some(word))),
+        Some(word) => {
+            reject_extra(args, 1, Verb::Here)?;
+            Ok(navigate(Verb::Here, Some(word)))
+        }
         None => Ok(navigate(Verb::Here, None)),
     }
 }
@@ -537,6 +568,20 @@ fn parse_worktree_removal(args: &[&String]) -> Result<Invocation, GrammarError> 
     Ok(Invocation::RemoveWorktrees(removal))
 }
 
+/// Refuses whatever follows the `taken` words that name a target, so a
+/// misplaced option cannot pass silently.
+fn reject_extra(args: &[String], taken: usize, verb: Verb) -> Result<(), GrammarError> {
+    let Some(extra) = args.get(taken) else {
+        return Ok(());
+    };
+    let command = match verb {
+        Verb::Go => "perch",
+        Verb::Here => "perch br",
+        Verb::Worktree => "perch wt",
+    };
+    Err(GrammarError::extra_argument(command, extra))
+}
+
 fn parse_escaped(target: Option<&String>, verb: Verb) -> Invocation {
     if target.is_some_and(|word| word == "--complete") {
         branch_completion(Position::Unfiltered)
@@ -684,11 +729,38 @@ mod tests {
     }
 
     #[test]
-    fn each_leading_directory_option_joins_onto_the_one_before() {
-        let parsed = command_line(&["-C", "/repos", "-C", "perch", "wt", "ls"]).unwrap();
+    fn each_directory_option_is_kept_in_order_and_an_empty_one_skipped() {
+        let parsed = command_line(&["-C", "/repos", "-C", "", "-C", "perch", "wt", "ls"]).unwrap();
 
-        assert_eq!(parsed.directory, Some(PathBuf::from("/repos/perch")));
+        assert_eq!(
+            parsed.directories,
+            [PathBuf::from("/repos"), PathBuf::from("perch")]
+        );
         assert_eq!(parsed.invocation, Invocation::ListWorktrees);
+    }
+
+    #[test]
+    fn a_word_after_a_navigation_target_is_refused() {
+        for (words, message) in [
+            (
+                ["pr:77", "-C", "repo"].as_slice(),
+                "invalid `perch` invocation: unexpected extra argument '-C'",
+            ),
+            (
+                ["--", "br", "extra"].as_slice(),
+                "invalid `perch` invocation: unexpected extra argument 'extra'",
+            ),
+            (
+                ["br", "topic", "--hook-env", "K=V"].as_slice(),
+                "invalid `perch br` invocation: unexpected extra argument '--hook-env'",
+            ),
+            (
+                ["br", "--", "rm", "extra"].as_slice(),
+                "invalid `perch br` invocation: unexpected extra argument 'extra'",
+            ),
+        ] {
+            assert_eq!(command_line(words).unwrap_err().to_string(), message);
+        }
     }
 
     #[test]
@@ -725,7 +797,10 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(parsed.directory, Some(PathBuf::from("repo/sub")));
+        assert_eq!(
+            parsed.directories,
+            [PathBuf::from("repo"), PathBuf::from("sub")]
+        );
         let pairs: Vec<(&str, &str)> = parsed
             .hook_environment
             .iter()

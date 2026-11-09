@@ -125,7 +125,11 @@ impl BranchRequest {
 
 pub(crate) struct WorktreeRequest {
     worktrees: Vec<git::Worktree>,
+    /// The directory perch runs in, which `.` names.
     cwd: Option<PathBuf>,
+    /// The shell's directory, which a removal hands off from. It differs from
+    /// `cwd` under `-C`.
+    shell_directory: Option<PathBuf>,
     target: Option<String>,
     forcing: Forcing,
 }
@@ -139,9 +143,17 @@ impl WorktreeRequest {
     ) -> Self {
         Self {
             worktrees,
+            shell_directory: cwd.clone(),
             cwd,
             target: target.map(str::to_string),
             forcing,
+        }
+    }
+
+    pub(crate) fn with_shell_directory(self, shell_directory: Option<PathBuf>) -> Self {
+        Self {
+            shell_directory,
+            ..self
         }
     }
 }
@@ -267,6 +279,7 @@ struct AssessedLocal {
     /// reach, so the two answers cannot differ.
     named_error: Option<NamedError>,
     contains_cwd: bool,
+    contains_shell: bool,
 }
 
 impl AssessedLocal {
@@ -408,6 +421,7 @@ impl Assessment {
                 license,
                 preparation_failure: None,
                 contains_cwd: local.contains_cwd,
+                contains_shell: local.contains_shell,
                 upstream: None,
             });
         }
@@ -516,6 +530,7 @@ struct PlannedLocal {
     license: License,
     preparation_failure: Option<String>,
     contains_cwd: bool,
+    contains_shell: bool,
     upstream: Option<(UpstreamId, git::RemoteBranch)>,
 }
 
@@ -719,10 +734,12 @@ impl Pending {
         let handoff = self
             .locals
             .iter()
-            .any(|local| local.contains_cwd)
+            .any(|local| local.contains_shell)
             .then(|| self.main.clone())
             .flatten();
-        if let Some(main) = &handoff {
+        if self.locals.iter().any(|local| local.contains_cwd)
+            && let Some(main) = &self.main
+        {
             env::set_current_dir(main).map_err(|error| FinishFailure::new(error.into(), None))?;
         }
 
@@ -1006,6 +1023,7 @@ fn build_stale_assessment(
             proof,
             named_error: None,
             contains_cwd: false,
+            contains_shell: false,
         });
     }
     let labels = picker::align_labels(&raw);
@@ -1172,6 +1190,7 @@ fn assess_branches(request: BranchRequest) -> AppResult<Assessment> {
             proof,
             named_error,
             contains_cwd: false,
+            contains_shell: false,
         });
     }
     let labels = picker::align_labels(&raw);
@@ -1266,7 +1285,7 @@ fn build_worktree_assessment(
         .into_iter()
         .filter(|worktree| !worktree.is_main)
         .map(|worktree| {
-            let contains_cwd = contains_cwd(&worktree, request.cwd.as_deref());
+            let contains_cwd = contains_dir(&worktree, request.cwd.as_deref());
             (worktree, contains_cwd)
         })
         .collect();
@@ -1295,6 +1314,7 @@ fn build_worktree_assessment(
     );
     let (mut raw, mut locals) = (Vec::new(), Vec::new());
     for (index, (worktree, contains_cwd)) in removable.into_iter().enumerate() {
+        let contains_shell = contains_dir(&worktree, request.shell_directory.as_deref());
         let assess_worktree = !worktree.prunable && reachable(index);
         let (unmerged, proof) = judgement.of(worktree.branch.as_deref());
         let risk = Risk {
@@ -1324,6 +1344,7 @@ fn build_worktree_assessment(
             proof,
             named_error: None,
             contains_cwd,
+            contains_shell,
         });
     }
     let labels = picker::align_labels(&raw);
@@ -1350,12 +1371,12 @@ fn build_worktree_assessment(
     })
 }
 
-fn contains_cwd(worktree: &git::Worktree, cwd: Option<&Path>) -> bool {
+fn contains_dir(worktree: &git::Worktree, dir: Option<&Path>) -> bool {
     let path = worktree
         .path
         .canonicalize()
         .unwrap_or_else(|_| worktree.path.clone());
-    cwd.is_some_and(|cwd| cwd.starts_with(path))
+    dir.is_some_and(|dir| dir.starts_with(path))
 }
 
 /// A worktree picker row's name: its branch, or its path where it is detached.
@@ -2650,6 +2671,7 @@ mod tests {
                 license: License::forced(),
                 preparation_failure: None,
                 contains_cwd,
+                contains_shell: contains_cwd,
                 upstream: None,
             }],
             main,

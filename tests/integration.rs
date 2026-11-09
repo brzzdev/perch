@@ -1282,29 +1282,31 @@ fn complete_drops_only_the_words_that_position_eats() {
 /// space, and an unsourced completion file would leave COMPREPLY empty and an
 /// assertion of absence passing for the wrong reason.
 fn bash_complete(dir: &Path, words: &str, cword: usize) -> Output {
-    bash_complete_line(dir, "unset COMP_LINE", words, cword)
+    bash_complete_line(dir, None, words, cword)
 }
 
-/// Like [`bash_complete`], with `COMP_LINE` set to `line` as readline would,
-/// for words split at `COMP_WORDBREAKS`.
-fn bash_complete_line(dir: &Path, line: &str, words: &str, cword: usize) -> Output {
+/// Like [`bash_complete`], with `COMP_LINE` set as readline would for words it
+/// split at `COMP_WORDBREAKS`.
+fn bash_complete_line(dir: &Path, comp_line: Option<&str>, words: &str, cword: usize) -> Output {
     let bin = Path::new(env!("CARGO_BIN_EXE_perch")).parent().unwrap();
     let script = format!(
         "PATH=\"{bin}\":$PATH\n\
          source \"{completions}\"\n\
-         {line}\n\
          COMP_WORDS=({words}); COMP_CWORD={cword}; COMPREPLY=()\n\
          _perch_completions\n\
          printf '%s\\n' \"${{COMPREPLY[@]}}\"\n",
         bin = bin.display(),
         completions = concat!(env!("CARGO_MANIFEST_DIR"), "/completions/perch.bash"),
     );
-    Command::new("bash")
-        .args(["-c", &script])
+    let mut bash = Command::new("bash");
+    bash.args(["-c", &script])
         .current_dir(dir)
-        .env("PERCH_NO_HOOKS", "1")
-        .output()
-        .expect("failed to run bash completion")
+        .env("PERCH_NO_HOOKS", "1");
+    match comp_line {
+        Some(line) => bash.env("COMP_LINE", line),
+        None => bash.env_remove("COMP_LINE"),
+    };
+    bash.output().expect("failed to run bash completion")
 }
 
 /// What fish completes `line` to, with this build's `perch` first on `PATH`.
@@ -1408,7 +1410,7 @@ fn bash_completion_answers_from_the_dash_c_repo_past_the_global_options() {
     // Readline keeps the quotes and splits `K=V` at `=`, as COMP_WORDBREAKS says.
     let output = bash_complete_line(
         elsewhere.path(),
-        "COMP_LINE=\"perch -C 'repo space' --hook-env K=V wt short \"",
+        Some("perch -C 'repo space' --hook-env K=V wt short "),
         "perch -C \"'repo space'\" --hook-env K = V wt short ''",
         9,
     );
@@ -1422,7 +1424,7 @@ fn bash_completion_answers_from_the_dash_c_repo_past_the_global_options() {
 
     let inside_the_pair = bash_complete_line(
         elsewhere.path(),
-        "COMP_LINE=\"perch --hook-env S=b\"",
+        Some("perch --hook-env S=b"),
         "perch --hook-env S = b",
         4,
     );
@@ -1448,25 +1450,59 @@ fn zsh_completion_passes_the_global_options_on_to_the_binary() {
         "function _describe {{ : }}\n\
          service=skip\n\
          source \"{completions}\"\n\
-         function _perch_offers {{ print -r -- \"$perch_global_options $*\" }}\n\
+         function _perch_offers {{ print -r -- \"${{(j:|:)perch_global_options}} $*\" }}\n\
          service=perch\n\
-         words=(perch -C /repo --hook-env K=V wt short '')\n\
          CURRENT=8\n\
-         _perch\n"
+         for typed in '~/repo' \"'~/repo'\" '~bob/repo'; do\n\
+           words=(perch -C $typed --hook-env K=V wt short '')\n\
+           _perch\n\
+         done\n"
     );
 
     let output = Command::new("zsh")
         .args(["-c", &script])
+        .env("HOME", "/home/test")
         .output()
         .expect("failed to run zsh completion");
 
     assert!(output.status.success(), "stderr: {}", stderr_str(&output));
-    assert!(
-        stdout_str(&output)
-            .lines()
-            .any(|line| line == "-C /repo --hook-env K=V branches branch wt short"),
-        "stdout: {}",
-        stdout_str(&output)
+    assert_eq!(
+        stdout_str(&output).lines().collect::<Vec<_>>(),
+        [
+            "-C|/home/test/repo|--hook-env|K=V branches branch wt short",
+            "-C|~/repo|--hook-env|K=V branches branch wt short",
+            "-C|~bob/repo|--hook-env|K=V branches branch wt short",
+        ],
+        "only an unquoted `~/` is $HOME"
+    );
+}
+
+#[test]
+fn bash_completion_expands_only_an_unquoted_home_tilde() {
+    let completions = concat!(env!("CARGO_MANIFEST_DIR"), "/completions/perch.bash");
+    let script = format!(
+        "source \"{completions}\"\n\
+         for typed in '~' '~/repo' \"'~/repo'\" '~bob/repo' 'repo\\ space'; do\n\
+           _perch_dequote \"$typed\"; echo\n\
+         done\n"
+    );
+
+    let output = Command::new("bash")
+        .args(["-c", &script])
+        .env("HOME", "/home/test")
+        .output()
+        .expect("failed to run bash");
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert_eq!(
+        stdout_str(&output).lines().collect::<Vec<_>>(),
+        [
+            "/home/test",
+            "/home/test/repo",
+            "~/repo",
+            "~bob/repo",
+            "repo space"
+        ]
     );
 }
 
@@ -1481,7 +1517,7 @@ fn fish_completion_answers_from_the_dash_c_repo_past_the_global_options() {
     let output = fish_complete(
         elsewhere.path(),
         &format!(
-            "perch -C {} --hook-env K=V wt short ",
+            "perch -C \"{}\" --hook-env K=V wt short ",
             work.path().display()
         ),
     );

@@ -12,11 +12,18 @@ end
 # aside, so positions count from it; `--global` prints those options instead.
 function __perch_tokens
     set -l tokens (commandline -opc)
+    # Expanded as the shell would pass them, where this fish can say; otherwise
+    # only a leading `~` or `~/` stands for $HOME.
+    set -l expanded (commandline -xpc 2>/dev/null)
+    test (count $expanded) -eq (count $tokens); or set expanded
     set -l global
     if test "$tokens[1]" = perch
         while set -q tokens[3]; and contains -- $tokens[2] -C --hook-env
-            set -a global $tokens[2] (string replace -r '^~' $HOME -- $tokens[3])
+            set -l value (string replace -r '^~(?=/|$)' $HOME -- $tokens[3])
+            set -q expanded[3]; and set value $expanded[3]
+            set -a global $tokens[2] $value
             set -e tokens[2..3]
+            set -q expanded[3]; and set -e expanded[2..3]
         end
     end
     if contains -- --global $argv
@@ -24,6 +31,15 @@ function __perch_tokens
     else
         printf '%s\n' $tokens
     end
+end
+
+# `__fish_seen_subcommand_from`, read from `__perch_tokens`.
+function __perch_seen_subcommand_from
+    set -l tokens (__perch_tokens)
+    for token in $tokens[2..-1]
+        contains -- $token $argv; and return 0
+    end
+    return 1
 end
 
 # `__fish_is_nth_token`, counted from `__perch_tokens`.
@@ -169,19 +185,19 @@ complete -c perch -f -n '__perch_after_double_dash' -a '(__perch_offers --)'
 # fall-through case, so every verb needs its own rule or the second token
 # completes to nothing. `perch br wt` reaches a branch `wt`, while a branch
 # named `rm` needs `perch br -- rm`.
-complete -c perch -f -n '__fish_seen_subcommand_from br; and __perch_is_nth_token 2; and not __perch_after_double_dash' -a 'rm' -d 'Remove local branches'
-complete -c perch -f -n '__fish_seen_subcommand_from br; and __perch_is_nth_token 2' -a '(__perch_offers br)'
+complete -c perch -f -n '__perch_seen_subcommand_from br; and __perch_is_nth_token 2; and not __perch_after_double_dash' -a 'rm' -d 'Remove local branches'
+complete -c perch -f -n '__perch_seen_subcommand_from br; and __perch_is_nth_token 2' -a '(__perch_offers br)'
 
 # After `shell`: `init` and `install`, then the shells `init` prints a script for.
-complete -c perch -f -n '__fish_seen_subcommand_from shell; and __perch_is_nth_token 2; and not __perch_after_double_dash' -a 'init' -d 'Print the shell integration script'
-complete -c perch -f -n '__fish_seen_subcommand_from shell; and __perch_is_nth_token 2; and not __perch_after_double_dash' -a 'install' -d 'Add the shell integration to your rc file'
-complete -c perch -f -n '__fish_seen_subcommand_from shell; and __perch_is_nth_token 3; and __fish_seen_subcommand_from init' -a 'bash fish zsh'
+complete -c perch -f -n '__perch_seen_subcommand_from shell; and __perch_is_nth_token 2; and not __perch_after_double_dash' -a 'init' -d 'Print the shell integration script'
+complete -c perch -f -n '__perch_seen_subcommand_from shell; and __perch_is_nth_token 2; and not __perch_after_double_dash' -a 'install' -d 'Add the shell integration to your rc file'
+complete -c perch -f -n '__perch_seen_subcommand_from shell; and __perch_is_nth_token 3; and __perch_seen_subcommand_from init' -a 'bash fish zsh'
 
 # After `wt`: subverbs + the branches reachable without `--`. `__perch_is_nth_token`
 # looks past a `--`, so without the guard `perch wt -- ` would offer the subverbs
 # on top of the branches the rule above already gave it — and `--` is precisely
 # how you say you meant the branch.
-complete -c perch -f -n '__fish_seen_subcommand_from wt; and __perch_is_nth_token 2; and not __perch_after_double_dash' -a 'ls rm'
+complete -c perch -f -n '__perch_seen_subcommand_from wt; and __perch_is_nth_token 2; and not __perch_after_double_dash' -a 'ls rm'
 complete -c perch -f -n '__perch_wt_wants_branch' -a '(__perch_wt_branch_offers)'
 complete -c perch -f -l no-switch -d 'Create or find the worktree without switching to it' -n '__perch_wt_accepts_no_switch'
 

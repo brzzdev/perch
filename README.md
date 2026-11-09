@@ -132,7 +132,7 @@ Perch asks `gh` (for `pr:`) or `glab` (for `mr:`) about the request on `origin`,
 
 ### From a script
 
-`-C <path>` runs perch as if it had been started in `<path>`, as `git -C` does, so a script needs no `cd` first. It goes before the command word, as does `--hook-env`, in either order; a relative path resolves against the current directory, and each further `-C` against the one before it, with an empty one changing nothing. A path that isn't a directory fails before anything runs. `-C` moves perch, not your shell. Only `wt rm` hands the shell off to the main checkout, and only when the shell itself stands in a worktree it removed; a worktree the stale-branch cleanup removes never moves the shell, even one standing in it.
+`-C <path>` runs perch as if it had been started in `<path>`, as `git -C` does, so a script needs no `cd` first. It goes before the command word, as does `--hook-env`, in either order; a relative path resolves against the current directory, and each further `-C` against the one before it, with an empty one changing nothing. A path that isn't a directory fails before anything runs. `-C` sets where perch runs; the shell wrapper still follows any path perch prints, so `perch -C ~/src/repo feature` and `wt` without `--no-switch` move the shell as usual. `wt rm` judges its handoff from the shell's own directory, so it moves the shell to the main checkout only when the shell stood in a worktree it removed. The stale-branch cleanup never hands off.
 
 ```sh
 perch -C ~/src/repo --hook-env SESSION=review wt 77 pr:77 --no-switch

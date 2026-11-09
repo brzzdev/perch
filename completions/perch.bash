@@ -71,13 +71,14 @@ _perch_rm_wants_target() {
 }
 
 # Prints a word as typed with its quoting removed, without evaluating it: a
-# whole-word '…' or "…" is unwrapped, otherwise backslashes are dropped, and a
-# leading `~` stands for $HOME.
+# whole-word '…' or "…" is unwrapped, otherwise backslashes are dropped, and an
+# unquoted `~` or `~/` stands for $HOME. `~user` is left as typed.
 _perch_dequote() {
   local word=$1
   case "$word" in
     \'*\' | \"*\") word="${word:1:${#word}-2}" ;;
-    *) word="${word//\\/}"; word="${word/#\~/$HOME}" ;;
+    \~ | \~/*) word="${word:1}"; word="$HOME${word//\\/}" ;;
+    *) word="${word//\\/}" ;;
   esac
   printf '%s' "$word"
 }
@@ -132,19 +133,6 @@ _perch_complete_words() {
       ;;
   esac
 
-  case "${cmdline[pos-1]}" in
-    -C)
-      compopt -o filenames 2>/dev/null
-      COMPREPLY=()
-      local directory
-      while IFS= read -r directory; do
-        COMPREPLY+=("$directory")
-      done < <(compgen -d -- "${cmdline[pos]}")
-      return
-      ;;
-    --hook-env) return ;;
-  esac
-
   # Set aside the global options ahead of the command word, so positions below
   # count from it and the binary still answers for the same run.
   local -a _perch_global_options=()
@@ -153,6 +141,21 @@ _perch_complete_words() {
     cmdline=("${cmdline[0]}" "${cmdline[@]:3}")
     (( pos -= 2 ))
   done
+
+  if (( pos == 2 )); then
+    case "${cmdline[1]}" in
+      -C)
+        compopt -o filenames 2>/dev/null
+        COMPREPLY=()
+        local directory
+        while IFS= read -r directory; do
+          COMPREPLY+=("$directory")
+        done < <(compgen -d -- "${cmdline[pos]}")
+        return
+        ;;
+      --hook-env) return ;;
+    esac
+  fi
 
   local cur="${cmdline[pos]}"
   local prev="${cmdline[pos-1]}"

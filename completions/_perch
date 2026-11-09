@@ -68,18 +68,28 @@ _perch() {
     *)     cmdline=("${(@)words}"); pos=$CURRENT ;;
   esac
 
-  case "$cmdline[pos-1]" in
-    -C) _files -/; return ;;
-    --hook-env) return ;;
-  esac
-
   # Set aside the global options ahead of the command word, so positions below
-  # count from it and the binary still answers for the same run.
+  # count from it and the binary still answers for the same run. Only an
+  # unquoted `~` or `~/` stands for $HOME, as the shell would read it.
+  local value
   while (( pos > 3 )) && [[ "$cmdline[2]" == (-C|--hook-env) ]]; do
-    perch_global_options+=("$cmdline[2]" "${${(Q)cmdline[3]}/#\~/$HOME}")
+    value=$cmdline[3]
+    if [[ "$value" == "~" || "$value" == "~/"* ]]; then
+      value=$HOME${(Q)value#\~}
+    else
+      value=${(Q)value}
+    fi
+    perch_global_options+=("$cmdline[2]" "$value")
     cmdline[2,3]=()
     (( pos -= 2 ))
   done
+
+  if (( pos == 3 )); then
+    case "$cmdline[2]" in
+      -C) _files -/; return ;;
+      --hook-env) return ;;
+    esac
+  fi
 
   # `br rm` is strict but takes its flags in either order around one target.
   if (( pos >= 4 )) && [[ "$cmdline[2]" == br && "$cmdline[3]" == rm ]]; then

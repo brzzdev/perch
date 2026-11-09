@@ -10,12 +10,21 @@
 use std::io::{self, Write};
 use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
+use std::sync::OnceLock;
 
 #[cfg(not(test))]
 use std::env;
 
 use super::warn;
 use crate::git;
+use crate::grammar::HookVariable;
+
+/// The `--hook-env` pairs given to every hook this run fires.
+static ENVIRONMENT: OnceLock<Vec<HookVariable>> = OnceLock::new();
+
+pub(crate) fn set_environment(variables: Vec<HookVariable>) {
+    let _ = ENVIRONMENT.set(variables);
+}
 
 /// The moment being reported. The variant's name is both the `PERCH_EVENT`
 /// value and the config key's last component, so the two can't drift.
@@ -43,6 +52,8 @@ impl Event {
 /// working directory, so a hook can run plain `git` commands and reach the repo
 /// rather than a directory that may no longer exist.
 ///
+/// The `--hook-env` pairs are set first, so the payload wins a clashing key.
+///
 /// The hook's stdout is captured and re-emitted on stderr: the handoff writes
 /// the destination path to stdout for the shell wrapper to `cd` into, and an
 /// inherited stdout would let a chatty hook send the user somewhere absurd. Its
@@ -56,14 +67,8 @@ pub(crate) fn fire(event: Event, worktree: &Path, branch: Option<&str>, main: &P
         return;
     };
 
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg(&command)
-        .current_dir(main)
-        .env("PERCH_BRANCH", branch.unwrap_or_default())
-        .env("PERCH_EVENT", event.name())
-        .env("PERCH_MAIN", main)
-        .env("PERCH_WORKTREE", worktree)
+    let extra = ENVIRONMENT.get().map_or(&[][..], Vec::as_slice);
+    let output = prepare(&command, event, worktree, branch, main, extra)
         .stdin(Stdio::null())
         .stderr(Stdio::inherit())
         .output();
@@ -77,6 +82,26 @@ pub(crate) fn fire(event: Event, worktree: &Path, branch: Option<&str>, main: &P
         }
         Err(e) => warn_failure(event, &format!("could not be run: {e}")),
     }
+}
+
+fn prepare(
+    command: &str,
+    event: Event,
+    worktree: &Path,
+    branch: Option<&str>,
+    main: &Path,
+    extra: &[HookVariable],
+) -> Command {
+    let mut hook = Command::new("sh");
+    hook.arg("-c").arg(command).current_dir(main);
+    for variable in extra {
+        hook.env(variable.key(), variable.value());
+    }
+    hook.env("PERCH_BRANCH", branch.unwrap_or_default())
+        .env("PERCH_EVENT", event.name())
+        .env("PERCH_MAIN", main)
+        .env("PERCH_WORKTREE", worktree);
+    hook
 }
 
 /// Unit-test builds suppress hooks so they cannot run commands from the
@@ -104,4 +129,42 @@ fn describe(status: ExitStatus) -> String {
 /// `perch` does about a hook it isn't happy with.
 fn warn_failure(event: Event, what: &str) {
     eprintln!("{} the {} hook {what}; continuing.", warn(), event.name());
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::ffi::OsStr;
+
+    use super::*;
+
+    #[test]
+    fn the_payload_wins_every_clashing_hook_env_key() {
+        let payload = [
+            ("PERCH_BRANCH", "topic"),
+            ("PERCH_EVENT", "removed"),
+            ("PERCH_MAIN", "/main"),
+            ("PERCH_WORKTREE", "/worktrees/topic"),
+        ];
+        let extra = payload
+            .map(|(key, _)| HookVariable::parse(&format!("{key}=spoofed")).expect("valid pair"));
+
+        let hook = prepare(
+            "true",
+            Event::Removed,
+            Path::new("/worktrees/topic"),
+            Some("topic"),
+            Path::new("/main"),
+            &extra,
+        );
+
+        let environment: HashMap<&OsStr, Option<&OsStr>> = hook.get_envs().collect();
+        for (key, value) in payload {
+            assert_eq!(
+                environment[OsStr::new(key)],
+                Some(OsStr::new(value)),
+                "{key}"
+            );
+        }
+    }
 }

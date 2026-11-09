@@ -15,15 +15,19 @@ _perch_offers() {
   local tag=$1 label=$2
   shift 2
   local -a offered
-  offered=(${(f)"$(command perch "$@" --complete 2>/dev/null)"})
+  offered=(${(f)"$(command perch "${(@)perch_global_options}" "$@" --complete 2>/dev/null)"})
   # Nothing to offer leaves one empty line, which would complete to a blank.
   offered=(${offered:#})
   _describe -t "$tag" "$label" offered
 }
 
 _perch() {
-  local -a subcommands branch_subs branch_rm_options shell_subs shells worktree_subs worktree_options cmdline
+  local -a subcommands branch_subs branch_rm_options global_options shell_subs shells worktree_subs worktree_options cmdline perch_global_options
   local pos
+  global_options=(
+    '-C:Run as if perch was started in a directory'
+    '--hook-env:Add KEY=VALUE to every hook this run fires'
+  )
   subcommands=(
     'br:Check a branch out here'
     'shell:Shell integration'
@@ -63,6 +67,29 @@ _perch() {
     br|wt) cmdline=(perch "$service" "${(@)words[2,-1]}"); (( pos = CURRENT + 1 )) ;;
     *)     cmdline=("${(@)words}"); pos=$CURRENT ;;
   esac
+
+  # Set aside the global options ahead of the command word, so positions below
+  # count from it and the binary still answers for the same run. Only an
+  # unquoted `~` or `~/` stands for $HOME, as the shell would read it.
+  local value
+  while (( pos > 3 )) && [[ "$cmdline[2]" == (-C|--hook-env) ]]; do
+    value=$cmdline[3]
+    if [[ "$value" == "~" || "$value" == "~/"* ]]; then
+      value=$HOME${(Q)value#\~}
+    else
+      value=${(Q)value}
+    fi
+    perch_global_options+=("$cmdline[2]" "$value")
+    cmdline[2,3]=()
+    (( pos -= 2 ))
+  done
+
+  if (( pos == 3 )); then
+    case "$cmdline[2]" in
+      -C) _files -/; return ;;
+      --hook-env) return ;;
+    esac
+  fi
 
   # `br rm` is strict but takes its flags in either order around one target.
   if (( pos >= 4 )) && [[ "$cmdline[2]" == br && "$cmdline[3]" == rm ]]; then
@@ -133,9 +160,9 @@ _perch() {
     return
   fi
 
-  # `--` ends parsing, but only where the dispatcher still has a branch left to
+  # `--` ends parsing, but only where the grammar still has a branch left to
   # read: `perch --`, `perch br --`, `perch wt --`. Past `perch wt ls`, or a
-  # branch the dispatcher has already taken, the words after `--` go nowhere.
+  # branch the grammar has already taken, no further word is accepted.
   if [[ "$cmdline[pos-1]" == -- ]]; then
     if (( pos == 3 )) ||
       { (( pos == 4 )) && [[ "$cmdline[2]" == (br|wt) ]]; } ||
@@ -145,6 +172,7 @@ _perch() {
       _perch_offers branches 'branch' --
     fi
   elif (( pos == 2 )); then
+    _describe -t options 'option' global_options
     _describe -t subcommands 'subcommand' subcommands
     _perch_offers branches 'branch'
   # `br` reads `rm` before a branch name.

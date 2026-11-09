@@ -5,7 +5,7 @@
 # could not. `command` skips the shell wrapper: it is a function here, and it
 # would `cd` the interactive shell on a single-line answer.
 _perch_offers() {
-  command perch "$@" --complete 2>/dev/null
+  command perch "${_perch_global_options[@]}" "$@" --complete 2>/dev/null
 }
 
 # Fills COMPREPLY from the newline-separated candidates on stdin, keeping the
@@ -70,25 +70,94 @@ _perch_rm_wants_target() {
   return 0
 }
 
+# Prints a word as typed with its quoting removed, without evaluating it: a
+# whole-word '…' or "…" is unwrapped, otherwise backslashes are dropped, and an
+# unquoted `~` or `~/` stands for $HOME. `~user` is left as typed.
+_perch_dequote() {
+  local word=$1
+  case "$word" in
+    \'*\' | \"*\") word="${word:1:${#word}-2}" ;;
+    \~ | \~/*) word="${word:1}"; word="$HOME${word//\\/}" ;;
+    *) word="${word//\\/}" ;;
+  esac
+  printf '%s' "$word"
+}
+
+# Readline splits words at COMP_WORDBREAKS, `=` and `:` among them, so
+# `--hook-env K=V` arrives as `--hook-env K = V`. The rules read the words with
+# whatever no whitespace separated in the line joined back up; bash still
+# replaces only readline's last fragment, so the replies lose the part of the
+# current word that came before it.
 _perch_completions() {
+  local -a typed=()
+  local line="${COMP_LINE-${COMP_WORDS[*]}}" word gap i fragment_prefix=
+  for (( i = 0; i <= COMP_CWORD; i++ )); do
+    word="${COMP_WORDS[i]}"
+    gap="${line%%[![:space:]]*}"
+    line="${line#"$gap"}"
+    if (( i > 0 )) && [[ -z "$gap" ]]; then
+      (( i == COMP_CWORD )) && fragment_prefix="${typed[${#typed[@]}-1]}"
+      typed[${#typed[@]}-1]+="$word"
+    else
+      typed+=("$word")
+    fi
+    line="${line#"$word"}"
+  done
+
+  _perch_complete_words "${typed[@]}"
+  if [[ -n "$fragment_prefix" ]]; then
+    COMPREPLY=("${COMPREPLY[@]#"$fragment_prefix"}")
+  fi
+}
+
+# Completes the last of the given words, which are the whole command line.
+_perch_complete_words() {
+  local -a typed=("$@")
+
   # `br` and `wt` are the shell wrapper's shorthand for `perch br` and `perch wt`,
   # so every rule below reads a word list with the verb spelled out. One offset
   # is all that separates the three names.
   local -a cmdline
-  local pos name="${COMP_WORDS[0]##*/}"
+  local pos name="${typed[0]##*/}"
   case "$name" in
     br | wt)
       # The registration below was made when this file loaded, and a name can be
       # taken back after that. Re-read it here, where completion actually runs.
       _perch_owns "$name" || return
-      cmdline=(perch "$name" "${COMP_WORDS[@]:1}")
-      pos=$(( COMP_CWORD + 1 ))
+      cmdline=(perch "$name" "${typed[@]:1}")
+      pos=${#typed[@]}
       ;;
     *)
-      cmdline=("${COMP_WORDS[@]}")
-      pos=$COMP_CWORD
+      cmdline=("${typed[@]}")
+      pos=$(( ${#typed[@]} - 1 ))
       ;;
   esac
+
+  # Set aside the global options ahead of the command word, so positions below
+  # count from it and the binary still answers for the same run.
+  local -a _perch_global_options=()
+  while (( pos > 2 )) && [[ "${cmdline[1]}" == -C || "${cmdline[1]}" == --hook-env ]]; do
+    _perch_global_options+=("${cmdline[1]}" "$(_perch_dequote "${cmdline[2]}")")
+    cmdline=("${cmdline[0]}" "${cmdline[@]:3}")
+    (( pos -= 2 ))
+  done
+
+  if (( pos == 2 )); then
+    case "${cmdline[1]}" in
+      -C)
+        # bash 3.2 has no `compopt`, so escape the candidates here instead.
+        local filenames=1 directory
+        compopt -o filenames 2>/dev/null || filenames=0
+        COMPREPLY=()
+        while IFS= read -r directory; do
+          (( filenames )) || printf -v directory '%q' "$directory"
+          COMPREPLY+=("$directory")
+        done < <(compgen -d -- "${cmdline[pos]}")
+        return
+        ;;
+      --hook-env) return ;;
+    esac
+  fi
 
   local cur="${cmdline[pos]}"
   local prev="${cmdline[pos-1]}"
@@ -145,9 +214,9 @@ _perch_completions() {
     return
   fi
 
-  # `--` ends parsing, but only where the dispatcher still has a branch left to
+  # `--` ends parsing, but only where the grammar still has a branch left to
   # read: `perch --`, `perch br --`, `perch wt --`. Past `perch wt ls`, or a
-  # branch the dispatcher has already taken, the words after `--` go nowhere.
+  # branch the grammar has already taken, no further word is accepted.
   if [[ "$prev" == "--" ]]; then
     if (( pos == 2 )) ||
       { (( pos == 3 )) && [[ "$verb" == "br" || "$verb" == "wt" ]]; } ||
@@ -163,10 +232,10 @@ _perch_completions() {
   case "$pos" in
     1)
       COMPREPLY=()
-      _perch_reply "$cur" < <(printf '%s\n' br shell wt; _perch_offers)
+      _perch_reply "$cur" < <(printf '%s\n' -C --hook-env br shell wt; _perch_offers)
       ;;
     # Only the command words read a second word. `perch <branch>` has taken its
-    # target by here, and the dispatcher ignores whatever follows it.
+    # target by here, and refuses any word after it.
     2)
       COMPREPLY=()
       if [[ "$verb" == "br" ]]; then

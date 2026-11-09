@@ -2420,7 +2420,8 @@ const REPOSITORY_VARIABLES: [&str; 13] = [
 /// The [`REPOSITORY_VARIABLES`] git resolves from the cwd, not the work-tree top.
 const CWD_RELATIVE_VARIABLES: [&str; 3] = ["GIT_CONFIG", "GIT_DIR", "GIT_WORK_TREE"];
 
-/// Where the inherited [`REPOSITORY_VARIABLES`] lead from where perch started.
+/// Where the inherited [`REPOSITORY_VARIABLES`] lead from the directory perch
+/// runs in, after any `-C`, as git resolves them.
 static INHERITED_REPOSITORY: OnceLock<InheritedRepository> = OnceLock::new();
 
 struct InheritedRepository {
@@ -2430,7 +2431,8 @@ struct InheritedRepository {
     roots: Vec<PathBuf>,
 }
 
-/// Records [`INHERITED_REPOSITORY`] before anything moves the cwd.
+/// Records [`INHERITED_REPOSITORY`] once `-C` has been applied and before
+/// anything else moves the cwd.
 pub fn record_inherited_repository() {
     if !REPOSITORY_VARIABLES
         .iter()

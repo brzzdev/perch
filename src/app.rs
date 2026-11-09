@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use console::{Key, StyledObject, Term, style};
@@ -82,7 +82,12 @@ impl Verb {
     }
 }
 
-pub(crate) fn run_invocation(invocation: Invocation) -> AppResult<()> {
+/// `shell_directory` is where perch started, before any `-C`: the directory
+/// the shell wrapper is in.
+pub(crate) fn run_invocation(
+    invocation: Invocation,
+    shell_directory: Option<PathBuf>,
+) -> AppResult<()> {
     if matches!(
         &invocation,
         Invocation::Navigate(Navigation::Worktree { .. })
@@ -106,7 +111,7 @@ pub(crate) fn run_invocation(invocation: Invocation) -> AppResult<()> {
         ),
         Invocation::RemoveBranches(removal) => br::run_rm(&removal),
         Invocation::ListWorktrees => wt::run_ls(),
-        Invocation::RemoveWorktrees(removal) => wt::run_rm(&removal),
+        Invocation::RemoveWorktrees(removal) => wt::run_rm(&removal, shell_directory),
         Invocation::InitShell(shell) => {
             print!("{}", shell.script());
             Ok(())

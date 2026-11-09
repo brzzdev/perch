@@ -14,5 +14,10 @@ Usage: perch [<branch>|pr:<n>|mr:<n>]
        perch wt rm [<branch>|.]
        perch shell install    Add the shell integration to your rc file
 
+Options:
+  -C <path>              Run as if perch was started in <path>
+      --hook-env <KEY=VALUE>
+                         Add KEY=VALUE to every hook this run fires; repeatable
+
 With the shell integration loaded, `br` and `wt` stand in for `perch br`
 and `perch wt`. Set PERCH_NO_SHORTCUTS to leave both names alone.

@@ -1477,6 +1477,19 @@ fn zsh_completion_passes_the_global_options_on_to_the_binary() {
     );
 }
 
+/// Outside a live completion, as on bash 3.2, `compopt` fails, so the
+/// directories must come back already escaped.
+#[test]
+fn bash_completion_escapes_a_dash_c_directory_without_compopt() {
+    let parent = TempDir::new().unwrap();
+    fs::create_dir(parent.path().join("Application Support")).unwrap();
+
+    let output = bash_complete(parent.path(), "perch -C Appl", 2);
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert_eq!(stdout_str(&output), "Application\\ Support\n");
+}
+
 #[test]
 fn bash_completion_expands_only_an_unquoted_home_tilde() {
     let completions = concat!(env!("CARGO_MANIFEST_DIR"), "/completions/perch.bash");

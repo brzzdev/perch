@@ -145,10 +145,12 @@ _perch_complete_words() {
   if (( pos == 2 )); then
     case "${cmdline[1]}" in
       -C)
-        compopt -o filenames 2>/dev/null
+        # bash 3.2 has no `compopt`, so escape the candidates here instead.
+        local filenames=1 directory
+        compopt -o filenames 2>/dev/null || filenames=0
         COMPREPLY=()
-        local directory
         while IFS= read -r directory; do
+          (( filenames )) || printf -v directory '%q' "$directory"
           COMPREPLY+=("$directory")
         done < <(compgen -d -- "${cmdline[pos]}")
         return
@@ -212,9 +214,9 @@ _perch_complete_words() {
     return
   fi
 
-  # `--` ends parsing, but only where the dispatcher still has a branch left to
+  # `--` ends parsing, but only where the grammar still has a branch left to
   # read: `perch --`, `perch br --`, `perch wt --`. Past `perch wt ls`, or a
-  # branch the dispatcher has already taken, no further word is accepted.
+  # branch the grammar has already taken, no further word is accepted.
   if [[ "$prev" == "--" ]]; then
     if (( pos == 2 )) ||
       { (( pos == 3 )) && [[ "$verb" == "br" || "$verb" == "wt" ]]; } ||

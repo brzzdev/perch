@@ -48,9 +48,9 @@ function __perch_is_nth_token --argument-names n
     test (count $tokens) -eq "$n"
 end
 
-# True where `--` has just been typed and the dispatcher still has a branch left
+# True where `--` has just been typed and the grammar still has a branch left
 # to read: `perch --`, `perch br --`, `perch wt --`. Past `perch wt ls`, or a
-# branch the dispatcher has already taken, the words after `--` go nowhere.
+# branch the grammar has already taken, no further word is accepted.
 function __perch_after_double_dash
     set -l tokens (__perch_tokens)
     test "$tokens[-1]" = "--"; or return 1

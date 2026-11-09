@@ -160,9 +160,9 @@ _perch() {
     return
   fi
 
-  # `--` ends parsing, but only where the dispatcher still has a branch left to
+  # `--` ends parsing, but only where the grammar still has a branch left to
   # read: `perch --`, `perch br --`, `perch wt --`. Past `perch wt ls`, or a
-  # branch the dispatcher has already taken, the words after `--` go nowhere.
+  # branch the grammar has already taken, no further word is accepted.
   if [[ "$cmdline[pos-1]" == -- ]]; then
     if (( pos == 3 )) ||
       { (( pos == 4 )) && [[ "$cmdline[2]" == (br|wt) ]]; } ||

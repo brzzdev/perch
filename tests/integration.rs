@@ -1419,6 +1419,23 @@ fn bash_completion_answers_from_the_dash_c_repo_past_the_global_options() {
         "stdout: {}",
         stdout_str(&output)
     );
+
+    let inside_the_pair = bash_complete_line(
+        elsewhere.path(),
+        "COMP_LINE=\"perch --hook-env S=b\"",
+        "perch --hook-env S = b",
+        4,
+    );
+    assert!(
+        inside_the_pair.status.success(),
+        "stderr: {}",
+        stderr_str(&inside_the_pair)
+    );
+    assert_eq!(
+        stdout_str(&inside_the_pair).trim(),
+        "",
+        "a value in progress offers nothing"
+    );
 }
 
 #[test]

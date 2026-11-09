@@ -238,20 +238,20 @@ pub struct GrammarError(GrammarErrorKind);
 
 #[derive(Debug, Eq, PartialEq, thiserror::Error)]
 enum GrammarErrorKind {
+    #[error("invalid `perch br` invocation: {0}")]
+    BranchNavigation(String),
+
     #[error("invalid `perch br rm` invocation: {0}")]
     BranchRemoval(String),
-
-    #[error("invalid `{command}` invocation: unexpected extra argument '{extra}'")]
-    ExtraArgument {
-        command: &'static str,
-        extra: String,
-    },
 
     #[error("invalid `--hook-env` pair '{0}'; expected KEY=VALUE with a non-empty KEY")]
     InvalidHookVariable(String),
 
     #[error("`{0}` needs a value")]
     MissingValue(&'static str),
+
+    #[error("invalid `perch` invocation: {0}")]
+    Navigation(String),
 
     #[error("`--no-switch` does not apply to `perch wt {subverb}`")]
     NoSwitchWithSubverb { subverb: String },
@@ -275,15 +275,12 @@ enum GrammarErrorKind {
 }
 
 impl GrammarError {
-    fn branch_removal(message: String) -> Self {
-        Self(GrammarErrorKind::BranchRemoval(message))
+    fn branch_navigation(message: String) -> Self {
+        Self(GrammarErrorKind::BranchNavigation(message))
     }
 
-    fn extra_argument(command: &'static str, extra: &str) -> Self {
-        Self(GrammarErrorKind::ExtraArgument {
-            command,
-            extra: extra.to_string(),
-        })
+    fn branch_removal(message: String) -> Self {
+        Self(GrammarErrorKind::BranchRemoval(message))
     }
 
     fn invalid_hook_variable(pair: &str) -> Self {
@@ -292,6 +289,10 @@ impl GrammarError {
 
     fn missing_value(option: &'static str) -> Self {
         Self(GrammarErrorKind::MissingValue(option))
+    }
+
+    fn navigation(message: String) -> Self {
+        Self(GrammarErrorKind::Navigation(message))
     }
 
     fn shell(message: String) -> Self {
@@ -368,7 +369,7 @@ fn parse(args: &[String]) -> Result<Invocation, GrammarError> {
         Some("--version" | "-V") => Ok(Invocation::Version),
         Some("--complete") => Ok(branch_completion(Position::Bare)),
         Some("--") => {
-            reject_extra(args, 2, Verb::Go)?;
+            reject_extra(args, 2, GrammarError::navigation)?;
             Ok(parse_escaped(args.get(1), Verb::Go))
         }
         Some(word) => match parse_command_word(word) {
@@ -376,7 +377,7 @@ fn parse(args: &[String]) -> Result<Invocation, GrammarError> {
             Some(CommandWord::Shell) => parse_shell(&args[1..]),
             Some(CommandWord::Worktree) => parse_worktree(&args[1..]),
             None => {
-                reject_extra(args, 1, Verb::Go)?;
+                reject_extra(args, 1, GrammarError::navigation)?;
                 Ok(navigate(Verb::Go, Some(word)))
             }
         },
@@ -407,12 +408,12 @@ fn parse_branch(args: &[String]) -> Result<Invocation, GrammarError> {
         Some("--help" | "-h") => Ok(Invocation::Help(HelpPage::Branch)),
         Some("--complete") => Ok(branch_completion(Position::Branch)),
         Some("--") => {
-            reject_extra(args, 2, Verb::Here)?;
+            reject_extra(args, 2, GrammarError::branch_navigation)?;
             Ok(parse_escaped(args.get(1), Verb::Here))
         }
         Some(word) if parse_branch_subverb(word).is_some() => parse_branch_removal(&args[1..]),
         Some(word) => {
-            reject_extra(args, 1, Verb::Here)?;
+            reject_extra(args, 1, GrammarError::branch_navigation)?;
             Ok(navigate(Verb::Here, Some(word)))
         }
         None => Ok(navigate(Verb::Here, None)),
@@ -570,16 +571,15 @@ fn parse_worktree_removal(args: &[&String]) -> Result<Invocation, GrammarError> 
 
 /// Refuses whatever follows the `taken` words that name a target, so a
 /// misplaced option cannot pass silently.
-fn reject_extra(args: &[String], taken: usize, verb: Verb) -> Result<(), GrammarError> {
-    let Some(extra) = args.get(taken) else {
-        return Ok(());
-    };
-    let command = match verb {
-        Verb::Go => "perch",
-        Verb::Here => "perch br",
-        Verb::Worktree => "perch wt",
-    };
-    Err(GrammarError::extra_argument(command, extra))
+fn reject_extra(
+    args: &[String],
+    taken: usize,
+    error: fn(String) -> GrammarError,
+) -> Result<(), GrammarError> {
+    match args.get(taken) {
+        Some(extra) => Err(error(format!("unexpected extra argument '{extra}'"))),
+        None => Ok(()),
+    }
 }
 
 fn parse_escaped(target: Option<&String>, verb: Verb) -> Invocation {

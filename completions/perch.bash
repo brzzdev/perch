@@ -82,24 +82,36 @@ _perch_dequote() {
   printf '%s' "$word"
 }
 
+# Readline splits words at COMP_WORDBREAKS, `=` and `:` among them, so
+# `--hook-env K=V` arrives as `--hook-env K = V`. The rules read the words with
+# whatever no whitespace separated in the line joined back up; bash still
+# replaces only readline's last fragment, so the replies lose the part of the
+# current word that came before it.
 _perch_completions() {
-  # Readline splits words at COMP_WORDBREAKS, `=` among them, so `--hook-env
-  # K=V` arrives as `--hook-env K = V`. Rejoin the words before the cursor that
-  # no whitespace separated in the line.
   local -a typed=()
-  local line="${COMP_LINE-${COMP_WORDS[*]}}" word gap i
-  for (( i = 0; i < COMP_CWORD; i++ )); do
+  local line="${COMP_LINE-${COMP_WORDS[*]}}" word gap i fragment_prefix=
+  for (( i = 0; i <= COMP_CWORD; i++ )); do
     word="${COMP_WORDS[i]}"
     gap="${line%%[![:space:]]*}"
     line="${line#"$gap"}"
     if (( i > 0 )) && [[ -z "$gap" ]]; then
+      (( i == COMP_CWORD )) && fragment_prefix="${typed[${#typed[@]}-1]}"
       typed[${#typed[@]}-1]+="$word"
     else
       typed+=("$word")
     fi
     line="${line#"$word"}"
   done
-  typed+=("${COMP_WORDS[COMP_CWORD]}")
+
+  _perch_complete_words "${typed[@]}"
+  if [[ -n "$fragment_prefix" ]]; then
+    COMPREPLY=("${COMPREPLY[@]#"$fragment_prefix"}")
+  fi
+}
+
+# Completes the last of the given words, which are the whole command line.
+_perch_complete_words() {
+  local -a typed=("$@")
 
   # `br` and `wt` are the shell wrapper's shorthand for `perch br` and `perch wt`,
   # so every rule below reads a word list with the verb spelled out. One offset
@@ -199,7 +211,7 @@ _perch_completions() {
 
   # `--` ends parsing, but only where the dispatcher still has a branch left to
   # read: `perch --`, `perch br --`, `perch wt --`. Past `perch wt ls`, or a
-  # branch the dispatcher has already taken, the words after `--` go nowhere.
+  # branch the dispatcher has already taken, no further word is accepted.
   if [[ "$prev" == "--" ]]; then
     if (( pos == 2 )) ||
       { (( pos == 3 )) && [[ "$verb" == "br" || "$verb" == "wt" ]]; } ||
@@ -218,7 +230,7 @@ _perch_completions() {
       _perch_reply "$cur" < <(printf '%s\n' -C --hook-env br shell wt; _perch_offers)
       ;;
     # Only the command words read a second word. `perch <branch>` has taken its
-    # target by here, and the dispatcher ignores whatever follows it.
+    # target by here, and refuses any word after it.
     2)
       COMPREPLY=()
       if [[ "$verb" == "br" ]]; then

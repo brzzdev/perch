@@ -12,5 +12,3 @@ Usage: perch wt [<branch>|pr:<n>|mr:<n>] [--no-switch]
 Options:
       --no-switch  Create or find the worktree without switching to it
   -f, --force      Skip the confirmation for uncommitted or unmerged work
-      --hook-env <KEY=VALUE>
-                   Add KEY=VALUE to every hook this run fires; repeatable

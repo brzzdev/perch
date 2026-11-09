@@ -22,7 +22,6 @@ use crate::grammar::HookVariable;
 /// The `--hook-env` pairs every hook this run fires is given.
 static ENVIRONMENT: OnceLock<Vec<HookVariable>> = OnceLock::new();
 
-/// Records [`ENVIRONMENT`] before anything can fire a hook.
 pub(crate) fn set_environment(variables: Vec<HookVariable>) {
     let _ = ENVIRONMENT.set(variables);
 }

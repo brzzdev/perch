@@ -132,11 +132,11 @@ Perch asks `gh` (for `pr:`) or `glab` (for `mr:`) about the request on `origin`,
 
 ### From a script
 
-`-C <path>` runs perch as if it had been started in `<path>`, as `git -C` does, so a script needs no `cd` first. It goes before the command word; a relative path resolves against the current directory, and each further `-C` against the one before it. A path that isn't a directory fails before anything runs.
+`-C <path>` runs perch as if it had been started in `<path>`, as `git -C` does, so a script needs no `cd` first. It goes before the command word, as does `--hook-env`, in either order; a relative path resolves against the current directory, and each further `-C` against the one before it. A path that isn't a directory fails before anything runs.
 
 ```sh
-perch -C ~/src/repo wt 77 pr:77 --no-switch --hook-env SESSION=review
-perch -C ~/src/repo wt rm 77 --hook-env SESSION=review
+perch -C ~/src/repo --hook-env SESSION=review wt 77 pr:77 --no-switch
+perch -C ~/src/repo --hook-env SESSION=review wt rm 77
 ```
 
 `--hook-env` hands the run's [hooks](#worktree-hooks) a variable of the caller's own.
@@ -370,7 +370,7 @@ Each command runs via `sh -c` from the main checkout, with:
 | `PERCH_MAIN` | Absolute path of the main checkout |
 | `PERCH_WORKTREE` | Absolute path of the worktree the event is about |
 
-`--hook-env KEY=VALUE` adds a variable to the environment of every hook the run fires, `created` and `removed` alike, and to nothing else. Repeat it for more than one, anywhere before a `--`. `KEY` can't be empty, `VALUE` can, and the variables above win over a clashing key.
+`--hook-env KEY=VALUE` adds a variable to the environment of every hook the run fires, `created` and `removed` alike, and to nothing else. It goes before the command word, and repeats for more than one. `KEY` can't be empty, `VALUE` can, and the variables above win over a clashing key.
 
 `created` fires the moment the worktree exists, before the stale-branch prompt. `removed` fires once per worktree, only after one is actually gone — so the path it names no longer exists on disk. Both cover every route: `removed` fires for a worktree taken along by the stale-branch cleanup just as it does for `wt rm`, since a hook mirrors what happened to the repo rather than which command you typed.
 

@@ -3,54 +3,30 @@
 # and everywhere else the branches, minus the words its own match arm eats
 # first. It sees remote-only branches, which the `git branch` this replaced
 # could not. `command` skips the shell wrapper: it is a function here, and it
-# would `cd` the interactive shell on a single-line answer. Any `-C <path>`
-# typed is passed along, so the answer is the repo the command will run in.
+# would `cd` the interactive shell on a single-line answer.
 function __perch_offers
-    command perch (__perch_directory_options) $argv --complete 2>/dev/null
+    command perch (__perch_tokens --global) $argv --complete 2>/dev/null
 end
 
-# The words typed so far, read as if the global options were never typed: a
-# leading `-C <path>` and every `--hook-env` pair before `--` are dropped. Each
-# rule below reads positions from this rather than from `commandline`.
+# The words typed so far with the global options ahead of the command word set
+# aside, so positions count from it; `--global` prints those options instead.
 function __perch_tokens
     set -l tokens (commandline -opc)
-    set -l kept $tokens[1]
-    set -l leading 0
-    test "$tokens[1]" = perch; and set leading 1
-    set -l options_open 1
-    set -l i 2
-    while test $i -le (count $tokens)
-        set -l token $tokens[$i]
-        if test $i -lt (count $tokens)
-            if test $leading -eq 1; and test "$token" = -C
-                set i (math $i + 2)
-                continue
-            end
-            if test $options_open -eq 1; and test "$token" = --hook-env
-                set i (math $i + 2)
-                continue
-            end
+    set -l global
+    if test "$tokens[1]" = perch
+        while set -q tokens[3]; and contains -- $tokens[2] -C --hook-env
+            set -a global $tokens[2] (string replace -r '^~' $HOME -- $tokens[3])
+            set -e tokens[2..3]
         end
-        set leading 0
-        test "$token" = --; and set options_open 0
-        set -a kept $token
-        set i (math $i + 1)
     end
-    printf '%s\n' $kept
-end
-
-# Each leading `-C <path>`, for the binary to answer from.
-function __perch_directory_options
-    set -l tokens (commandline -opc)
-    test "$tokens[1]" = perch; or return
-    set -l i 2
-    while test "$tokens[$i]" = -C; and set -q tokens[(math $i + 1)]
-        printf '%s\n' -C (string replace -r '^~' $HOME -- $tokens[(math $i + 1)])
-        set i (math $i + 2)
+    if contains -- --global $argv
+        set -q global[1]; and printf '%s\n' $global
+    else
+        printf '%s\n' $tokens
     end
 end
 
-# `__fish_is_nth_token`, read from `__perch_tokens`.
+# `__fish_is_nth_token`, counted from `__perch_tokens`.
 function __perch_is_nth_token --argument-names n
     set -l tokens (string replace -r --filter '^([^-].*)' '$1' -- (__perch_tokens))
     test (count $tokens) -eq "$n"
@@ -108,9 +84,9 @@ end
 
 # True while the command is in `wt`'s option-parsing region. Unlike
 # `__fish_seen_subcommand_from`, this checks the verb's position, so a branch
-# called `wt` under `br` cannot make an option appear. A regular branch may
-# come before an option; a subverb or `--` closes the position.
-function __perch_in_wt_options
+# called `wt` under `br` cannot make the option appear. A regular branch may
+# come before the option; a subverb or `--` closes the position.
+function __perch_wt_accepts_no_switch
     set -l tokens (__perch_tokens)
     set -l first_arg
     switch "$tokens[1]"
@@ -126,6 +102,7 @@ function __perch_in_wt_options
     test (count $tokens) -ge $first_arg; or return 0
     for token in $tokens[$first_arg..-1]
         test "$token" = --; and return 1
+        test "$token" = --no-switch; and return 1
         string match --quiet -- '-*' "$token"; and continue
         contains -- "$token" ls rm list remove; and return 1
     end
@@ -166,14 +143,15 @@ end
 function __perch_wt_branch_offers
     set -l tokens (__perch_tokens)
     if test "$tokens[1]" = wt
-        command perch (__perch_directory_options) wt $tokens[2..-1] --complete 2>/dev/null
+        __perch_offers wt $tokens[2..-1]
     else
-        command perch (__perch_directory_options) $tokens[2..-1] --complete 2>/dev/null
+        __perch_offers $tokens[2..-1]
     end
 end
 
-# Before the command word: `-C` and the directory it names.
+# Ahead of the command word: the global options, and the directory `-C` names.
 complete -c perch -n '__perch_is_nth_token 1' -s C -x -a '(__fish_complete_directories)' -d 'Run as if perch was started in a directory'
+complete -c perch -n '__perch_is_nth_token 1' -l hook-env -x -d 'Add KEY=VALUE to every hook this run fires'
 
 # Top-level: subcommands + the branches reachable without `--`.
 complete -c perch -f -n '__perch_is_nth_token 1' -a '(__perch_offers)'
@@ -205,8 +183,7 @@ complete -c perch -f -n '__fish_seen_subcommand_from shell; and __perch_is_nth_t
 # how you say you meant the branch.
 complete -c perch -f -n '__fish_seen_subcommand_from wt; and __perch_is_nth_token 2; and not __perch_after_double_dash' -a 'ls rm'
 complete -c perch -f -n '__perch_wt_wants_branch' -a '(__perch_wt_branch_offers)'
-complete -c perch -f -l no-switch -d 'Create or find the worktree without switching to it' -n '__perch_in_wt_options; and not contains -- --no-switch (__perch_tokens)'
-complete -c perch -x -l hook-env -d 'Add KEY=VALUE to every hook this run fires' -n '__perch_in_wt_options; or __perch_in_br_rm'
+complete -c perch -f -l no-switch -d 'Create or find the worktree without switching to it' -n '__perch_wt_accepts_no_switch'
 
 # After `wt rm`: the worktrees, until one has been taken.
 complete -c perch -f -n '__perch_rm_wants_target wt' -a '(__perch_offers wt rm)'

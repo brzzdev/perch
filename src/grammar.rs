@@ -313,37 +313,26 @@ enum WorktreeSubverb {
 const DIRECTORY_OPTION: &str = "-C";
 const HOOK_ENVIRONMENT_OPTION: &str = "--hook-env";
 
-/// Reads the global options around [`parse`]: `--hook-env KEY=VALUE` anywhere
-/// before a `--`, and any `-C <path>` before the first other word.
+/// Reads the global options ahead of the command word, in any order, then
+/// [`parse`]s the rest.
 pub(crate) fn parse_command_line(args: &[String]) -> Result<CommandLine, GrammarError> {
-    let mut hook_environment = Vec::new();
-    let mut remaining = Vec::with_capacity(args.len());
-    let mut words = args.iter();
-    while let Some(word) = words.next() {
-        if word == "--" {
-            remaining.push(word.clone());
-            remaining.extend(words.by_ref().cloned());
-            break;
-        }
-        if word != HOOK_ENVIRONMENT_OPTION {
-            remaining.push(word.clone());
-            continue;
-        }
-        let Some(pair) = words.next() else {
-            return Err(GrammarError::missing_value(HOOK_ENVIRONMENT_OPTION));
-        };
-        hook_environment.push(HookVariable::parse(pair)?);
-    }
-
     let mut directory: Option<PathBuf> = None;
-    let mut rest = remaining.as_slice();
-    while let [option, tail @ ..] = rest
-        && option == DIRECTORY_OPTION
-    {
-        let [path, tail @ ..] = tail else {
-            return Err(GrammarError::missing_value(DIRECTORY_OPTION));
+    let mut hook_environment = Vec::new();
+    let mut rest = args;
+    while let [option, tail @ ..] = rest {
+        let option = match option.as_str() {
+            DIRECTORY_OPTION => DIRECTORY_OPTION,
+            HOOK_ENVIRONMENT_OPTION => HOOK_ENVIRONMENT_OPTION,
+            _ => break,
         };
-        directory.get_or_insert_default().push(path);
+        let [value, tail @ ..] = tail else {
+            return Err(GrammarError::missing_value(option));
+        };
+        if option == DIRECTORY_OPTION {
+            directory.get_or_insert_default().push(value);
+        } else {
+            hook_environment.push(HookVariable::parse(value)?);
+        }
         rest = tail;
     }
 
@@ -680,8 +669,6 @@ const WORKTREE_HELP: &str = concat!(
     "Options:\n",
     "      --no-switch  Create or find the worktree without switching to it\n",
     "  -f, --force      Skip the confirmation for uncommitted or unmerged work\n",
-    "      --hook-env <KEY=VALUE>\n",
-    "                   Add KEY=VALUE to every hook this run fires; repeatable\n",
 );
 
 #[cfg(test)]
@@ -705,38 +692,46 @@ mod tests {
     }
 
     #[test]
-    fn a_directory_option_after_the_command_word_is_not_global() {
-        let error = command_line(&["wt", "-C", "repo"]).unwrap_err();
-
+    fn global_options_after_the_command_word_are_unknown_options() {
+        let directory = command_line(&["wt", "-C", "repo"]).unwrap_err();
         assert_eq!(
-            error.to_string(),
+            directory.to_string(),
             "invalid `perch wt` invocation: unknown option '-C'"
+        );
+
+        let hook_environment =
+            command_line(&["wt", "rm", "topic", "--hook-env", "K=V"]).unwrap_err();
+        assert_eq!(
+            hook_environment.to_string(),
+            "invalid `perch wt rm` invocation: unknown option '--hook-env'"
         );
     }
 
     #[test]
-    fn hook_env_pairs_are_read_anywhere_before_a_double_dash() {
+    fn hook_env_pairs_mix_with_directory_options_ahead_of_the_command_word() {
         let parsed = command_line(&[
             "-C",
             "repo",
+            "--hook-env",
+            "SESSION=one=two",
+            "-C",
+            "sub",
+            "--hook-env",
+            "EMPTY=",
             "wt",
             "77",
             "#77",
             "--no-switch",
-            "--hook-env",
-            "SESSION=one=two",
-            "--hook-env",
-            "EMPTY=",
         ])
         .unwrap();
 
-        assert_eq!(
-            parsed.hook_environment,
-            [
-                HookVariable::parse("SESSION=one=two").unwrap(),
-                HookVariable::parse("EMPTY=").unwrap(),
-            ]
-        );
+        assert_eq!(parsed.directory, Some(PathBuf::from("repo/sub")));
+        let pairs: Vec<(&str, &str)> = parsed
+            .hook_environment
+            .iter()
+            .map(|variable| (variable.key(), variable.value()))
+            .collect();
+        assert_eq!(pairs, [("SESSION", "one=two"), ("EMPTY", "")]);
         assert_eq!(
             parsed.invocation,
             Invocation::Navigate(Navigation::Worktree {
@@ -745,48 +740,21 @@ mod tests {
                 shell_handoff: ShellHandoff::Suppress,
             })
         );
-        assert_eq!(parsed.hook_environment[0].value(), "one=two");
-    }
-
-    #[test]
-    fn hook_env_reaches_worktree_removal_but_not_past_its_double_dash() {
-        let parsed = command_line(&["wt", "rm", "topic", "--hook-env", "K=V"]).unwrap();
-        assert_eq!(
-            parsed.hook_environment,
-            [HookVariable::parse("K=V").unwrap()]
-        );
-        assert_eq!(
-            parsed.invocation,
-            Invocation::RemoveWorktrees(WorktreeRemoval {
-                target: Some("topic".into()),
-                force: false,
-            })
-        );
-
-        let escaped = command_line(&["wt", "rm", "--", "--hook-env"]).unwrap();
-        assert_eq!(escaped.hook_environment, []);
-        assert_eq!(
-            escaped.invocation,
-            Invocation::RemoveWorktrees(WorktreeRemoval {
-                target: Some("--hook-env".into()),
-                force: false,
-            })
-        );
     }
 
     #[test]
     fn a_malformed_or_missing_option_value_is_a_usage_error() {
         for (words, message) in [
             (
-                ["wt", "--hook-env", "NOEQUALS"].as_slice(),
+                ["--hook-env", "NOEQUALS"].as_slice(),
                 "invalid `--hook-env` pair 'NOEQUALS'; expected KEY=VALUE with a non-empty KEY",
             ),
             (
-                ["wt", "--hook-env", "=value"].as_slice(),
+                ["--hook-env", "=value"].as_slice(),
                 "invalid `--hook-env` pair '=value'; expected KEY=VALUE with a non-empty KEY",
             ),
             (
-                ["wt", "--hook-env"].as_slice(),
+                ["-C", "repo", "--hook-env"].as_slice(),
                 "`--hook-env` needs a value",
             ),
             (["-C"].as_slice(), "`-C` needs a value"),

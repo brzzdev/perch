@@ -1,3 +1,41 @@
+use std::path::PathBuf;
+
+/// An [`Invocation`] and the global options that set up the run around it.
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct CommandLine {
+    /// Where `-C` says the run starts, joined in order like git's.
+    pub(crate) directory: Option<PathBuf>,
+    pub(crate) hook_environment: Vec<HookVariable>,
+    pub(crate) invocation: Invocation,
+}
+
+/// One `--hook-env KEY=VALUE` pair.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct HookVariable {
+    key: String,
+    value: String,
+}
+
+impl HookVariable {
+    pub(crate) fn parse(pair: &str) -> Result<Self, GrammarError> {
+        match pair.split_once('=') {
+            Some((key, value)) if !key.is_empty() => Ok(Self {
+                key: key.to_string(),
+                value: value.to_string(),
+            }),
+            _ => Err(GrammarError::invalid_hook_variable(pair)),
+        }
+    }
+
+    pub(crate) fn key(&self) -> &str {
+        &self.key
+    }
+
+    pub(crate) fn value(&self) -> &str {
+        &self.value
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Invocation {
     Complete(Completion),
@@ -203,6 +241,12 @@ enum GrammarErrorKind {
     #[error("invalid `perch br rm` invocation: {0}")]
     BranchRemoval(String),
 
+    #[error("invalid `--hook-env` pair '{0}'; expected KEY=VALUE with a non-empty KEY")]
+    InvalidHookVariable(String),
+
+    #[error("`{0}` needs a value")]
+    MissingValue(&'static str),
+
     #[error("`--no-switch` does not apply to `perch wt {subverb}`")]
     NoSwitchWithSubverb { subverb: String },
 
@@ -227,6 +271,14 @@ enum GrammarErrorKind {
 impl GrammarError {
     fn branch_removal(message: String) -> Self {
         Self(GrammarErrorKind::BranchRemoval(message))
+    }
+
+    fn invalid_hook_variable(pair: &str) -> Self {
+        Self(GrammarErrorKind::InvalidHookVariable(pair.to_string()))
+    }
+
+    fn missing_value(option: &'static str) -> Self {
+        Self(GrammarErrorKind::MissingValue(option))
     }
 
     fn shell(message: String) -> Self {
@@ -258,7 +310,51 @@ enum WorktreeSubverb {
     Rm,
 }
 
-pub(crate) fn parse(args: &[String]) -> Result<Invocation, GrammarError> {
+const DIRECTORY_OPTION: &str = "-C";
+const HOOK_ENVIRONMENT_OPTION: &str = "--hook-env";
+
+/// Reads the global options around [`parse`]: `--hook-env KEY=VALUE` anywhere
+/// before a `--`, and any `-C <path>` before the first other word.
+pub(crate) fn parse_command_line(args: &[String]) -> Result<CommandLine, GrammarError> {
+    let mut hook_environment = Vec::new();
+    let mut remaining = Vec::with_capacity(args.len());
+    let mut words = args.iter();
+    while let Some(word) = words.next() {
+        if word == "--" {
+            remaining.push(word.clone());
+            remaining.extend(words.by_ref().cloned());
+            break;
+        }
+        if word != HOOK_ENVIRONMENT_OPTION {
+            remaining.push(word.clone());
+            continue;
+        }
+        let Some(pair) = words.next() else {
+            return Err(GrammarError::missing_value(HOOK_ENVIRONMENT_OPTION));
+        };
+        hook_environment.push(HookVariable::parse(pair)?);
+    }
+
+    let mut directory: Option<PathBuf> = None;
+    let mut rest = remaining.as_slice();
+    while let [option, tail @ ..] = rest
+        && option == DIRECTORY_OPTION
+    {
+        let [path, tail @ ..] = tail else {
+            return Err(GrammarError::missing_value(DIRECTORY_OPTION));
+        };
+        directory.get_or_insert_default().push(path);
+        rest = tail;
+    }
+
+    Ok(CommandLine {
+        directory,
+        hook_environment,
+        invocation: parse(rest)?,
+    })
+}
+
+fn parse(args: &[String]) -> Result<Invocation, GrammarError> {
     match args.first().map(String::as_str) {
         Some("--help" | "-h") => Ok(Invocation::Help(HelpPage::Main)),
         Some("--version" | "-V") => Ok(Invocation::Version),
@@ -538,6 +634,11 @@ const MAIN_HELP: &str = concat!(
     "       perch wt rm [<branch>|.]\n",
     "       perch shell install    Add the shell integration to your rc file\n",
     "\n",
+    "Options:\n",
+    "  -C <path>              Run as if perch was started in <path>\n",
+    "      --hook-env <KEY=VALUE>\n",
+    "                         Add KEY=VALUE to every hook this run fires; repeatable\n",
+    "\n",
     "With the shell integration loaded, `br` and `wt` stand in for `perch br`\n",
     "and `perch wt`. Set PERCH_NO_SHORTCUTS to leave both names alone.\n",
 );
@@ -579,6 +680,8 @@ const WORKTREE_HELP: &str = concat!(
     "Options:\n",
     "      --no-switch  Create or find the worktree without switching to it\n",
     "  -f, --force      Skip the confirmation for uncommitted or unmerged work\n",
+    "      --hook-env <KEY=VALUE>\n",
+    "                   Add KEY=VALUE to every hook this run fires; repeatable\n",
 );
 
 #[cfg(test)]
@@ -587,6 +690,109 @@ mod tests {
 
     fn args(words: &[&str]) -> Vec<String> {
         words.iter().map(|word| (*word).to_string()).collect()
+    }
+
+    fn command_line(words: &[&str]) -> Result<CommandLine, GrammarError> {
+        parse_command_line(&args(words))
+    }
+
+    #[test]
+    fn each_leading_directory_option_joins_onto_the_one_before() {
+        let parsed = command_line(&["-C", "/repos", "-C", "perch", "wt", "ls"]).unwrap();
+
+        assert_eq!(parsed.directory, Some(PathBuf::from("/repos/perch")));
+        assert_eq!(parsed.invocation, Invocation::ListWorktrees);
+    }
+
+    #[test]
+    fn a_directory_option_after_the_command_word_is_not_global() {
+        let error = command_line(&["wt", "-C", "repo"]).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "invalid `perch wt` invocation: unknown option '-C'"
+        );
+    }
+
+    #[test]
+    fn hook_env_pairs_are_read_anywhere_before_a_double_dash() {
+        let parsed = command_line(&[
+            "-C",
+            "repo",
+            "wt",
+            "77",
+            "#77",
+            "--no-switch",
+            "--hook-env",
+            "SESSION=one=two",
+            "--hook-env",
+            "EMPTY=",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            parsed.hook_environment,
+            [
+                HookVariable::parse("SESSION=one=two").unwrap(),
+                HookVariable::parse("EMPTY=").unwrap(),
+            ]
+        );
+        assert_eq!(
+            parsed.invocation,
+            Invocation::Navigate(Navigation::Worktree {
+                worktree_name: Some(WorktreeDirectoryName("77".into())),
+                target: Some("#77".into()),
+                shell_handoff: ShellHandoff::Suppress,
+            })
+        );
+        assert_eq!(parsed.hook_environment[0].value(), "one=two");
+    }
+
+    #[test]
+    fn hook_env_reaches_worktree_removal_but_not_past_its_double_dash() {
+        let parsed = command_line(&["wt", "rm", "topic", "--hook-env", "K=V"]).unwrap();
+        assert_eq!(
+            parsed.hook_environment,
+            [HookVariable::parse("K=V").unwrap()]
+        );
+        assert_eq!(
+            parsed.invocation,
+            Invocation::RemoveWorktrees(WorktreeRemoval {
+                target: Some("topic".into()),
+                force: false,
+            })
+        );
+
+        let escaped = command_line(&["wt", "rm", "--", "--hook-env"]).unwrap();
+        assert_eq!(escaped.hook_environment, []);
+        assert_eq!(
+            escaped.invocation,
+            Invocation::RemoveWorktrees(WorktreeRemoval {
+                target: Some("--hook-env".into()),
+                force: false,
+            })
+        );
+    }
+
+    #[test]
+    fn a_malformed_or_missing_option_value_is_a_usage_error() {
+        for (words, message) in [
+            (
+                ["wt", "--hook-env", "NOEQUALS"].as_slice(),
+                "invalid `--hook-env` pair 'NOEQUALS'; expected KEY=VALUE with a non-empty KEY",
+            ),
+            (
+                ["wt", "--hook-env", "=value"].as_slice(),
+                "invalid `--hook-env` pair '=value'; expected KEY=VALUE with a non-empty KEY",
+            ),
+            (
+                ["wt", "--hook-env"].as_slice(),
+                "`--hook-env` needs a value",
+            ),
+            (["-C"].as_slice(), "`-C` needs a value"),
+        ] {
+            assert_eq!(command_line(words).unwrap_err().to_string(), message);
+        }
     }
 
     #[test]

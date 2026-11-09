@@ -121,7 +121,7 @@ A word a *Verb* reads before it reads a branch name. `br` reads `rm`; `wt` reads
 _Avoid_: Subcommand, flag, option
 
 **Grammar**:
-The rules that decide whether each word names a *Command word*, *Subverb*, option, *Worktree directory name*, or branch. `--` makes the next word a branch at the top level and after `br`; after `wt` it introduces either one branch or a *Worktree directory name* followed by a branch without reading options or subverbs, except that the legacy `wt -- <branch> --no-switch` stays a single-branch form and does not suppress the *Handoff*; inside `wt rm` it introduces a target. Destructive forms reject duplicate options, unknown options, and extra targets; worktree creation rejects unknown options, invalid *Worktree directory names*, and extra arguments.
+The rules that decide whether each word names a *Command word*, *Subverb*, option, *Worktree directory name*, or branch. `--` makes the next word a branch at the top level and after `br`; after `wt` it introduces either one branch or a *Worktree directory name* followed by a branch without reading options or subverbs, except that the legacy `wt -- <branch> --no-switch` stays a single-branch form and does not suppress the *Handoff*; inside `wt rm` it introduces a target. Destructive forms reject duplicate options, unknown options, and extra targets; worktree creation rejects unknown options, invalid *Worktree directory names*, and extra arguments. Two options are global: `-C <path>`, read only ahead of the rest of the command, and `--hook-env KEY=VALUE`, read anywhere before a `--`.
 _Avoid_: Dispatch, parsing
 
 **`.`**:

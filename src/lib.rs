@@ -36,6 +36,12 @@ pub enum Error {
     #[error("not on a branch (detached HEAD); nothing to refresh")]
     Detached,
 
+    #[error("cannot change to {}: {source}", path.display())]
+    Directory {
+        path: std::path::PathBuf,
+        source: std::io::Error,
+    },
+
     #[error("branch diverged from remote")]
     Diverged,
 
@@ -119,6 +125,11 @@ impl Error {
 }
 
 pub fn run(args: &[String]) -> AppResult<()> {
+    let command_line = grammar::parse_command_line(args)?;
+    if let Some(path) = command_line.directory {
+        std::env::set_current_dir(&path).map_err(|source| Error::Directory { path, source })?;
+    }
     git::record_inherited_repository();
-    app::run_invocation(grammar::parse(args)?)
+    app::hook::set_environment(command_line.hook_environment);
+    app::run_invocation(command_line.invocation)
 }

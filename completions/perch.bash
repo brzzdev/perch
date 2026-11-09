@@ -3,9 +3,10 @@
 # and everywhere else the branches, minus the words its own match arm eats
 # first. It sees remote-only branches, which the `git branch` this replaced
 # could not. `command` skips the shell wrapper: it is a function here, and it
-# would `cd` the interactive shell on a single-line answer.
+# would `cd` the interactive shell on a single-line answer. Any `-C <path>`
+# typed is passed along, so the answer is the repo the command will run in.
 _perch_offers() {
-  command perch "$@" --complete 2>/dev/null
+  command perch "${_perch_directory_options[@]}" "$@" --complete 2>/dev/null
 }
 
 # Fills COMPREPLY from the newline-separated candidates on stdin, keeping the
@@ -90,6 +91,43 @@ _perch_completions() {
       ;;
   esac
 
+  case "${cmdline[pos-1]}" in
+    -C)
+      compopt -o filenames 2>/dev/null
+      COMPREPLY=()
+      local directory
+      while IFS= read -r directory; do
+        COMPREPLY+=("$directory")
+      done < <(compgen -d -- "${cmdline[pos]}")
+      return
+      ;;
+    --hook-env) return ;;
+  esac
+
+  # The rules below read positions as if the global options were never typed.
+  # A leading `-C <path>` is kept for the binary's answers, and a `--hook-env`
+  # pair is dropped wherever it falls before `--`.
+  local -a kept=("${cmdline[0]}") _perch_directory_options=()
+  local typed leading=1 options_open=1 i=1
+  while (( i < pos )); do
+    typed="${cmdline[i]}"
+    if (( leading )) && [[ "$typed" == "-C" ]]; then
+      _perch_directory_options+=(-C "${cmdline[i+1]/#\~/$HOME}")
+      (( i += 2 ))
+      continue
+    fi
+    if (( options_open )) && [[ "$typed" == "--hook-env" ]]; then
+      (( i += 2 ))
+      continue
+    fi
+    leading=0
+    [[ "$typed" == "--" ]] && options_open=0
+    kept+=("$typed")
+    (( i += 1 ))
+  done
+  cmdline=("${kept[@]}" "${cmdline[@]:pos}")
+  pos=${#kept[@]}
+
   local cur="${cmdline[pos]}"
   local prev="${cmdline[pos-1]}"
   local verb="${cmdline[1]}"
@@ -98,9 +136,9 @@ _perch_completions() {
   if [[ "$verb" == "br" && "$subverb" == "rm" ]] && (( pos >= 3 )); then
     COMPREPLY=()
     if _perch_rm_wants_target br "${cmdline[@]:3:pos-3}"; then
-      _perch_reply "$cur" < <(printf '%s\n' --upstream --force; _perch_offers br rm)
+      _perch_reply "$cur" < <(printf '%s\n' --upstream --force --hook-env; _perch_offers br rm)
     else
-      _perch_reply "$cur" < <(printf '%s\n' --upstream --force)
+      _perch_reply "$cur" < <(printf '%s\n' --upstream --force --hook-env)
     fi
     return
   fi
@@ -139,8 +177,11 @@ _perch_completions() {
     elif (( positionals == 1 )); then
       _perch_reply "$cur" < <(_perch_offers wt "${wt_words[@]}")
     fi
-    if (( reads_options && ! has_no_switch && positionals <= 2 )); then
-      _perch_reply "$cur" < <(printf '%s\n' --no-switch)
+    if (( reads_options && positionals <= 2 )); then
+      _perch_reply "$cur" < <(printf '%s\n' --hook-env)
+      if (( ! has_no_switch )); then
+        _perch_reply "$cur" < <(printf '%s\n' --no-switch)
+      fi
     fi
     return
   fi
@@ -163,7 +204,7 @@ _perch_completions() {
   case "$pos" in
     1)
       COMPREPLY=()
-      _perch_reply "$cur" < <(printf '%s\n' br shell wt; _perch_offers)
+      _perch_reply "$cur" < <(printf '%s\n' -C br shell wt; _perch_offers)
       ;;
     # Only the command words read a second word. `perch <branch>` has taken its
     # target by here, and the dispatcher ignores whatever follows it.

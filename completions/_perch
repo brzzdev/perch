@@ -10,20 +10,24 @@
 # names after `wt rm`, and everywhere else the branches, minus the words its own
 # match arm eats first. It sees remote-only branches, which the `git branch` this
 # replaced could not. `command` skips the shell wrapper: it is a function here,
-# and it would `cd` the interactive shell on a single-line answer.
+# and it would `cd` the interactive shell on a single-line answer. Any `-C <path>`
+# typed is passed along, so the answer is the repo the command will run in.
 _perch_offers() {
   local tag=$1 label=$2
   shift 2
   local -a offered
-  offered=(${(f)"$(command perch "$@" --complete 2>/dev/null)"})
+  offered=(${(f)"$(command perch "${(@)perch_directory_options}" "$@" --complete 2>/dev/null)"})
   # Nothing to offer leaves one empty line, which would complete to a blank.
   offered=(${offered:#})
   _describe -t "$tag" "$label" offered
 }
 
 _perch() {
-  local -a subcommands branch_subs branch_rm_options shell_subs shells worktree_subs worktree_options cmdline
+  local -a subcommands branch_subs branch_rm_options global_options shell_subs shells worktree_subs worktree_options cmdline
   local pos
+  global_options=(
+    '-C:Run as if perch was started in a directory'
+  )
   subcommands=(
     'br:Check a branch out here'
     'shell:Shell integration'
@@ -33,8 +37,9 @@ _perch() {
     'rm:Remove local branches'
   )
   branch_rm_options=(
-    '--upstream:Also remove explicitly configured same-named upstreams'
     '--force:Skip destructive confirmations'
+    '--hook-env:Add KEY=VALUE to every hook this run fires'
+    '--upstream:Also remove explicitly configured same-named upstreams'
   )
   shell_subs=(
     'init:Print the shell integration script'
@@ -46,6 +51,7 @@ _perch() {
     'rm:Remove worktree (also deletes branch)'
   )
   worktree_options=(
+    '--hook-env:Add KEY=VALUE to every hook this run fires'
     '--no-switch:Create or find the worktree without switching to it'
   )
   # The wrapper asks for these two names as it defines them, but anything sourced
@@ -63,6 +69,37 @@ _perch() {
     br|wt) cmdline=(perch "$service" "${(@)words[2,-1]}"); (( pos = CURRENT + 1 )) ;;
     *)     cmdline=("${(@)words}"); pos=$CURRENT ;;
   esac
+
+  case "$cmdline[pos-1]" in
+    -C) _files -/; return ;;
+    --hook-env) return ;;
+  esac
+
+  # The rules below read positions as if the global options were never typed.
+  # A leading `-C <path>` is kept for the binary's answers, and a `--hook-env`
+  # pair is dropped wherever it falls before `--`.
+  local -a kept perch_directory_options
+  local typed leading=1 options_open=1
+  local -i i=2
+  kept=("$cmdline[1]")
+  while (( i < pos )); do
+    typed=$cmdline[i]
+    if (( leading )) && [[ "$typed" == -C ]]; then
+      perch_directory_options+=(-C "${${(Q)cmdline[i+1]}/#\~/$HOME}")
+      (( i += 2 ))
+      continue
+    fi
+    if (( options_open )) && [[ "$typed" == --hook-env ]]; then
+      (( i += 2 ))
+      continue
+    fi
+    leading=0
+    [[ "$typed" == -- ]] && options_open=0
+    kept+=("$typed")
+    (( i += 1 ))
+  done
+  cmdline=("${(@)kept}" "${(@)cmdline[pos,-1]}")
+  pos=$(( $#kept + 1 ))
 
   # `br rm` is strict but takes its flags in either order around one target.
   if (( pos >= 4 )) && [[ "$cmdline[2]" == br && "$cmdline[3]" == rm ]]; then
@@ -127,7 +164,10 @@ _perch() {
     elif (( positionals == 1 )); then
       _perch_offers branches 'branch' wt "${(@)wt_words}"
     fi
-    if (( reads_options && ! has_no_switch && positionals <= 2 )); then
+    if (( reads_options && positionals <= 2 )); then
+      if (( has_no_switch )); then
+        worktree_options=(${worktree_options:#--no-switch:*})
+      fi
       _describe -t options 'option' worktree_options
     fi
     return
@@ -145,6 +185,7 @@ _perch() {
       _perch_offers branches 'branch' --
     fi
   elif (( pos == 2 )); then
+    _describe -t options 'option' global_options
     _describe -t subcommands 'subcommand' subcommands
     _perch_offers branches 'branch'
   # `br` reads `rm` before a branch name.

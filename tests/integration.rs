@@ -1380,6 +1380,102 @@ fn fish_br_rm_completion_rejects_a_double_dash() {
 }
 
 #[test]
+fn bash_completion_answers_from_the_dash_c_repo_past_a_hook_env_pair() {
+    let (_bare, work) = setup();
+    git(work.path(), &["branch", "feature"]);
+    let elsewhere = TempDir::new().unwrap();
+    let bin = Path::new(env!("CARGO_BIN_EXE_perch")).parent().unwrap();
+    let completions = concat!(env!("CARGO_MANIFEST_DIR"), "/completions/perch.bash");
+    let script = format!(
+        "PATH=\"{bin}\":$PATH\n\
+         source \"{completions}\"\n\
+         COMP_WORDS=(perch -C \"{work}\" wt --hook-env K=V short ''); COMP_CWORD=7; COMPREPLY=()\n\
+         _perch_completions\n\
+         printf '%s\\n' \"${{COMPREPLY[@]}}\"\n",
+        bin = bin.display(),
+        work = work.path().display(),
+    );
+
+    let output = Command::new("bash")
+        .args(["-c", &script])
+        .current_dir(elsewhere.path())
+        .env("PERCH_NO_HOOKS", "1")
+        .output()
+        .expect("failed to run bash completion");
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(stdout_str(&output).lines().any(|line| line == "feature"));
+}
+
+#[test]
+fn zsh_completion_passes_dash_c_on_and_skips_a_hook_env_pair() {
+    if Command::new("zsh").arg("--version").output().is_err() {
+        return;
+    }
+    let completions = concat!(env!("CARGO_MANIFEST_DIR"), "/completions/_perch");
+    let script = format!(
+        "function _describe {{ : }}\n\
+         service=skip\n\
+         source \"{completions}\"\n\
+         function _perch_offers {{ print -r -- \"$perch_directory_options $*\" }}\n\
+         service=perch\n\
+         words=(perch -C /repo wt --hook-env K=V short '')\n\
+         CURRENT=8\n\
+         _perch\n"
+    );
+
+    let output = Command::new("zsh")
+        .args(["-c", &script])
+        .output()
+        .expect("failed to run zsh completion");
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(
+        stdout_str(&output)
+            .lines()
+            .any(|line| line == "-C /repo branches branch wt short"),
+        "stdout: {}",
+        stdout_str(&output)
+    );
+}
+
+#[test]
+fn fish_completion_answers_from_the_dash_c_repo_past_a_hook_env_pair() {
+    if Command::new("fish").arg("--version").output().is_err() {
+        return;
+    }
+    let (_bare, work) = setup();
+    git(work.path(), &["branch", "feature"]);
+    let elsewhere = TempDir::new().unwrap();
+    let bin = Path::new(env!("CARGO_BIN_EXE_perch")).parent().unwrap();
+    let completions = concat!(env!("CARGO_MANIFEST_DIR"), "/completions/perch.fish");
+    let script = format!(
+        "source \"{completions}\"\ncomplete -C 'perch -C {} wt --hook-env K=V short '\n",
+        work.path().display()
+    );
+
+    let output = Command::new("fish")
+        .args(["-c", &script])
+        .current_dir(elsewhere.path())
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+        )
+        .env("PERCH_NO_HOOKS", "1")
+        .output()
+        .expect("failed to run fish completion");
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(
+        stdout_str(&output)
+            .lines()
+            .any(|line| line.starts_with("feature")),
+        "stdout: {}",
+        stdout_str(&output)
+    );
+}
+
+#[test]
 fn bash_wt_completion_offers_branches_after_a_worktree_name() {
     let (_bare, work) = setup();
     git(work.path(), &["branch", "feature"]);
@@ -6687,6 +6783,67 @@ fn wt_hooks_report_each_creation_and_removal_once() {
             line("removed", "feature"),
         ],
         "each event fires once, from the main worktree, with the full payload"
+    );
+}
+
+/// A scripted call names its repo with `-C` and hands hooks its own variables,
+/// which the payload outranks, so it runs as one plain command from anywhere.
+#[test]
+fn hooks_fired_through_dash_c_see_hook_env_beneath_the_payload() {
+    let (_bare, parent, work) = setup_with_parent();
+    let log = parent.path().join("hook.log");
+    let script = format!(
+        "printf '%s|%s|%s\\n' \"$PERCH_EVENT\" \"$CALLER\" \"$(pwd -P)\" >> '{}'",
+        log.display()
+    );
+    git(&work, &["config", "perch.hook.created", &script]);
+    git(&work, &["config", "perch.hook.removed", &script]);
+
+    for args in [
+        ["wt", "77", "feature", "--no-switch"].as_slice(),
+        ["wt", "rm", "feature", "--force"].as_slice(),
+    ] {
+        let output = perch_command(parent.path(), &[&["-C", "repo"], args].concat())
+            .args([
+                "--hook-env",
+                "CALLER=script",
+                "--hook-env",
+                "PERCH_EVENT=spoofed",
+            ])
+            .env_remove("PERCH_NO_HOOKS")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "`{}` failed: {}",
+            args.join(" "),
+            stderr_str(&output)
+        );
+    }
+
+    let main = work.canonicalize().unwrap();
+    assert_eq!(
+        fs::read_to_string(&log).unwrap(),
+        format!(
+            "created|script|{main}\nremoved|script|{main}\n",
+            main = main.display()
+        )
+    );
+}
+
+#[test]
+fn dash_c_into_a_missing_directory_fails_before_anything_runs() {
+    let parent = TempDir::new().unwrap();
+
+    let output = perch_args(parent.path(), &["-C", "absent", "wt", "ls"]);
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr_str(&output).starts_with("error: cannot change to absent: "),
+        "stderr: {}",
+        stderr_str(&output)
     );
 }
 

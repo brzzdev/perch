@@ -1157,12 +1157,12 @@ fn branch_deletion_reaches_a_branch_git_would_read_as_an_option() {
 
     assert_matches!(merged, perch::git::BranchDeleteOutcome::Deleted);
     assert_matches!(forced, perch::git::BranchDeleteOutcome::Deleted);
-    let listing = git(work.path(), &["for-each-ref", "refs/heads/"]);
-    assert!(
-        !stdout_str(&listing).contains("--"),
-        "{}",
-        stdout_str(&listing)
+    let listing = git(
+        work.path(),
+        &["for-each-ref", "--format=%(refname)", "refs/heads/"],
     );
+    let refs = stdout_str(&listing);
+    assert_eq!(refs.trim(), "refs/heads/main");
 }
 
 #[test]
@@ -7897,9 +7897,7 @@ fn wt_pr_creates_then_reuses_a_worktree_tracking_the_head_branch() {
     assert_eq!(stdout_str(&list).matches("refs/heads/feat/x").count(), 1);
 }
 
-/// Git refuses a `-`-led name as a branch, so `worktree add` and `checkout`
-/// would read it as an option or detach at its commit. Only `update-ref` makes
-/// one, and a forge can hand it over as a head.
+/// A local and remote `--detach`, which only `update-ref` can make, as the head of `pr:7`.
 fn add_option_shaped_branch(work: &Path) -> (TempDir, OsString) {
     git(work, &["update-ref", "refs/heads/--detach", "HEAD"]);
     git(

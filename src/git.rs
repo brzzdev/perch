@@ -277,8 +277,7 @@ pub fn is_local_branch(branch: &str) -> AppResult<bool> {
     ref_present(&format!("refs/heads/{branch}"))
 }
 
-/// Refuses a name git won't take as a branch, such as one led by `-`, which
-/// `checkout` and `worktree add` would read as an option or detach at.
+/// Refuses a name `git check-ref-format --branch` rejects, such as one led by `-`.
 fn ensure_branch_name(branch: &str) -> AppResult<()> {
     let valid = Command::new("git")
         .args(["check-ref-format", "--branch", branch])

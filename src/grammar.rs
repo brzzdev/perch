@@ -261,7 +261,7 @@ enum GrammarErrorKind {
     )]
     DisallowedHookVariable(String),
 
-    #[error("invalid `--hook-env` pair '{0}'; expected KEY=VALUE with a non-empty KEY")]
+    #[error("invalid `--hook-env` pair '{0}'; expected PERCH_KEY=VALUE")]
     InvalidHookVariable(String),
 
     #[error("`{0}` needs a value")]
@@ -971,6 +971,16 @@ mod tests {
     }
 
     #[test]
+    fn wt_ls_refuses_a_trailing_no_switch() {
+        assert_eq!(
+            command_line(&["wt", "ls", "--no-switch"])
+                .unwrap_err()
+                .to_string(),
+            "`--no-switch` does not apply to `perch wt ls`"
+        );
+    }
+
+    #[test]
     fn wt_new_takes_an_option_value_spelled_like_a_flag_as_the_value() {
         let parsed = command_line(&["wt", "new", "-C", "--no-switch", "topic"]).unwrap();
 
@@ -1025,10 +1035,6 @@ mod tests {
                 "invalid `perch wt new` invocation: '--no-switch' is not a branch; no branch begins with '-'",
             ),
             (
-                ["wt", "ls", "--no-switch"].as_slice(),
-                "`--no-switch` does not apply to `perch wt ls`",
-            ),
-            (
                 ["wt", "--no-switch", "new", "x", "topic"].as_slice(),
                 "`--no-switch` does not apply to `perch wt new`",
             ),
@@ -1068,11 +1074,11 @@ mod tests {
         for (words, message) in [
             (
                 ["--hook-env", "NOEQUALS"].as_slice(),
-                "invalid `--hook-env` pair 'NOEQUALS'; expected KEY=VALUE with a non-empty KEY",
+                "invalid `--hook-env` pair 'NOEQUALS'; expected PERCH_KEY=VALUE",
             ),
             (
                 ["--hook-env", "=value"].as_slice(),
-                "invalid `--hook-env` pair '=value'; expected KEY=VALUE with a non-empty KEY",
+                "invalid `--hook-env` pair '=value'; expected PERCH_KEY=VALUE",
             ),
             (
                 ["-C", "repo", "--hook-env"].as_slice(),

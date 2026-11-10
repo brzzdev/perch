@@ -592,7 +592,8 @@ fn worktrees_root(main_path: &Path) -> AppResult<PathBuf> {
     Ok(parent.join("worktrees").join(repo_name))
 }
 
-/// Where the worktree `worktree_name` goes, refused unless it stays beneath `root`, symlinks included.
+/// Where the worktree `worktree_name` goes, refused unless it stays beneath
+/// `root`, symlinks included.
 fn worktree_path(root: &Path, worktree_name: &str) -> AppResult<PathBuf> {
     let mut path = root.to_path_buf();
     for component in worktree_name.split('/') {

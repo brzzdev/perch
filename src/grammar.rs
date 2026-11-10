@@ -16,9 +16,7 @@ pub(crate) struct HookVariable {
     value: String,
 }
 
-/// The prefix every `--hook-env` key carries, so a caller can name its own
-/// variables but never reach `PATH`, `BASH_ENV`, or anything else a hook's
-/// shell reads.
+/// Keeps `--hook-env` off variables a hook's shell reads, such as `PATH`.
 const HOOK_VARIABLE_PREFIX: &str = "PERCH_";
 
 impl HookVariable {
@@ -72,9 +70,9 @@ pub(crate) enum Navigation {
 pub(crate) struct WorktreeDirectoryName(String);
 
 impl WorktreeDirectoryName {
-    fn parse(name: &str) -> Result<Self, GrammarError> {
+    fn parse(name: &str, error: fn(String) -> GrammarError) -> Result<Self, GrammarError> {
         if name.is_empty() || matches!(name, "." | "..") || name.contains(['/', '\\']) {
-            return Err(GrammarError::worktree_navigation(format!(
+            return Err(error(format!(
                 "invalid worktree directory name '{name}'; expected one directory name"
             )));
         }
@@ -546,7 +544,7 @@ fn parse_worktree_navigation(
         }
         [target] => Ok(worktree_navigation(None, Some(target), shell_handoff)),
         [worktree_name, target] if target.as_str() == "--complete" => {
-            WorktreeDirectoryName::parse(worktree_name)?;
+            WorktreeDirectoryName::parse(worktree_name, GrammarError::worktree_navigation)?;
             Ok(branch_completion(Position::Unfiltered))
         }
         [_, option] if escape == Escape::Bare && option.starts_with('-') => Err(
@@ -560,7 +558,8 @@ fn parse_worktree_navigation(
             Ok(worktree_navigation(None, Some(branch), shell_handoff))
         }
         [worktree_name, target] => {
-            let worktree_name = WorktreeDirectoryName::parse(worktree_name)?;
+            let worktree_name =
+                WorktreeDirectoryName::parse(worktree_name, GrammarError::worktree_navigation)?;
             Ok(worktree_navigation(
                 Some(worktree_name),
                 Some(target),
@@ -596,7 +595,13 @@ fn parse_worktree_creation(
             ));
         }
         [target] => (None, target),
-        [worktree_name, target] => (Some(WorktreeDirectoryName::parse(worktree_name)?), target),
+        [worktree_name, target] => (
+            Some(WorktreeDirectoryName::parse(
+                worktree_name,
+                GrammarError::worktree_creation,
+            )?),
+            target,
+        ),
         [_, _, extra, ..] => {
             return Err(GrammarError::worktree_creation(format!(
                 "unexpected extra argument '{extra}'"
@@ -981,6 +986,10 @@ mod tests {
             (
                 ["wt", "new", "x", "topic", "extra"].as_slice(),
                 "invalid `perch wt new` invocation: unexpected extra argument 'extra'",
+            ),
+            (
+                ["wt", "new", "bad/name", "topic"].as_slice(),
+                "invalid `perch wt new` invocation: invalid worktree directory name 'bad/name'; expected one directory name",
             ),
             (
                 ["wt", "new", "-f", "topic"].as_slice(),

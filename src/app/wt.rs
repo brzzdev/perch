@@ -593,18 +593,24 @@ fn worktrees_root(main_path: &Path) -> AppResult<PathBuf> {
 }
 
 /// Where the worktree `worktree_name` goes, refused when the name, often a
-/// branch, would place it anywhere but beneath `root`.
+/// branch, would place it anywhere but beneath `root`: through an absolute
+/// path, a `.` or `..` component, or a symlink already below `root`.
 fn worktree_path(root: &Path, worktree_name: &str) -> AppResult<PathBuf> {
-    if worktree_name
-        .split('/')
-        .any(|component| matches!(component, "" | "." | ".."))
-    {
-        return Err(Error::WorktreeOutsideRoot {
-            name: worktree_name.to_string(),
-            root: root.to_path_buf(),
-        });
+    let mut path = root.to_path_buf();
+    for component in worktree_name.split('/') {
+        let escapes = matches!(component, "" | "." | "..") || {
+            path.push(component);
+            path.symlink_metadata()
+                .is_ok_and(|metadata| metadata.is_symlink())
+        };
+        if escapes {
+            return Err(Error::WorktreeOutsideRoot {
+                name: worktree_name.to_string(),
+                root: root.to_path_buf(),
+            });
+        }
     }
-    Ok(root.join(worktree_name))
+    Ok(path)
 }
 
 /// Deletes the directories a removed worktree leaves empty, such as the `fix/`
@@ -674,6 +680,17 @@ mod tests {
         ] {
             assert!(worktree_path(root, name).is_err(), "{name} was accepted");
         }
+    }
+
+    #[test]
+    fn a_worktree_path_through_a_symlink_below_the_root_is_refused() {
+        let root = tempfile::TempDir::new().unwrap();
+        let outside = tempfile::TempDir::new().unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("feat")).unwrap();
+
+        assert!(worktree_path(root.path(), "feat/x").is_err());
+        assert!(worktree_path(root.path(), "feat").is_err());
+        assert!(worktree_path(root.path(), "other/x").is_ok());
     }
 
     /// A nested branch name gives a directory named after its last segment

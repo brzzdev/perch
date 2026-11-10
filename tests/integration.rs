@@ -52,12 +52,19 @@ fn cwd_at(path: &Path) -> CwdGuard {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// `git`, blind to the developer's global and system config.
+fn git_command() -> Command {
+    let mut command = Command::new("git");
+    command
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1");
+    command
+}
+
 fn git(dir: &Path, args: &[&str]) -> Output {
-    let output = Command::new("git")
+    let output = git_command()
         .args(args)
         .current_dir(dir)
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_AUTHOR_NAME", "Test")
         .env("GIT_AUTHOR_EMAIL", "test@test.com")
         .env("GIT_COMMITTER_NAME", "Test")
@@ -219,7 +226,7 @@ fn push_upstream_change_to(work: &Path, remote: &str, file: &str, content: &str,
 
 fn clone_bare(bare: &Path) -> TempDir {
     let dir = TempDir::new().unwrap();
-    let output = Command::new("git")
+    let output = git_command()
         .args(["clone", bare.to_str().unwrap(), "."])
         .current_dir(dir.path())
         .output()
@@ -2116,7 +2123,7 @@ fn wt_creates_new_branch_from_default_when_branch_absent() {
     );
 
     // The new branch should have a base commit (from origin/main).
-    let head = Command::new("git")
+    let head = git_command()
         .args(["rev-parse", "HEAD"])
         .current_dir(&expected)
         .output()
@@ -2202,8 +2209,6 @@ fn wt_new_refuses_what_it_does_not_define_and_creates_and_removes_nothing() {
     }
 }
 
-/// A target naming no directory beneath the worktrees root is refused before
-/// perch clears a path or creates a parent, whichever route derives it.
 #[test]
 fn worktree_creation_leaves_the_filesystem_alone_for_a_target_escaping_the_worktrees_root() {
     let (_bare, parent, _work) = setup_with_parent();
@@ -2212,6 +2217,9 @@ fn worktree_creation_leaves_the_filesystem_alone_for_a_target_escaping_the_workt
     let deep = outside.path().join("deep");
     let nested_dir = deep.join("x");
     let (empty, nested) = (empty_dir.to_str().unwrap(), nested_dir.to_str().unwrap());
+    let worktrees = parent.path().join("worktrees/repo");
+    fs::create_dir_all(&worktrees).unwrap();
+    std::os::unix::fs::symlink(outside.path(), worktrees.join("link")).unwrap();
 
     for prefix in [
         ["-C", "repo", "wt", "--no-switch"].as_slice(),
@@ -2222,6 +2230,7 @@ fn worktree_creation_leaves_the_filesystem_alone_for_a_target_escaping_the_workt
             [empty].as_slice(),
             [nested].as_slice(),
             ["../../escaped/x"].as_slice(),
+            ["link/payload"].as_slice(),
         ] {
             fs::create_dir_all(&empty_dir).unwrap();
 
@@ -2244,6 +2253,10 @@ fn worktree_creation_leaves_the_filesystem_alone_for_a_target_escaping_the_workt
             assert!(
                 !parent.path().join("escaped").exists(),
                 "{prefix:?} {target:?} escaped the worktrees root"
+            );
+            assert!(
+                !outside.path().join("payload").exists(),
+                "{prefix:?} {target:?} followed a symlink out of the worktrees root"
             );
         }
     }
@@ -2827,7 +2840,7 @@ fn stage_deletion_of_file_txt(work: &Path, index: impl AsRef<OsStr>) {
         &["read-tree", "HEAD"][..],
         &["rm", "--cached", "--quiet", "file.txt"],
     ] {
-        let staged = Command::new("git")
+        let staged = git_command()
             .args(args)
             .current_dir(work)
             .env("GIT_INDEX_FILE", &index)
@@ -3046,7 +3059,7 @@ impl LeftBehind {
                 "modules/module",
             ],
         );
-        Command::new("git")
+        git_command()
             .arg("--git-dir")
             .arg(stdout_str(&repository).trim())
             .args([
@@ -5301,7 +5314,7 @@ fn ready_trash(worktree: &Path) -> Option<PathBuf> {
 }
 
 fn reclamation_record_is_cleared(work: &Path) -> bool {
-    Command::new("git")
+    git_command()
         .args(["config", "--get-all", RECLAMATION_KEY])
         .current_dir(work)
         .output()
@@ -7763,7 +7776,7 @@ fn a_criss_cross_binary_resolution_is_not_proven() {
         ("anchor", "b1", "b2", b"X1\0"),
     ] {
         git(work.path(), &["checkout", "-b", branch, from]);
-        let _ = Command::new("git")
+        let _ = git_command()
             .args(["merge", "--no-commit", other])
             .current_dir(work.path())
             .output();

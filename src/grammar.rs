@@ -497,17 +497,20 @@ fn parse_branch_removal(args: &[String]) -> Result<Invocation, GrammarError> {
 }
 
 fn parse_worktree(args: &[String], options: &mut RunOptions) -> Result<Invocation, GrammarError> {
-    let no_switch = args
-        .iter()
-        .take_while(|arg| *arg != "--")
-        .any(|arg| arg == "--no-switch");
-    if let Some(word) = args.iter().find(|arg| *arg != "--no-switch")
+    let leading_no_switches = args.iter().take_while(|arg| *arg == "--no-switch").count();
+    if let Some(word) = args.get(leading_no_switches)
         && let Some(subverb) = parse_worktree_subverb(word)
     {
-        if no_switch {
+        let rest = &args[leading_no_switches + 1..];
+        // `wt ls` reads nothing after it, so a trailing `--no-switch` is caught here.
+        let ls_no_switch = matches!(subverb, WorktreeSubverb::Ls)
+            && rest
+                .iter()
+                .take_while(|arg| *arg != "--")
+                .any(|arg| arg == "--no-switch");
+        if leading_no_switches > 0 || ls_no_switch {
             return Err(GrammarError::no_switch_with_subverb(word.clone()));
         }
-        let rest = &args[1..];
         return match subverb {
             WorktreeSubverb::List => Err(GrammarError::retired("list", "ls")),
             WorktreeSubverb::Ls => Ok(Invocation::ListWorktrees),
@@ -939,7 +942,7 @@ mod tests {
             "wt",
             "new",
             "--hook-env",
-            "PERCH_REX_SESSION=a=b",
+            "PERCH_SESSION=a=b",
             "-C",
             "perch",
             "77",
@@ -956,7 +959,7 @@ mod tests {
             .iter()
             .map(|variable| (variable.key(), variable.value()))
             .collect();
-        assert_eq!(pairs, [("PERCH_ONE", "1"), ("PERCH_REX_SESSION", "a=b")]);
+        assert_eq!(pairs, [("PERCH_ONE", "1"), ("PERCH_SESSION", "a=b")]);
         assert_eq!(
             parsed.invocation,
             Invocation::Navigate(Navigation::Worktree {
@@ -965,6 +968,13 @@ mod tests {
                 shell_handoff: ShellHandoff::Suppress,
             })
         );
+    }
+
+    #[test]
+    fn wt_new_takes_an_option_value_spelled_like_a_flag_as_the_value() {
+        let parsed = command_line(&["wt", "new", "-C", "--no-switch", "topic"]).unwrap();
+
+        assert_eq!(parsed.directories, [PathBuf::from("--no-switch")]);
     }
 
     #[test]
@@ -1012,7 +1022,11 @@ mod tests {
             ),
             (
                 ["wt", "new", "x", "--no-switch"].as_slice(),
-                "`--no-switch` does not apply to `perch wt new`",
+                "invalid `perch wt new` invocation: '--no-switch' is not a branch; no branch begins with '-'",
+            ),
+            (
+                ["wt", "ls", "--no-switch"].as_slice(),
+                "`--no-switch` does not apply to `perch wt ls`",
             ),
             (
                 ["wt", "--no-switch", "new", "x", "topic"].as_slice(),

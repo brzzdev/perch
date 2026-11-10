@@ -2288,10 +2288,7 @@ fn hook_env_refuses_a_key_without_the_perch_prefix_before_running_git() {
 fn wt_new_hands_its_hook_env_to_the_created_hook() {
     let (_bare, parent, work) = setup_with_parent();
     let log = parent.path().join("hook.log");
-    let script = format!(
-        "printf '%s\\n' \"$PERCH_REX_SESSION\" >> '{}'",
-        log.display()
-    );
+    let script = format!("printf '%s\\n' \"$PERCH_SESSION\" >> '{}'", log.display());
     git(&work, &["config", "perch.hook.created", &script]);
 
     let output = perch_hooked(
@@ -2302,7 +2299,7 @@ fn wt_new_hands_its_hook_env_to_the_created_hook() {
             "-C",
             "repo",
             "--hook-env",
-            "PERCH_REX_SESSION=a=b",
+            "PERCH_SESSION=a=b",
             "topic",
         ],
     );

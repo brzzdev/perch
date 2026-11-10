@@ -1,6 +1,6 @@
 # Creation earns a subverb
 
-Agents create worktrees with `perch -C <repo> --hook-env PERCH_REX_SESSION=<label> wt --no-switch -- <name> <branch>`, and a harness that pre-approves commands by prefix can't approve that safely. The repo comes before the verb, so a rule needs a leading wildcard, and every prefix that covers `wt --no-switch` also covers `wt rm`. `wt new` is a creation-only spelling of `wt --no-switch` that takes its own `-C` and `--hook-env` after the subverb, so the one rule `perch wt new *` approves creating a worktree and nothing else.
+Agents create worktrees with `perch -C <repo> --hook-env PERCH_SESSION=<label> wt --no-switch -- <name> <branch>`, and a harness that pre-approves commands by prefix can't approve that safely. The repo comes before the verb, so a rule needs a leading wildcard, and every prefix that covers `wt --no-switch` also covers `wt rm`. `wt new` is a creation-only spelling of `wt --no-switch` that takes its own `-C` and `--hook-env` after the subverb, so the one rule `perch wt new *` approves creating a worktree and nothing else.
 
 ## Considered options
 

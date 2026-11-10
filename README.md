@@ -147,7 +147,7 @@ perch -C ~/src/repo --hook-env PERCH_SESSION=review wt rm 77
 perch wt new -C ~/src/repo --hook-env PERCH_SESSION=review 77 pr:77
 ```
 
-For Claude Code, that rule is `Bash(perch wt new *)`. `wt new` reads `-C` and `--hook-env` until `--` or its first other word, then a target, optionally after a worktree directory name. Any other option, a missing target, or an extra word is a usage error, and no word after `new` is a subverb, so `perch wt new rm feature` makes a directory named `rm`. See [ADR 0015](docs/adr/0015-creation-earns-a-subverb.md).
+In a harness whose allow rules match a command prefix, the rule is `Bash(perch wt new *)`. `wt new` reads `-C` and `--hook-env` until `--` or its first other word, then a target, optionally after a worktree directory name. Any other option, a missing target, or an extra word is a usage error, and no word after `new` is a subverb, so `perch wt new rm feature` makes a directory named `rm`. See [ADR 0015](docs/adr/0015-creation-earns-a-subverb.md).
 
 ## Removing branches
 

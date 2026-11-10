@@ -18,12 +18,18 @@ pub(crate) struct HookVariable {
 
 /// Keeps `--hook-env` off variables a hook's shell reads, such as `PATH`.
 const HOOK_VARIABLE_PREFIX: &str = "PERCH_";
+/// Perch's own switches, such as the reclamation worker's, which a `perch` run
+/// by a hook would obey.
+pub(crate) const INTERNAL_VARIABLE_PREFIX: &str = "PERCH_INTERNAL_";
 
 impl HookVariable {
     pub(crate) fn parse(pair: &str) -> Result<Self, GrammarError> {
         match pair.split_once('=') {
             Some(("", _)) | None => Err(GrammarError::invalid_hook_variable(pair)),
-            Some((key, _)) if !key.starts_with(HOOK_VARIABLE_PREFIX) => {
+            Some((key, _))
+                if !key.starts_with(HOOK_VARIABLE_PREFIX)
+                    || key.starts_with(INTERNAL_VARIABLE_PREFIX) =>
+            {
                 Err(GrammarError::disallowed_hook_variable(key))
             }
             Some((key, value)) => Ok(Self {
@@ -250,7 +256,9 @@ enum GrammarErrorKind {
     #[error("invalid `perch br rm` invocation: {0}")]
     BranchRemoval(String),
 
-    #[error("`--hook-env` key '{0}' is not allowed; keys must start with {HOOK_VARIABLE_PREFIX}")]
+    #[error(
+        "`--hook-env` key '{0}' is not allowed; keys must start with {HOOK_VARIABLE_PREFIX}, but not {INTERNAL_VARIABLE_PREFIX}"
+    )]
     DisallowedHookVariable(String),
 
     #[error("invalid `--hook-env` pair '{0}'; expected KEY=VALUE with a non-empty KEY")]
@@ -489,11 +497,14 @@ fn parse_branch_removal(args: &[String]) -> Result<Invocation, GrammarError> {
 }
 
 fn parse_worktree(args: &[String], options: &mut RunOptions) -> Result<Invocation, GrammarError> {
-    let leading_no_switches = args.iter().take_while(|arg| *arg == "--no-switch").count();
-    if let Some(word) = args.get(leading_no_switches)
+    let no_switch = args
+        .iter()
+        .take_while(|arg| *arg != "--")
+        .any(|arg| arg == "--no-switch");
+    if let Some(word) = args.iter().find(|arg| *arg != "--no-switch")
         && let Some(subverb) = parse_worktree_subverb(word)
     {
-        if leading_no_switches > 0 {
+        if no_switch {
             return Err(GrammarError::no_switch_with_subverb(word.clone()));
         }
         let rest = &args[1..];
@@ -1001,7 +1012,7 @@ mod tests {
             ),
             (
                 ["wt", "new", "x", "--no-switch"].as_slice(),
-                "invalid `perch wt new` invocation: '--no-switch' is not a branch; no branch begins with '-'",
+                "`--no-switch` does not apply to `perch wt new`",
             ),
             (
                 ["wt", "--no-switch", "new", "x", "topic"].as_slice(),
@@ -1017,14 +1028,23 @@ mod tests {
     }
 
     #[test]
-    fn a_hook_env_key_must_carry_the_perch_prefix() {
-        for words in [
-            ["--hook-env", "PATH=/x", "wt"].as_slice(),
-            ["wt", "new", "--hook-env", "PATH=/x", "topic"].as_slice(),
+    fn a_hook_env_key_must_carry_the_perch_prefix_outside_its_internal_namespace() {
+        for (words, key) in [
+            (["--hook-env", "PATH=/x", "wt"].as_slice(), "PATH"),
+            (
+                ["wt", "new", "--hook-env", "PATH=/x", "topic"].as_slice(),
+                "PATH",
+            ),
+            (
+                ["--hook-env", "PERCH_INTERNAL_RECLAMATION=x", "wt"].as_slice(),
+                "PERCH_INTERNAL_RECLAMATION",
+            ),
         ] {
             assert_eq!(
                 command_line(words).unwrap_err().to_string(),
-                "`--hook-env` key 'PATH' is not allowed; keys must start with PERCH_"
+                format!(
+                    "`--hook-env` key '{key}' is not allowed; keys must start with PERCH_, but not PERCH_INTERNAL_"
+                )
             );
         }
     }

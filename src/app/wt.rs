@@ -592,9 +592,7 @@ fn worktrees_root(main_path: &Path) -> AppResult<PathBuf> {
     Ok(parent.join("worktrees").join(repo_name))
 }
 
-/// Where the worktree `worktree_name` goes, refused when the name, often a
-/// branch, would place it anywhere but beneath `root`: through an absolute
-/// path, a `.` or `..` component, or a symlink already below `root`.
+/// Where the worktree `worktree_name` goes, refused unless it stays beneath `root`, symlinks included.
 fn worktree_path(root: &Path, worktree_name: &str) -> AppResult<PathBuf> {
     let mut path = root.to_path_buf();
     for component in worktree_name.split('/') {

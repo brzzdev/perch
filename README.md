@@ -197,7 +197,7 @@ perch wt rm .         # the worktree you're standing in
 perch wt rm . --force # …without being asked about uncommitted work
 ```
 
-Worktrees land at `../worktrees/<repo>/<branch>` relative to the main checkout. Branch names with slashes (`feature/foo`) preserve their structure as subdirectories. Pass a separate worktree directory name to use one directory below the repository's worktree root instead, such as `../worktrees/<repo>/545`. The name cannot be `.`, `..`, or contain a path separator. A branch whose path would leave the worktree root, through an absolute path, a `..` component, or a symlink inside the root, is refused before perch touches the filesystem. If the branch already has a registered worktree, Perch uses its actual path and ignores the requested name.
+Worktrees land at `../worktrees/<repo>/<branch>` relative to the main checkout. Branch names with slashes (`feature/foo`) preserve their structure as subdirectories. Pass a separate worktree directory name to use one directory below the repository's worktree root instead, such as `../worktrees/<repo>/545`. The name cannot be `.`, `..`, or contain a path separator. A branch whose path would leave the worktree root, through an absolute path, an empty, `.`, or `..` component, or a symlink inside the root, is refused before perch touches the filesystem. If the branch already has a registered worktree, Perch uses its actual path and ignores the requested name.
 
 If the worktree directory name collides with `ls`, `new`, `rm`, `list`, or `remove`, put `--` before it: `perch wt -- rm feature`.
 
@@ -381,7 +381,7 @@ Each command runs via `sh -c` from the main checkout, with:
 | `PERCH_MAIN` | Absolute path of the main checkout |
 | `PERCH_WORKTREE` | Absolute path of the worktree the event is about |
 
-`--hook-env PERCH_KEY=VALUE` adds a variable to the environment of every hook the run fires, `created` and `removed` alike, and to nothing else. It goes before the command word or after `wt new`, and repeats for more than one. The key must start with `PERCH_`, so it can never set `PATH`, `BASH_ENV`, or anything else the hook's shell reads. `VALUE` can be empty, and the variables above win over a clashing key.
+`--hook-env PERCH_KEY=VALUE` adds a variable to the environment of every hook the run fires, `created` and `removed` alike, and to nothing else. It goes before the command word or after `wt new`, and repeats for more than one. The key must start with `PERCH_`, so it can never set `PATH`, `BASH_ENV`, or anything else the hook's shell reads, and can't start with `PERCH_INTERNAL_`, which perch keeps for itself. `VALUE` can be empty, and the variables above win over a clashing key.
 
 `created` fires the moment the worktree exists, before the stale-branch prompt. `removed` fires once per worktree, only after one is actually gone — so the path it names no longer exists on disk. Both cover every route: `removed` fires for a worktree taken along by the stale-branch cleanup just as it does for `wt rm`, since a hook mirrors what happened to the repo rather than which command you typed.
 

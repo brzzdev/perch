@@ -52,12 +52,16 @@ fn cwd_at(path: &Path) -> CwdGuard {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// `git`, blind to the developer's global and system config.
-fn git_command() -> Command {
-    let mut command = Command::new("git");
+/// Blinds the git `command` runs to the developer's global and system config.
+fn isolate_git_config(command: &mut Command) -> &mut Command {
     command
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_NOSYSTEM", "1");
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+}
+
+fn git_command() -> Command {
+    let mut command = Command::new("git");
+    isolate_git_config(&mut command);
     command
 }
 
@@ -104,10 +108,7 @@ fn perch_command(dir: &Path, args: &[&str]) -> Command {
     // A transport program in the developer's own environment would make every
     // worktree fetch for itself, and the tests that count fetches say so. So
     // would a relative or empty `PATH` entry, or a relative `GIT_EXEC_PATH`.
-    cmd.args(args)
-        .current_dir(dir)
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
+    isolate_git_config(cmd.args(args).current_dir(dir))
         .env_remove("GIT_PROXY_COMMAND")
         .env_remove("GIT_SSH")
         .env_remove("GIT_SSH_COMMAND");
@@ -2277,7 +2278,7 @@ fn hook_env_refuses_a_key_without_the_perch_prefix_before_running_git() {
         assert_eq!(
             stderr_str(&output),
             format!(
-                "error: `--hook-env` key '{key}' is not allowed; keys must start with PERCH_\n"
+                "error: `--hook-env` key '{key}' is not allowed; keys must start with PERCH_, but not PERCH_INTERNAL_\n"
             )
         );
     }
@@ -3024,9 +3025,9 @@ fn submodule_left_behind(recorded: Recorded) -> LeftBehind {
 }
 
 impl LeftBehind {
-    /// Runs perch in `dir` with no global config, which could switch recursion
-    /// on and fetch the submodule whatever perch does. Returns the fetches run
-    /// inside submodules alongside the output.
+    /// Runs perch in `dir`, returning the fetches run inside submodules
+    /// alongside the output. [`perch_command`] keeps global config out, which
+    /// could switch recursion on and fetch the submodule whatever perch does.
     fn perch(&self, dir: &Path, args: &[&str]) -> (Output, Vec<String>) {
         self.run(perch_command(dir, args))
     }
@@ -3034,8 +3035,6 @@ impl LeftBehind {
     /// Like [`Self::perch`], for a command with its own environment.
     fn run(&self, mut command: Command) -> (Output, Vec<String>) {
         command
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_COUNT", "1")
             .env("GIT_CONFIG_KEY_0", "protocol.file.allow")
             .env("GIT_CONFIG_VALUE_0", "always");

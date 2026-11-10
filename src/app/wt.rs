@@ -599,12 +599,9 @@ fn worktree_path(root: &Path, worktree_name: &str) -> AppResult<PathBuf> {
         .split('/')
         .any(|component| matches!(component, "" | "." | ".."))
     {
-        return Err(Error::Git {
-            command: "worktree add".into(),
-            message: format!(
-                "'{worktree_name}' does not name a directory beneath {}",
-                root.display()
-            ),
+        return Err(Error::WorktreeOutsideRoot {
+            name: worktree_name.to_string(),
+            root: root.to_path_buf(),
         });
     }
     Ok(root.join(worktree_name))

@@ -252,7 +252,7 @@ enum GrammarErrorKind {
     #[error("invalid `perch br rm` invocation: {0}")]
     BranchRemoval(String),
 
-    #[error("`--hook-env` key '{0}' is not allowed; keys must start with PERCH_")]
+    #[error("`--hook-env` key '{0}' is not allowed; keys must start with {HOOK_VARIABLE_PREFIX}")]
     DisallowedHookVariable(String),
 
     #[error("invalid `--hook-env` pair '{0}'; expected KEY=VALUE with a non-empty KEY")]
@@ -350,8 +350,7 @@ enum WorktreeSubverb {
 const DIRECTORY_OPTION: &str = "-C";
 const HOOK_ENVIRONMENT_OPTION: &str = "--hook-env";
 
-/// `-C` and `--hook-env`, read ahead of the command word and again after
-/// `wt new`.
+/// `-C` and `--hook-env`.
 #[derive(Default)]
 struct RunOptions {
     directories: Vec<PathBuf>,
@@ -361,25 +360,24 @@ struct RunOptions {
 impl RunOptions {
     /// Reads options in any order, returning the words from the first one that
     /// isn't an option.
-    fn read<'a, S: AsRef<str>>(&mut self, mut rest: &'a [S]) -> Result<&'a [S], GrammarError> {
+    fn read<'a>(&mut self, mut rest: &'a [String]) -> Result<&'a [String], GrammarError> {
         loop {
             rest = match rest {
-                [option, path, tail @ ..] if option.as_ref() == DIRECTORY_OPTION => {
+                [option, path, tail @ ..] if option == DIRECTORY_OPTION => {
                     // As in git, an empty path leaves the directory unchanged.
-                    if !path.as_ref().is_empty() {
-                        self.directories.push(PathBuf::from(path.as_ref()));
+                    if !path.is_empty() {
+                        self.directories.push(PathBuf::from(path));
                     }
                     tail
                 }
-                [option, pair, tail @ ..] if option.as_ref() == HOOK_ENVIRONMENT_OPTION => {
-                    self.hook_environment
-                        .push(HookVariable::parse(pair.as_ref())?);
+                [option, pair, tail @ ..] if option == HOOK_ENVIRONMENT_OPTION => {
+                    self.hook_environment.push(HookVariable::parse(pair)?);
                     tail
                 }
-                [option] if option.as_ref() == DIRECTORY_OPTION => {
+                [option] if option == DIRECTORY_OPTION => {
                     return Err(GrammarError::missing_value(DIRECTORY_OPTION));
                 }
-                [option] if option.as_ref() == HOOK_ENVIRONMENT_OPTION => {
+                [option] if option == HOOK_ENVIRONMENT_OPTION => {
                     return Err(GrammarError::missing_value(HOOK_ENVIRONMENT_OPTION));
                 }
                 _ => return Ok(rest),
@@ -493,6 +491,23 @@ fn parse_branch_removal(args: &[String]) -> Result<Invocation, GrammarError> {
 }
 
 fn parse_worktree(args: &[String], options: &mut RunOptions) -> Result<Invocation, GrammarError> {
+    let leading_no_switches = args.iter().take_while(|arg| *arg == "--no-switch").count();
+    if let Some(word) = args.get(leading_no_switches)
+        && let Some(subverb) = parse_worktree_subverb(word)
+    {
+        if leading_no_switches > 0 {
+            return Err(GrammarError::no_switch_with_subverb(word.clone()));
+        }
+        let rest = &args[1..];
+        return match subverb {
+            WorktreeSubverb::List => Err(GrammarError::retired("list", "ls")),
+            WorktreeSubverb::Ls => Ok(Invocation::ListWorktrees),
+            WorktreeSubverb::New => parse_worktree_creation(rest, options),
+            WorktreeSubverb::Remove => Err(GrammarError::retired("remove", "rm")),
+            WorktreeSubverb::Rm => parse_worktree_removal(rest),
+        };
+    }
+
     let mut shell_handoff = ShellHandoff::Emit;
     let mut reads_options = true;
     let mut remaining = Vec::with_capacity(args.len());
@@ -514,17 +529,7 @@ fn parse_worktree(args: &[String], options: &mut RunOptions) -> Result<Invocatio
         Some(option) if option.starts_with('-') => Err(GrammarError::worktree_navigation(format!(
             "unknown option '{option}'"
         ))),
-        Some(word) => match parse_worktree_subverb(word) {
-            Some(_) if shell_handoff == ShellHandoff::Suppress => {
-                Err(GrammarError::no_switch_with_subverb(word.to_string()))
-            }
-            Some(WorktreeSubverb::Ls) => Ok(Invocation::ListWorktrees),
-            Some(WorktreeSubverb::List) => Err(GrammarError::retired("list", "ls")),
-            Some(WorktreeSubverb::New) => parse_worktree_creation(&remaining[1..], options),
-            Some(WorktreeSubverb::Remove) => Err(GrammarError::retired("remove", "rm")),
-            Some(WorktreeSubverb::Rm) => parse_worktree_removal(&remaining[1..]),
-            None => parse_worktree_navigation(&remaining, shell_handoff, Escape::Bare),
-        },
+        Some(_) => parse_worktree_navigation(&remaining, shell_handoff, Escape::Bare),
         None => Ok(worktree_navigation(None, None, shell_handoff)),
     }
 }
@@ -571,7 +576,7 @@ fn parse_worktree_navigation(
 /// `wt new`: creation alone, so no word after it is a *Subverb*, and a target
 /// is never taken for an option.
 fn parse_worktree_creation(
-    args: &[&String],
+    args: &[String],
     options: &mut RunOptions,
 ) -> Result<Invocation, GrammarError> {
     let rest = options.read(args)?;
@@ -610,7 +615,7 @@ fn parse_worktree_creation(
     ))
 }
 
-fn parse_worktree_removal(args: &[&String]) -> Result<Invocation, GrammarError> {
+fn parse_worktree_removal(args: &[String]) -> Result<Invocation, GrammarError> {
     for arg in args {
         if arg.as_str() == "--" {
             break;
@@ -987,6 +992,10 @@ mod tests {
             ),
             (
                 ["wt", "new", "x", "--no-switch"].as_slice(),
+                "invalid `perch wt new` invocation: '--no-switch' is not a branch; no branch begins with '-'",
+            ),
+            (
+                ["wt", "--no-switch", "new", "x", "topic"].as_slice(),
                 "`--no-switch` does not apply to `perch wt new`",
             ),
             (

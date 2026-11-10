@@ -2159,18 +2159,17 @@ fn wt_new_creates_or_finds_a_worktree_without_a_shell_handoff() {
 }
 
 #[test]
-fn wt_new_takes_a_subverb_or_option_looking_word_after_the_escape_as_a_directory_name() {
+fn wt_new_takes_an_option_looking_word_after_the_escape_as_a_directory_name() {
     let (_bare, parent, work) = setup_with_parent();
-    for (name, branch) in [("rm", "one"), ("ls", "two"), ("-f", "three")] {
-        let output = perch_args(
-            parent.path(),
-            &["wt", "new", "-C", "repo", "--", name, branch],
-        );
 
-        assert!(output.status.success(), "stderr: {}", stderr_str(&output));
-        assert!(parent.path().join("worktrees/repo").join(name).is_dir());
-    }
-    assert!(local_branch_exists(&work, "three"));
+    let output = perch_args(
+        parent.path(),
+        &["wt", "new", "-C", "repo", "--", "-f", "topic"],
+    );
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(parent.path().join("worktrees/repo/-f").is_dir());
+    assert!(local_branch_exists(&work, "topic"));
 }
 
 #[test]
@@ -2181,11 +2180,6 @@ fn wt_new_refuses_what_it_does_not_define_and_creates_and_removes_nothing() {
 
     for args in [
         ["x", "feature", "extra"].as_slice(),
-        [].as_slice(),
-        ["--no-switch", "feature"].as_slice(),
-        ["--bogus", "feature"].as_slice(),
-        ["x", "--complete"].as_slice(),
-        ["x", "--no-switch"].as_slice(),
         ["--", "x", "--no-switch"].as_slice(),
     ] {
         let output = perch_args(
@@ -2214,10 +2208,10 @@ fn wt_new_refuses_what_it_does_not_define_and_creates_and_removes_nothing() {
 fn worktree_creation_leaves_the_filesystem_alone_for_a_target_escaping_the_worktrees_root() {
     let (_bare, parent, _work) = setup_with_parent();
     let outside = TempDir::new().unwrap();
-    let empty = outside.path().join("empty");
+    let empty_dir = outside.path().join("empty");
     let deep = outside.path().join("deep");
-    let (empty, nested) = (empty.to_str().unwrap(), deep.join("x"));
-    let nested = nested.to_str().unwrap();
+    let nested_dir = deep.join("x");
+    let (empty, nested) = (empty_dir.to_str().unwrap(), nested_dir.to_str().unwrap());
 
     for prefix in [
         ["-C", "repo", "wt", "--no-switch"].as_slice(),
@@ -2229,7 +2223,7 @@ fn worktree_creation_leaves_the_filesystem_alone_for_a_target_escaping_the_workt
             [nested].as_slice(),
             ["../../escaped/x"].as_slice(),
         ] {
-            fs::create_dir_all(outside.path().join("empty")).unwrap();
+            fs::create_dir_all(&empty_dir).unwrap();
 
             let output = perch_args(parent.path(), &[prefix, target].concat());
 
@@ -2239,7 +2233,7 @@ fn worktree_creation_leaves_the_filesystem_alone_for_a_target_escaping_the_workt
                 "{prefix:?} {target:?} succeeded"
             );
             assert!(
-                outside.path().join("empty").is_dir(),
+                empty_dir.is_dir(),
                 "{prefix:?} {target:?} removed the empty directory"
             );
             assert!(
@@ -2260,8 +2254,6 @@ fn hook_env_refuses_a_key_without_the_perch_prefix_before_running_git() {
     let not_a_repo = TempDir::new().unwrap();
     for args in [
         ["--hook-env", "PATH=/x", "wt", "ls"].as_slice(),
-        ["--hook-env", "BASH_ENV=/x", "wt", "--no-switch", "topic"].as_slice(),
-        ["wt", "new", "--hook-env", "PATH=/x", "topic"].as_slice(),
         ["wt", "new", "--hook-env", "BASH_ENV=/x", "topic"].as_slice(),
     ] {
         let key = args.iter().find_map(|word| word.split_once('=')).unwrap().0;

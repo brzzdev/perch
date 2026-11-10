@@ -47,6 +47,7 @@ _perch() {
   shells=(bash fish zsh)
   worktree_subs=(
     'ls:List worktrees'
+    'new:Create or find a worktree, never switching to it'
     'rm:Remove worktree (also deletes branch)'
   )
   worktree_options=(
@@ -139,7 +140,7 @@ _perch() {
         reads_options=0
       elif (( reads_options )) && [[ "$word" == --no-switch ]]; then
         has_no_switch=1
-      elif (( reads_options && positionals == 0 )) && [[ "$word" == (ls|rm|list|remove) ]]; then
+      elif (( reads_options && positionals == 0 )) && [[ "$word" == (ls|new|rm|list|remove) ]]; then
         return
       else
         (( positionals += 1 ))

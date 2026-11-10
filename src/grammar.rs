@@ -16,14 +16,22 @@ pub(crate) struct HookVariable {
     value: String,
 }
 
+/// The prefix every `--hook-env` key carries, so a caller can name its own
+/// variables but never reach `PATH`, `BASH_ENV`, or anything else a hook's
+/// shell reads.
+const HOOK_VARIABLE_PREFIX: &str = "PERCH_";
+
 impl HookVariable {
     pub(crate) fn parse(pair: &str) -> Result<Self, GrammarError> {
         match pair.split_once('=') {
-            Some((key, value)) if !key.is_empty() => Ok(Self {
+            Some(("", _)) | None => Err(GrammarError::invalid_hook_variable(pair)),
+            Some((key, _)) if !key.starts_with(HOOK_VARIABLE_PREFIX) => {
+                Err(GrammarError::disallowed_hook_variable(key))
+            }
+            Some((key, value)) => Ok(Self {
                 key: key.to_string(),
                 value: value.to_string(),
             }),
-            _ => Err(GrammarError::invalid_hook_variable(pair)),
         }
     }
 
@@ -244,6 +252,9 @@ enum GrammarErrorKind {
     #[error("invalid `perch br rm` invocation: {0}")]
     BranchRemoval(String),
 
+    #[error("`--hook-env` key '{0}' is not allowed; keys must start with PERCH_")]
+    DisallowedHookVariable(String),
+
     #[error("invalid `--hook-env` pair '{0}'; expected KEY=VALUE with a non-empty KEY")]
     InvalidHookVariable(String),
 
@@ -267,6 +278,9 @@ enum GrammarErrorKind {
     #[error("invalid `perch shell` invocation: {0}")]
     Shell(String),
 
+    #[error("invalid `perch wt new` invocation: {0}")]
+    WorktreeCreation(String),
+
     #[error("invalid `perch wt rm` invocation: {0}")]
     WorktreeRemoval(String),
 
@@ -283,6 +297,10 @@ impl GrammarError {
         Self(GrammarErrorKind::BranchRemoval(message))
     }
 
+    fn disallowed_hook_variable(key: &str) -> Self {
+        Self(GrammarErrorKind::DisallowedHookVariable(key.to_string()))
+    }
+
     fn invalid_hook_variable(pair: &str) -> Self {
         Self(GrammarErrorKind::InvalidHookVariable(pair.to_string()))
     }
@@ -297,6 +315,10 @@ impl GrammarError {
 
     fn shell(message: String) -> Self {
         Self(GrammarErrorKind::Shell(message))
+    }
+
+    fn worktree_creation(message: String) -> Self {
+        Self(GrammarErrorKind::WorktreeCreation(message))
     }
 
     fn worktree_removal(message: String) -> Self {
@@ -320,6 +342,7 @@ impl GrammarError {
 enum WorktreeSubverb {
     List,
     Ls,
+    New,
     Remove,
     Rm,
 }
@@ -327,43 +350,58 @@ enum WorktreeSubverb {
 const DIRECTORY_OPTION: &str = "-C";
 const HOOK_ENVIRONMENT_OPTION: &str = "--hook-env";
 
+/// `-C` and `--hook-env`, read ahead of the command word and again after
+/// `wt new`.
+#[derive(Default)]
+struct RunOptions {
+    directories: Vec<PathBuf>,
+    hook_environment: Vec<HookVariable>,
+}
+
+impl RunOptions {
+    /// Reads options in any order, returning the words from the first one that
+    /// isn't an option.
+    fn read<'a, S: AsRef<str>>(&mut self, mut rest: &'a [S]) -> Result<&'a [S], GrammarError> {
+        loop {
+            rest = match rest {
+                [option, path, tail @ ..] if option.as_ref() == DIRECTORY_OPTION => {
+                    // As in git, an empty path leaves the directory unchanged.
+                    if !path.as_ref().is_empty() {
+                        self.directories.push(PathBuf::from(path.as_ref()));
+                    }
+                    tail
+                }
+                [option, pair, tail @ ..] if option.as_ref() == HOOK_ENVIRONMENT_OPTION => {
+                    self.hook_environment
+                        .push(HookVariable::parse(pair.as_ref())?);
+                    tail
+                }
+                [option] if option.as_ref() == DIRECTORY_OPTION => {
+                    return Err(GrammarError::missing_value(DIRECTORY_OPTION));
+                }
+                [option] if option.as_ref() == HOOK_ENVIRONMENT_OPTION => {
+                    return Err(GrammarError::missing_value(HOOK_ENVIRONMENT_OPTION));
+                }
+                _ => return Ok(rest),
+            };
+        }
+    }
+}
+
 /// Reads the global options ahead of the command word, in any order, then
 /// [`parse`]s the rest.
 pub(crate) fn parse_command_line(args: &[String]) -> Result<CommandLine, GrammarError> {
-    let mut directories = Vec::new();
-    let mut hook_environment = Vec::new();
-    let mut rest = args;
-    loop {
-        rest = match rest {
-            [option, path, tail @ ..] if option == DIRECTORY_OPTION => {
-                // As in git, an empty path leaves the directory unchanged.
-                if !path.is_empty() {
-                    directories.push(PathBuf::from(path));
-                }
-                tail
-            }
-            [option, pair, tail @ ..] if option == HOOK_ENVIRONMENT_OPTION => {
-                hook_environment.push(HookVariable::parse(pair)?);
-                tail
-            }
-            [option] if option == DIRECTORY_OPTION => {
-                return Err(GrammarError::missing_value(DIRECTORY_OPTION));
-            }
-            [option] if option == HOOK_ENVIRONMENT_OPTION => {
-                return Err(GrammarError::missing_value(HOOK_ENVIRONMENT_OPTION));
-            }
-            _ => break,
-        };
-    }
-
+    let mut options = RunOptions::default();
+    let rest = options.read(args)?;
+    let invocation = parse(rest, &mut options)?;
     Ok(CommandLine {
-        directories,
-        hook_environment,
-        invocation: parse(rest)?,
+        directories: options.directories,
+        hook_environment: options.hook_environment,
+        invocation,
     })
 }
 
-fn parse(args: &[String]) -> Result<Invocation, GrammarError> {
+fn parse(args: &[String], options: &mut RunOptions) -> Result<Invocation, GrammarError> {
     match args.first().map(String::as_str) {
         Some("--help" | "-h") => Ok(Invocation::Help(HelpPage::Main)),
         Some("--version" | "-V") => Ok(Invocation::Version),
@@ -375,7 +413,7 @@ fn parse(args: &[String]) -> Result<Invocation, GrammarError> {
         Some(word) => match parse_command_word(word) {
             Some(CommandWord::Branch) => parse_branch(&args[1..]),
             Some(CommandWord::Shell) => parse_shell(&args[1..]),
-            Some(CommandWord::Worktree) => parse_worktree(&args[1..]),
+            Some(CommandWord::Worktree) => parse_worktree(&args[1..], options),
             None => {
                 reject_extra(args, 1, GrammarError::navigation)?;
                 Ok(navigate(Verb::Go, Some(word)))
@@ -454,7 +492,7 @@ fn parse_branch_removal(args: &[String]) -> Result<Invocation, GrammarError> {
     Ok(Invocation::RemoveBranches(removal))
 }
 
-fn parse_worktree(args: &[String]) -> Result<Invocation, GrammarError> {
+fn parse_worktree(args: &[String], options: &mut RunOptions) -> Result<Invocation, GrammarError> {
     let mut shell_handoff = ShellHandoff::Emit;
     let mut reads_options = true;
     let mut remaining = Vec::with_capacity(args.len());
@@ -482,6 +520,7 @@ fn parse_worktree(args: &[String]) -> Result<Invocation, GrammarError> {
             }
             Some(WorktreeSubverb::Ls) => Ok(Invocation::ListWorktrees),
             Some(WorktreeSubverb::List) => Err(GrammarError::retired("list", "ls")),
+            Some(WorktreeSubverb::New) => parse_worktree_creation(&remaining[1..], options),
             Some(WorktreeSubverb::Remove) => Err(GrammarError::retired("remove", "rm")),
             Some(WorktreeSubverb::Rm) => parse_worktree_removal(&remaining[1..]),
             None => parse_worktree_navigation(&remaining, shell_handoff, Escape::Bare),
@@ -527,6 +566,48 @@ fn parse_worktree_navigation(
             "unexpected extra argument '{extra}'"
         ))),
     }
+}
+
+/// `wt new`: creation alone, so no word after it is a *Subverb*, and a target
+/// is never taken for an option.
+fn parse_worktree_creation(
+    args: &[&String],
+    options: &mut RunOptions,
+) -> Result<Invocation, GrammarError> {
+    let rest = options.read(args)?;
+    let positionals = match rest {
+        [escape, positionals @ ..] if escape.as_str() == "--" => positionals,
+        [option, ..] if option.starts_with('-') => {
+            return Err(GrammarError::worktree_creation(format!(
+                "unknown option '{option}'"
+            )));
+        }
+        positionals => positionals,
+    };
+    let (worktree_name, target) = match positionals {
+        [] => {
+            return Err(GrammarError::worktree_creation(
+                "missing branch, pr:<n>, or mr:<n>".to_string(),
+            ));
+        }
+        [target] => (None, target),
+        [worktree_name, target] => (Some(WorktreeDirectoryName::parse(worktree_name)?), target),
+        [_, _, extra, ..] => {
+            return Err(GrammarError::worktree_creation(format!(
+                "unexpected extra argument '{extra}'"
+            )));
+        }
+    };
+    if target.starts_with('-') {
+        return Err(GrammarError::worktree_creation(format!(
+            "'{target}' is not a branch; no branch begins with '-'"
+        )));
+    }
+    Ok(worktree_navigation(
+        worktree_name,
+        Some(target),
+        ShellHandoff::Suppress,
+    ))
 }
 
 fn parse_worktree_removal(args: &[&String]) -> Result<Invocation, GrammarError> {
@@ -645,6 +726,7 @@ fn parse_worktree_subverb(word: &str) -> Option<WorktreeSubverb> {
     match word {
         "list" => Some(WorktreeSubverb::List),
         "ls" => Some(WorktreeSubverb::Ls),
+        "new" => Some(WorktreeSubverb::New),
         "remove" => Some(WorktreeSubverb::Remove),
         "rm" => Some(WorktreeSubverb::Rm),
         _ => None,
@@ -665,13 +747,15 @@ const MAIN_HELP: &str = concat!(
     "       perch -- <branch>      Go to a branch named br/shell/wt\n",
     "       perch br rm [<branch>] Remove local branches\n",
     "       perch wt ls            List worktrees\n",
+    "       perch wt new [<name>] <branch>|pr:<n>|mr:<n>\n",
+    "                                  Create or find a worktree, never switching to it\n",
     "       perch wt rm [<branch>|.]\n",
     "       perch shell install    Add the shell integration to your rc file\n",
     "\n",
     "Options:\n",
     "  -C <path>              Run as if perch was started in <path>\n",
-    "      --hook-env <KEY=VALUE>\n",
-    "                         Add KEY=VALUE to every hook this run fires; repeatable\n",
+    "      --hook-env <PERCH_KEY=VALUE>\n",
+    "                         Add PERCH_KEY=VALUE to every hook this run fires; repeatable\n",
     "\n",
     "With the shell integration loaded, `br` and `wt` stand in for `perch br`\n",
     "and `perch wt`. Set PERCH_NO_SHORTCUTS to leave both names alone.\n",
@@ -705,9 +789,12 @@ const WORKTREE_HELP: &str = concat!(
     "       perch wt <worktree-directory-name> <branch>|pr:<n>|mr:<n> [--no-switch]\n",
     "                                  Use a custom worktree directory name\n",
     "       perch wt ls            List worktrees\n",
+    "       perch wt new [-C <path>]... [--hook-env <PERCH_KEY=VALUE>]...\n",
+    "                    [--] [<worktree-directory-name>] <branch>|pr:<n>|mr:<n>\n",
+    "                                  Create or find a worktree, never switching to it\n",
     "       perch wt rm [<branch>] Remove a worktree (deletes branch if merged)\n",
     "       perch wt rm .          Remove the worktree you're in\n",
-    "       perch wt -- <branch>   Worktree a branch named ls/rm/list/remove\n",
+    "       perch wt -- <branch>   Worktree a branch named ls/new/rm/list/remove\n",
     "       perch wt -- <worktree-directory-name> <branch>\n",
     "                                  Escape a colliding worktree directory name\n",
     "\n",
@@ -726,6 +813,10 @@ mod tests {
 
     fn command_line(words: &[&str]) -> Result<CommandLine, GrammarError> {
         parse_command_line(&args(words))
+    }
+
+    fn parse(args: &[String]) -> Result<Invocation, GrammarError> {
+        parse_command_line(args).map(|command_line| command_line.invocation)
     }
 
     #[test]
@@ -751,7 +842,7 @@ mod tests {
                 "invalid `perch` invocation: unexpected extra argument 'extra'",
             ),
             (
-                ["br", "topic", "--hook-env", "K=V"].as_slice(),
+                ["br", "topic", "--hook-env", "PERCH_K=V"].as_slice(),
                 "invalid `perch br` invocation: unexpected extra argument '--hook-env'",
             ),
             (
@@ -772,7 +863,7 @@ mod tests {
         );
 
         let hook_environment =
-            command_line(&["wt", "rm", "topic", "--hook-env", "K=V"]).unwrap_err();
+            command_line(&["wt", "rm", "topic", "--hook-env", "PERCH_K=V"]).unwrap_err();
         assert_eq!(
             hook_environment.to_string(),
             "invalid `perch wt rm` invocation: unknown option '--hook-env'"
@@ -785,11 +876,11 @@ mod tests {
             "-C",
             "repo",
             "--hook-env",
-            "SESSION=one=two",
+            "PERCH_SESSION=one=two",
             "-C",
             "sub",
             "--hook-env",
-            "EMPTY=",
+            "PERCH_EMPTY=",
             "wt",
             "77",
             "#77",
@@ -806,7 +897,7 @@ mod tests {
             .iter()
             .map(|variable| (variable.key(), variable.value()))
             .collect();
-        assert_eq!(pairs, [("SESSION", "one=two"), ("EMPTY", "")]);
+        assert_eq!(pairs, [("PERCH_SESSION", "one=two"), ("PERCH_EMPTY", "")]);
         assert_eq!(
             parsed.invocation,
             Invocation::Navigate(Navigation::Worktree {
@@ -815,6 +906,109 @@ mod tests {
                 shell_handoff: ShellHandoff::Suppress,
             })
         );
+    }
+
+    #[test]
+    fn wt_new_reads_run_options_after_the_global_ones_and_never_hands_off() {
+        let parsed = command_line(&[
+            "-C",
+            "/repos",
+            "--hook-env",
+            "PERCH_ONE=1",
+            "wt",
+            "new",
+            "--hook-env",
+            "PERCH_REX_SESSION=a=b",
+            "-C",
+            "perch",
+            "77",
+            "pr:77",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            parsed.directories,
+            [PathBuf::from("/repos"), PathBuf::from("perch")]
+        );
+        let pairs: Vec<(&str, &str)> = parsed
+            .hook_environment
+            .iter()
+            .map(|variable| (variable.key(), variable.value()))
+            .collect();
+        assert_eq!(pairs, [("PERCH_ONE", "1"), ("PERCH_REX_SESSION", "a=b")]);
+        assert_eq!(
+            parsed.invocation,
+            Invocation::Navigate(Navigation::Worktree {
+                worktree_name: Some(WorktreeDirectoryName("77".into())),
+                target: Some("pr:77".into()),
+                shell_handoff: ShellHandoff::Suppress,
+            })
+        );
+    }
+
+    #[test]
+    fn wt_new_reads_no_subverb_after_it() {
+        assert_eq!(
+            parse(&args(&["wt", "new", "rm", "topic"])),
+            Ok(Invocation::Navigate(Navigation::Worktree {
+                worktree_name: Some(WorktreeDirectoryName("rm".into())),
+                target: Some("topic".into()),
+                shell_handoff: ShellHandoff::Suppress,
+            }))
+        );
+        assert_eq!(
+            parse(&args(&["wt", "new", "--", "-f", "topic"])),
+            Ok(Invocation::Navigate(Navigation::Worktree {
+                worktree_name: Some(WorktreeDirectoryName("-f".into())),
+                target: Some("topic".into()),
+                shell_handoff: ShellHandoff::Suppress,
+            }))
+        );
+    }
+
+    #[test]
+    fn wt_new_refuses_what_it_does_not_define() {
+        for (words, message) in [
+            (
+                ["wt", "new"].as_slice(),
+                "invalid `perch wt new` invocation: missing branch, pr:<n>, or mr:<n>",
+            ),
+            (
+                ["wt", "new", "x", "topic", "extra"].as_slice(),
+                "invalid `perch wt new` invocation: unexpected extra argument 'extra'",
+            ),
+            (
+                ["wt", "new", "-f", "topic"].as_slice(),
+                "invalid `perch wt new` invocation: unknown option '-f'",
+            ),
+            (
+                ["wt", "new", "x", "--complete"].as_slice(),
+                "invalid `perch wt new` invocation: '--complete' is not a branch; no branch begins with '-'",
+            ),
+            (
+                ["wt", "new", "x", "--no-switch"].as_slice(),
+                "`--no-switch` does not apply to `perch wt new`",
+            ),
+            (
+                ["wt", "new", "--", "x", "--no-switch"].as_slice(),
+                "invalid `perch wt new` invocation: '--no-switch' is not a branch; no branch begins with '-'",
+            ),
+        ] {
+            assert_eq!(command_line(words).unwrap_err().to_string(), message);
+        }
+    }
+
+    #[test]
+    fn a_hook_env_key_must_carry_the_perch_prefix() {
+        for words in [
+            ["--hook-env", "PATH=/x", "wt"].as_slice(),
+            ["wt", "new", "--hook-env", "PATH=/x", "topic"].as_slice(),
+        ] {
+            assert_eq!(
+                command_line(words).unwrap_err().to_string(),
+                "`--hook-env` key 'PATH' is not allowed; keys must start with PERCH_"
+            );
+        }
     }
 
     #[test]
@@ -1067,13 +1261,15 @@ mod tests {
 
     #[test]
     fn completion_filters_only_words_eaten_at_its_position() {
-        let candidates = args(&["br", "shell", "wt", "ls", "rm", "list", "remove", "topic"]);
+        let candidates = args(&[
+            "br", "shell", "wt", "ls", "new", "rm", "list", "remove", "topic",
+        ]);
         let Invocation::Complete(bare) = parse(&args(&["--complete"])).unwrap() else {
             panic!("expected completion");
         };
         assert_eq!(
             bare.render(candidates.iter().map(String::as_str)),
-            "ls\nrm\nlist\nremove\ntopic\n"
+            "ls\nnew\nrm\nlist\nremove\ntopic\n"
         );
 
         let Invocation::Complete(worktree) = parse(&args(&["wt", "--complete"])).unwrap() else {

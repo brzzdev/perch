@@ -351,7 +351,7 @@ fn create_worktree(
     source: Source,
     fetched: Option<&FetchedRemote>,
 ) -> AppResult<PathBuf> {
-    let path = worktrees_root(main_path)?.join(worktree_name);
+    let path = worktree_path(&worktrees_root(main_path)?, worktree_name)?;
     ensure_path_clear(&path)?;
     ensure_parent(&path);
 
@@ -592,6 +592,24 @@ fn worktrees_root(main_path: &Path) -> AppResult<PathBuf> {
     Ok(parent.join("worktrees").join(repo_name))
 }
 
+/// Where the worktree `worktree_name` goes, refused when the name, often a
+/// branch, would place it anywhere but beneath `root`.
+fn worktree_path(root: &Path, worktree_name: &str) -> AppResult<PathBuf> {
+    if worktree_name
+        .split('/')
+        .any(|component| matches!(component, "" | "." | ".."))
+    {
+        return Err(Error::Git {
+            command: "worktree add".into(),
+            message: format!(
+                "'{worktree_name}' does not name a directory beneath {}",
+                root.display()
+            ),
+        });
+    }
+    Ok(root.join(worktree_name))
+}
+
 /// Deletes the directories a removed worktree leaves empty, such as the `fix/`
 /// that held `fix/login`, stopping at the first one still in use. It stays below
 /// the worktrees root, so a worktree added elsewhere by hand leaves its
@@ -638,6 +656,26 @@ mod tests {
             branch: branch.map(str::to_string),
             is_main: false,
             prunable: false,
+        }
+    }
+
+    #[test]
+    fn a_worktree_path_stays_beneath_the_worktrees_root() {
+        let root = Path::new("/w/repo");
+        assert_eq!(
+            worktree_path(root, "feat/x").unwrap(),
+            Path::new("/w/repo/feat/x")
+        );
+        for name in [
+            "",
+            "/abs/x",
+            "../esc",
+            "feat/../x",
+            "./x",
+            "feat//x",
+            "feat/",
+        ] {
+            assert!(worktree_path(root, name).is_err(), "{name} was accepted");
         }
     }
 

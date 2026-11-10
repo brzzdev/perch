@@ -120,7 +120,7 @@ function __perch_wt_accepts_no_switch
         test "$token" = --; and return 1
         test "$token" = --no-switch; and return 1
         string match --quiet -- '-*' "$token"; and continue
-        contains -- "$token" ls rm list remove; and return 1
+        contains -- "$token" ls new rm list remove; and return 1
     end
     return 0
 end
@@ -146,7 +146,7 @@ function __perch_wt_wants_branch
                 set reads_options 0
             else if test $reads_options -eq 1; and test "$token" = --no-switch
                 continue
-            else if test $reads_options -eq 1; and test $positionals -eq 0; and contains -- "$token" ls rm list remove
+            else if test $reads_options -eq 1; and test $positionals -eq 0; and contains -- "$token" ls new rm list remove
                 return 1
             else
                 set positionals (math $positionals + 1)
@@ -197,7 +197,7 @@ complete -c perch -f -n '__perch_seen_subcommand_from shell; and __perch_is_nth_
 # looks past a `--`, so without the guard `perch wt -- ` would offer the subverbs
 # on top of the branches the rule above already gave it — and `--` is precisely
 # how you say you meant the branch.
-complete -c perch -f -n '__perch_seen_subcommand_from wt; and __perch_is_nth_token 2; and not __perch_after_double_dash' -a 'ls rm'
+complete -c perch -f -n '__perch_seen_subcommand_from wt; and __perch_is_nth_token 2; and not __perch_after_double_dash' -a 'ls new rm'
 complete -c perch -f -n '__perch_wt_wants_branch' -a '(__perch_wt_branch_offers)'
 complete -c perch -f -l no-switch -d 'Create or find the worktree without switching to it' -n '__perch_wt_accepts_no_switch'
 

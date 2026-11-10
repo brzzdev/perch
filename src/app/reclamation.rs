@@ -404,6 +404,11 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_worker_switch_is_one_hook_env_refuses() {
+        assert!(WORKER_ENV.starts_with(crate::grammar::INTERNAL_VARIABLE_PREFIX));
+    }
+
+    #[test]
     fn records_round_trip_without_exposing_paths_to_config_syntax() {
         for state in [State::Staged, State::Ready] {
             let record = Record {

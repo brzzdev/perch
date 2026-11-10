@@ -117,11 +117,11 @@ The branch a *Request* proposes to merge. Perch navigates to it as if its name h
 _Avoid_: Source branch, PR branch
 
 **Subverb**:
-A word a *Verb* reads before it reads a branch name. `br` reads `rm`; `wt` reads `ls` and `rm`, plus the retired `list` and `remove`, which are refused rather than taken for branches. Collision is positional: `--` is needed after `br` for a colliding branch, after `wt` for either a colliding branch or a *Worktree directory name* that looks like a subverb or option, and at the top level for a branch matching a *Command word*. Everywhere else the bare name reaches the branch, so `perch list`, `perch br list` and `perch br wt` all work as written.
+A word a *Verb* reads before it reads a branch name. `br` reads `rm`; `wt` reads `ls`, `new`, and `rm`, plus the retired `list` and `remove`, which are refused rather than taken for branches. No word after `wt new` is a subverb. See [ADR 0015](./docs/adr/0015-creation-earns-a-subverb.md). Collision is positional: `--` is needed after `br` for a colliding branch, after `wt` for either a colliding branch or a *Worktree directory name* that looks like a subverb or option, and at the top level for a branch matching a *Command word*. Everywhere else the bare name reaches the branch, so `perch list`, `perch br list` and `perch br wt` all work as written.
 _Avoid_: Subcommand, flag, option
 
 **Grammar**:
-The rules that decide whether each word names a *Command word*, *Subverb*, option, *Worktree directory name*, or branch. `--` makes the next word a branch at the top level and after `br`; after `wt` it introduces either one branch or a *Worktree directory name* followed by a branch without reading options or subverbs, except that the legacy `wt -- <branch> --no-switch` stays a single-branch form and does not suppress the *Handoff*; inside `wt rm` it introduces a target. Destructive forms reject duplicate options, unknown options, and extra targets; worktree creation rejects unknown options, invalid *Worktree directory names*, and extra arguments; and the other navigation targets, `perch <target>`, `perch -- <branch>`, `br <target>`, and `br -- <branch>`, refuse any word after them. Two options are global, `-C <path>` and `--hook-env KEY=VALUE`, read in any order ahead of every other word and nowhere after them.
+The rules that decide whether each word names a *Command word*, *Subverb*, option, *Worktree directory name*, or branch. `--` makes the next word a branch at the top level and after `br`; after `wt` it introduces either one branch or a *Worktree directory name* followed by a branch without reading options or subverbs, except that the legacy `wt -- <branch> --no-switch` stays a single-branch form and does not suppress the *Handoff*; inside `wt rm` it introduces a target, and inside `wt new` a *Worktree directory name* or target. Destructive forms reject duplicate options, unknown options, and extra targets; worktree creation rejects unknown options, invalid *Worktree directory names*, and extra arguments, and `wt new` also rejects a missing target and one beginning with `-`; and the other navigation targets, `perch <target>`, `perch -- <branch>`, `br <target>`, and `br -- <branch>`, refuse any word after them. Two options are global, `-C <path>` and `--hook-env PERCH_KEY=VALUE`, read in any order ahead of every other word, and again after `wt new` until its first other word.
 _Avoid_: Dispatch, parsing
 
 **`.`**:
@@ -129,7 +129,7 @@ The one you're in. `perch .` refreshes the current branch; `perch wt rm .` remov
 _Avoid_: Here, current, self
 
 **Handoff**:
-Printing a directory to stdout for the shell wrapper to `cd` into, since a process cannot change its parent's working directory. `wt --no-switch` suppresses the handoff after creating or finding a worktree, so the shell stays where it is.
+Printing a directory to stdout for the shell wrapper to `cd` into, since a process cannot change its parent's working directory. `wt --no-switch` suppresses the handoff after creating or finding a worktree, so the shell stays where it is, and `wt new` never hands off.
 _Avoid_: Jump, teleport, redirect
 
 ### Hooks

@@ -191,7 +191,8 @@ _perch_complete_words() {
       elif (( reads_options )) && [[ "$word" == "--no-switch" ]]; then
         has_no_switch=1
       elif (( reads_options && positionals == 0 )) &&
-        [[ "$word" == "ls" || "$word" == "rm" || "$word" == "list" || "$word" == "remove" ]]; then
+        [[ "$word" == "ls" || "$word" == "new" || "$word" == "rm" || "$word" == "list" ||
+          "$word" == "remove" ]]; then
         return
       else
         (( positionals += 1 ))
@@ -201,7 +202,7 @@ _perch_complete_words() {
     COMPREPLY=()
     if (( positionals == 0 )); then
       if (( reads_options )); then
-        _perch_reply "$cur" < <(printf '%s\n' ls rm; _perch_offers wt "${wt_words[@]}")
+        _perch_reply "$cur" < <(printf '%s\n' ls new rm; _perch_offers wt "${wt_words[@]}")
       else
         _perch_reply "$cur" < <(_perch_offers wt "${wt_words[@]}")
       fi

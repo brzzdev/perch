@@ -132,14 +132,22 @@ Perch asks `gh` (for `pr:`) or `glab` (for `mr:`) about the request on `origin`,
 
 ### From a script
 
-`-C <path>` runs perch as if it had been started in `<path>`, as `git -C` does, so a script needs no `cd` first. It goes before the command word, as does `--hook-env`, in either order; a relative path resolves against the current directory, and each further `-C` against the one before it, with an empty one changing nothing. A path that isn't a directory fails before anything runs. `-C` sets where perch runs; the shell wrapper still follows any path perch prints, so `perch -C ~/src/repo feature` and `wt` without `--no-switch` move the shell as usual. `wt rm` judges its handoff from the shell's own directory, so it moves the shell to the main checkout only when the shell stood in a worktree it removed. The stale-branch cleanup never hands off.
+`-C <path>` runs perch as if it had been started in `<path>`, as `git -C` does, so a script needs no `cd` first. It goes before the command word, as does `--hook-env`, in either order, or after `wt new`; a relative path resolves against the current directory, and each further `-C` against the one before it, with an empty one changing nothing. A path that isn't a directory fails before anything runs. `-C` sets where perch runs; the shell wrapper still follows any path perch prints, so `perch -C ~/src/repo feature` and `wt` without `--no-switch` move the shell as usual. `wt rm` judges its handoff from the shell's own directory, so it moves the shell to the main checkout only when the shell stood in a worktree it removed. The stale-branch cleanup never hands off.
 
 ```sh
-perch -C ~/src/repo --hook-env SESSION=review wt 77 pr:77 --no-switch
-perch -C ~/src/repo --hook-env SESSION=review wt rm 77
+perch -C ~/src/repo --hook-env PERCH_SESSION=review wt 77 pr:77 --no-switch
+perch -C ~/src/repo --hook-env PERCH_SESSION=review wt rm 77
 ```
 
 `--hook-env` hands the run's [hooks](#worktree-hooks) a variable of the caller's own.
+
+`wt new` creates or finds a worktree exactly as `wt --no-switch` does, and does nothing else. It takes the repo and the hook variables after the subverb, so an agent harness can pre-approve creation with one prefix rule without also approving `wt rm`:
+
+```sh
+perch wt new -C ~/src/repo --hook-env PERCH_SESSION=review 77 pr:77
+```
+
+In a harness whose allow rules match a command prefix, the rule is `Bash(perch wt new *)`. `wt new` reads `-C` and `--hook-env` until `--` or its first other word, then a target, optionally after a worktree directory name. Any other option, a missing target, or an extra word is a usage error, and no word after `new` is a subverb, so `perch wt new rm feature` makes a directory named `rm`. See [ADR 0015](docs/adr/0015-creation-earns-a-subverb.md).
 
 ## Removing branches
 
@@ -176,6 +184,9 @@ perch wt 545 renovate/realm-swiftlint-0.x
 perch wt feature --no-switch
 perch wt 545 renovate/realm-swiftlint-0.x --no-switch
 
+# Create or find the worktree, and nothing else: no handoff, no subverbs
+perch wt new 545 renovate/realm-swiftlint-0.x
+
 # List all worktrees
 perch wt ls
 
@@ -186,9 +197,9 @@ perch wt rm .         # the worktree you're standing in
 perch wt rm . --force # …without being asked about uncommitted work
 ```
 
-Worktrees land at `../worktrees/<repo>/<branch>` relative to the main checkout. Branch names with slashes (`feature/foo`) preserve their structure as subdirectories. Pass a separate worktree directory name to use one directory below the repository's worktree root instead, such as `../worktrees/<repo>/545`. The name cannot be `.`, `..`, or contain a path separator. If the branch already has a registered worktree, Perch uses its actual path and ignores the requested name.
+Worktrees land at `../worktrees/<repo>/<branch>` relative to the main checkout. Branch names with slashes (`feature/foo`) preserve their structure as subdirectories. Pass a separate worktree directory name to use one directory below the repository's worktree root instead, such as `../worktrees/<repo>/545`. The name cannot be `.`, `..`, or contain a path separator. A branch whose path would leave the worktree root, through an absolute path, an empty, `.`, or `..` component, or a symlink inside the root, is refused before perch touches the filesystem. If the branch already has a registered worktree, Perch uses its actual path and ignores the requested name.
 
-If the worktree directory name collides with `ls`, `rm`, `list`, or `remove`, put `--` before it: `perch wt -- rm feature`.
+If the worktree directory name collides with `ls`, `new`, `rm`, `list`, or `remove`, put `--` before it: `perch wt -- rm feature`.
 
 `--no-switch` suppresses the directory handoff to the shell wrapper. Creation, fetching, hooks, and stale-branch cleanup still run as usual.
 
@@ -370,7 +381,7 @@ Each command runs via `sh -c` from the main checkout, with:
 | `PERCH_MAIN` | Absolute path of the main checkout |
 | `PERCH_WORKTREE` | Absolute path of the worktree the event is about |
 
-`--hook-env KEY=VALUE` adds a variable to the environment of every hook the run fires, `created` and `removed` alike, and to nothing else. It goes before the command word, and repeats for more than one. `KEY` can't be empty, `VALUE` can, and the variables above win over a clashing key.
+`--hook-env PERCH_KEY=VALUE` adds a variable to the environment of every hook the run fires, `created` and `removed` alike, and to nothing else. It goes before the command word or after `wt new`, and repeats for more than one. The key must start with `PERCH_`, so it can never set `PATH`, `BASH_ENV`, or anything else the hook's shell reads, and can't start with `PERCH_INTERNAL_`, which perch keeps for itself. `VALUE` can be empty, and the variables above win over a clashing key.
 
 `created` fires the moment the worktree exists, before the stale-branch prompt. `removed` fires once per worktree, only after one is actually gone — so the path it names no longer exists on disk. Both cover every route: `removed` fires for a worktree taken along by the stale-branch cleanup just as it does for `wt rm`, since a hook mirrors what happened to the repo rather than which command you typed.
 

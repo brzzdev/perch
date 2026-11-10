@@ -52,8 +52,21 @@ fn cwd_at(path: &Path) -> CwdGuard {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Blinds the git `command` runs to the developer's global and system config.
+fn isolate_git_config(command: &mut Command) -> &mut Command {
+    command
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+}
+
+fn git_command() -> Command {
+    let mut command = Command::new("git");
+    isolate_git_config(&mut command);
+    command
+}
+
 fn git(dir: &Path, args: &[&str]) -> Output {
-    let output = Command::new("git")
+    let output = git_command()
         .args(args)
         .current_dir(dir)
         .env("GIT_AUTHOR_NAME", "Test")
@@ -95,8 +108,7 @@ fn perch_command(dir: &Path, args: &[&str]) -> Command {
     // A transport program in the developer's own environment would make every
     // worktree fetch for itself, and the tests that count fetches say so. So
     // would a relative or empty `PATH` entry, or a relative `GIT_EXEC_PATH`.
-    cmd.args(args)
-        .current_dir(dir)
+    isolate_git_config(cmd.args(args).current_dir(dir))
         .env_remove("GIT_PROXY_COMMAND")
         .env_remove("GIT_SSH")
         .env_remove("GIT_SSH_COMMAND");
@@ -215,7 +227,7 @@ fn push_upstream_change_to(work: &Path, remote: &str, file: &str, content: &str,
 
 fn clone_bare(bare: &Path) -> TempDir {
     let dir = TempDir::new().unwrap();
-    let output = Command::new("git")
+    let output = git_command()
         .args(["clone", bare.to_str().unwrap(), "."])
         .current_dir(dir.path())
         .output()
@@ -1219,7 +1231,7 @@ fn wt_rm_complete_lists_every_name_rm_accepts() {
 #[test]
 fn complete_drops_only_the_words_that_position_eats() {
     let (_bare, work) = setup();
-    for branch in ["br", "wt", "ls", "rm", "list", "remove", "feat/x"] {
+    for branch in ["br", "wt", "ls", "new", "rm", "list", "remove", "feat/x"] {
         git(work.path(), &["branch", branch]);
     }
 
@@ -1233,23 +1245,25 @@ fn complete_drops_only_the_words_that_position_eats() {
 
     assert_eq!(
         offered(&["--complete"]),
-        ["feat/x", "list", "ls", "main", "remove", "rm"],
+        ["feat/x", "list", "ls", "main", "new", "remove", "rm"],
         "a bare `perch` reads `br` and `wt` as verbs"
     );
     assert_eq!(
         offered(&["br", "--complete"]),
-        ["br", "feat/x", "list", "ls", "main", "remove", "wt"],
+        ["br", "feat/x", "list", "ls", "main", "new", "remove", "wt"],
         "`br` reads `rm` as its subverb"
     );
     assert_eq!(
         offered(&["br", "rm", "--complete"]),
-        ["br", "feat/x", "list", "ls", "main", "remove", "rm", "wt"],
+        [
+            "br", "feat/x", "list", "ls", "main", "new", "remove", "rm", "wt"
+        ],
         "`br rm` accepts every local branch, including one named `rm`"
     );
     assert_eq!(
         offered(&["wt", "--complete"]),
         ["br", "feat/x", "main", "wt"],
-        "`wt` reads the two subverbs and the two retired spellings"
+        "`wt` reads the three subverbs and the two retired spellings"
     );
     assert_eq!(
         offered(&["wt", "--no-switch", "--complete"]),
@@ -1258,7 +1272,9 @@ fn complete_drops_only_the_words_that_position_eats() {
     );
     assert_eq!(
         offered(&["wt", "short", "--complete"]),
-        ["br", "feat/x", "list", "ls", "main", "remove", "rm", "wt"],
+        [
+            "br", "feat/x", "list", "ls", "main", "new", "remove", "rm", "wt"
+        ],
         "the second `wt` positional is a branch and eats no subverb spellings"
     );
 
@@ -1266,7 +1282,9 @@ fn complete_drops_only_the_words_that_position_eats() {
     // to answer with every branch — at whichever level it was typed. Git
     // refuses a branch whose name begins with `-`, so reading `--complete`
     // here costs no name that was ever reachable.
-    let everything = ["br", "feat/x", "list", "ls", "main", "remove", "rm", "wt"];
+    let everything = [
+        "br", "feat/x", "list", "ls", "main", "new", "remove", "rm", "wt",
+    ];
     assert_eq!(offered(&["--", "--complete"]), everything);
     assert_eq!(offered(&["br", "--", "--complete"]), everything);
     assert_eq!(offered(&["wt", "--", "--complete"]), everything);
@@ -1407,11 +1425,11 @@ fn bash_completion_answers_from_the_dash_c_repo_past_the_global_options() {
     let elsewhere = TempDir::new().unwrap();
     std::os::unix::fs::symlink(work.path(), elsewhere.path().join("repo space")).unwrap();
 
-    // Readline keeps the quotes and splits `K=V` at `=`, as COMP_WORDBREAKS says.
+    // Readline keeps the quotes and splits `PERCH_K=V` at `=`, as COMP_WORDBREAKS says.
     let output = bash_complete_line(
         elsewhere.path(),
-        Some("perch -C 'repo space' --hook-env K=V wt short "),
-        "perch -C \"'repo space'\" --hook-env K = V wt short ''",
+        Some("perch -C 'repo space' --hook-env PERCH_K=V wt short "),
+        "perch -C \"'repo space'\" --hook-env PERCH_K = V wt short ''",
         9,
     );
 
@@ -1454,7 +1472,7 @@ fn zsh_completion_passes_the_global_options_on_to_the_binary() {
          service=perch\n\
          CURRENT=8\n\
          for typed in '~/repo' \"'~/repo'\" '~bob/repo'; do\n\
-           words=(perch -C $typed --hook-env K=V wt short '')\n\
+           words=(perch -C $typed --hook-env PERCH_K=V wt short '')\n\
            _perch\n\
          done\n"
     );
@@ -1469,9 +1487,9 @@ fn zsh_completion_passes_the_global_options_on_to_the_binary() {
     assert_eq!(
         stdout_str(&output).lines().collect::<Vec<_>>(),
         [
-            "-C|/home/test/repo|--hook-env|K=V branches branch wt short",
-            "-C|~/repo|--hook-env|K=V branches branch wt short",
-            "-C|~bob/repo|--hook-env|K=V branches branch wt short",
+            "-C|/home/test/repo|--hook-env|PERCH_K=V branches branch wt short",
+            "-C|~/repo|--hook-env|PERCH_K=V branches branch wt short",
+            "-C|~bob/repo|--hook-env|PERCH_K=V branches branch wt short",
         ],
         "only an unquoted `~/` is $HOME"
     );
@@ -1530,7 +1548,7 @@ fn fish_completion_answers_from_the_dash_c_repo_past_the_global_options() {
     let output = fish_complete(
         elsewhere.path(),
         &format!(
-            "perch -C \"{}\" --hook-env K=V wt short ",
+            "perch -C \"{}\" --hook-env PERCH_K=V wt short ",
             work.path().display()
         ),
     );
@@ -2106,12 +2124,188 @@ fn wt_creates_new_branch_from_default_when_branch_absent() {
     );
 
     // The new branch should have a base commit (from origin/main).
-    let head = Command::new("git")
+    let head = git_command()
         .args(["rev-parse", "HEAD"])
         .current_dir(&expected)
         .output()
         .unwrap();
     assert!(head.status.success(), "stderr: {}", stderr_str(&head));
+}
+
+#[test]
+fn wt_new_creates_or_finds_a_worktree_without_a_shell_handoff() {
+    let (_bare, parent, work) = setup_with_parent();
+    git(&work, &["branch", "feature"]);
+    let worktrees = parent.path().join("worktrees/repo");
+
+    for (args, directory) in [
+        (
+            ["wt", "new", "-C", "repo", "short", "feature"].as_slice(),
+            "short",
+        ),
+        (
+            ["wt", "new", "-C", "repo", "brand-new"].as_slice(),
+            "brand-new",
+        ),
+    ] {
+        let output = perch_args(parent.path(), args);
+
+        assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+        assert_eq!(stdout_str(&output), "");
+        assert!(worktrees.join(directory).is_dir(), "{directory} is missing");
+    }
+
+    let again = perch_args(parent.path(), &["wt", "new", "-C", "repo", "x", "feature"]);
+    assert!(again.status.success(), "stderr: {}", stderr_str(&again));
+    assert_eq!(stdout_str(&again), "");
+    assert!(
+        stderr_str(&again).contains("worktree for feature is at"),
+        "stderr: {}",
+        stderr_str(&again)
+    );
+    assert!(!worktrees.join("x").exists());
+}
+
+#[test]
+fn wt_new_takes_an_option_looking_word_after_the_escape_as_a_directory_name() {
+    let (_bare, parent, work) = setup_with_parent();
+
+    let output = perch_args(
+        parent.path(),
+        &["wt", "new", "-C", "repo", "--", "-f", "topic"],
+    );
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert!(parent.path().join("worktrees/repo/-f").is_dir());
+    assert!(local_branch_exists(&work, "topic"));
+}
+
+#[test]
+fn wt_new_refuses_what_it_does_not_define_and_creates_and_removes_nothing() {
+    let (_bare, parent, _work) = setup_with_parent();
+    let worktrees = parent.path().join("worktrees/repo");
+    fs::create_dir_all(worktrees.join("x")).unwrap();
+
+    for args in [
+        ["x", "feature", "extra"].as_slice(),
+        ["--", "x", "--no-switch"].as_slice(),
+    ] {
+        let output = perch_args(
+            parent.path(),
+            &[["wt", "new", "-C", "repo"].as_slice(), args].concat(),
+        );
+
+        assert_eq!(output.status.code(), Some(1), "{args:?} succeeded");
+        assert!(
+            stderr_str(&output).starts_with("error: "),
+            "{args:?}: {}",
+            stderr_str(&output)
+        );
+        assert!(worktrees.join("x").is_dir(), "{args:?} removed x");
+        assert_eq!(
+            fs::read_dir(&worktrees).unwrap().count(),
+            1,
+            "{args:?} created a directory"
+        );
+    }
+}
+
+#[test]
+fn worktree_creation_leaves_the_filesystem_alone_for_a_target_escaping_the_worktrees_root() {
+    let (_bare, parent, _work) = setup_with_parent();
+    let outside = TempDir::new().unwrap();
+    let empty_dir = outside.path().join("empty");
+    let deep = outside.path().join("deep");
+    let nested_dir = deep.join("x");
+    let (empty, nested) = (empty_dir.to_str().unwrap(), nested_dir.to_str().unwrap());
+    let worktrees = parent.path().join("worktrees/repo");
+    fs::create_dir_all(&worktrees).unwrap();
+    std::os::unix::fs::symlink(outside.path(), worktrees.join("link")).unwrap();
+
+    for prefix in [
+        ["-C", "repo", "wt", "--no-switch"].as_slice(),
+        ["wt", "new", "-C", "repo"].as_slice(),
+    ] {
+        for target in [
+            ["--", empty, "--no-switch"].as_slice(),
+            [empty].as_slice(),
+            [nested].as_slice(),
+            ["../../escaped/x"].as_slice(),
+            ["link/payload"].as_slice(),
+        ] {
+            fs::create_dir_all(&empty_dir).unwrap();
+
+            let output = perch_args(parent.path(), &[prefix, target].concat());
+
+            assert_eq!(
+                output.status.code(),
+                Some(1),
+                "{prefix:?} {target:?} succeeded"
+            );
+            assert!(
+                empty_dir.is_dir(),
+                "{prefix:?} {target:?} removed the empty directory"
+            );
+            assert!(
+                !deep.exists(),
+                "{prefix:?} {target:?} created {}",
+                deep.display()
+            );
+            assert!(
+                !parent.path().join("escaped").exists(),
+                "{prefix:?} {target:?} escaped the worktrees root"
+            );
+            assert!(
+                !outside.path().join("payload").exists(),
+                "{prefix:?} {target:?} followed a symlink out of the worktrees root"
+            );
+        }
+    }
+}
+
+#[test]
+fn hook_env_refuses_a_key_without_the_perch_prefix_before_running_git() {
+    let not_a_repo = TempDir::new().unwrap();
+    for args in [
+        ["--hook-env", "PATH=/x", "wt", "ls"].as_slice(),
+        ["wt", "new", "--hook-env", "BASH_ENV=/x", "topic"].as_slice(),
+    ] {
+        let key = args.iter().find_map(|word| word.split_once('=')).unwrap().0;
+
+        let output = perch_args(not_a_repo.path(), args);
+
+        assert_eq!(output.status.code(), Some(1));
+        assert_eq!(
+            stderr_str(&output),
+            format!(
+                "error: `--hook-env` key '{key}' is not allowed; keys must start with PERCH_, but not PERCH_INTERNAL_\n"
+            )
+        );
+    }
+}
+
+#[test]
+fn wt_new_hands_its_hook_env_to_the_created_hook() {
+    let (_bare, parent, work) = setup_with_parent();
+    let log = parent.path().join("hook.log");
+    let script = format!("printf '%s\\n' \"$PERCH_SESSION\" >> '{}'", log.display());
+    git(&work, &["config", "perch.hook.created", &script]);
+
+    let output = perch_hooked(
+        parent.path(),
+        &[
+            "wt",
+            "new",
+            "-C",
+            "repo",
+            "--hook-env",
+            "PERCH_SESSION=a=b",
+            "topic",
+        ],
+    );
+
+    assert!(output.status.success(), "stderr: {}", stderr_str(&output));
+    assert_eq!(fs::read_to_string(&log).unwrap(), "a=b\n");
 }
 
 #[test]
@@ -2644,7 +2838,7 @@ fn stage_deletion_of_file_txt(work: &Path, index: impl AsRef<OsStr>) {
         &["read-tree", "HEAD"][..],
         &["rm", "--cached", "--quiet", "file.txt"],
     ] {
-        let staged = Command::new("git")
+        let staged = git_command()
             .args(args)
             .current_dir(work)
             .env("GIT_INDEX_FILE", &index)
@@ -2828,9 +3022,9 @@ fn submodule_left_behind(recorded: Recorded) -> LeftBehind {
 }
 
 impl LeftBehind {
-    /// Runs perch in `dir` with no global config, which could switch recursion
-    /// on and fetch the submodule whatever perch does. Returns the fetches run
-    /// inside submodules alongside the output.
+    /// Runs perch in `dir`, returning the fetches run inside submodules
+    /// alongside the output. [`perch_command`] keeps global config out, which
+    /// could switch recursion on and fetch the submodule whatever perch does.
     fn perch(&self, dir: &Path, args: &[&str]) -> (Output, Vec<String>) {
         self.run(perch_command(dir, args))
     }
@@ -2838,8 +3032,6 @@ impl LeftBehind {
     /// Like [`Self::perch`], for a command with its own environment.
     fn run(&self, mut command: Command) -> (Output, Vec<String>) {
         command
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_COUNT", "1")
             .env("GIT_CONFIG_KEY_0", "protocol.file.allow")
             .env("GIT_CONFIG_VALUE_0", "always");
@@ -2863,7 +3055,7 @@ impl LeftBehind {
                 "modules/module",
             ],
         );
-        Command::new("git")
+        git_command()
             .arg("--git-dir")
             .arg(stdout_str(&repository).trim())
             .args([
@@ -3596,7 +3788,7 @@ fn a_retired_wt_subverb_is_refused_rather_than_taken_for_a_branch() {
 /// branch.
 #[test]
 fn a_wt_subverb_named_branch_is_reachable_past_the_dispatcher() {
-    for name in ["list", "remove", "ls", "rm"] {
+    for name in ["list", "remove", "ls", "new", "rm"] {
         let (_bare, _parent, work) = setup_with_parent();
         git(&work, &["branch", name]);
 
@@ -5118,7 +5310,7 @@ fn ready_trash(worktree: &Path) -> Option<PathBuf> {
 }
 
 fn reclamation_record_is_cleared(work: &Path) -> bool {
-    Command::new("git")
+    git_command()
         .args(["config", "--get-all", RECLAMATION_KEY])
         .current_dir(work)
         .output()
@@ -6799,7 +6991,7 @@ fn hooks_fired_through_dash_c_see_hook_env_beneath_the_payload() {
     let (_bare, parent, work) = setup_with_parent();
     let log = parent.path().join("hook.log");
     let script = format!(
-        "printf '%s|%s|%s\\n' \"$PERCH_EVENT\" \"$CALLER\" \"$(pwd -P)\" >> '{}'",
+        "printf '%s|%s|%s\\n' \"$PERCH_EVENT\" \"$PERCH_CALLER\" \"$(pwd -P)\" >> '{}'",
         log.display()
     );
     git(&work, &["config", "perch.hook.created", &script]);
@@ -6809,7 +7001,7 @@ fn hooks_fired_through_dash_c_see_hook_env_beneath_the_payload() {
         "-C",
         "repo",
         "--hook-env",
-        "CALLER=script",
+        "PERCH_CALLER=script",
         "--hook-env",
         "PERCH_EVENT=spoofed",
     ];
@@ -7580,7 +7772,7 @@ fn a_criss_cross_binary_resolution_is_not_proven() {
         ("anchor", "b1", "b2", b"X1\0"),
     ] {
         git(work.path(), &["checkout", "-b", branch, from]);
-        let _ = Command::new("git")
+        let _ = git_command()
             .args(["merge", "--no-commit", other])
             .current_dir(work.path())
             .output();

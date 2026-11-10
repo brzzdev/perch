@@ -100,6 +100,12 @@ pub enum Error {
     /// default in place of the one they chose.
     #[error("{branch} no longer exists; it was deleted after the list was drawn")]
     Vanished { branch: String },
+
+    #[error("'{name}' does not name a directory beneath {}", root.display())]
+    WorktreeOutsideRoot {
+        name: String,
+        root: std::path::PathBuf,
+    },
 }
 
 fn track_commands(branch: &str, remotes: &[String]) -> String {

@@ -351,7 +351,7 @@ fn create_worktree(
     source: Source,
     fetched: Option<&FetchedRemote>,
 ) -> AppResult<PathBuf> {
-    let path = worktrees_root(main_path)?.join(worktree_name);
+    let path = worktree_path(&worktrees_root(main_path)?, worktree_name)?;
     ensure_path_clear(&path)?;
     ensure_parent(&path);
 
@@ -592,6 +592,26 @@ fn worktrees_root(main_path: &Path) -> AppResult<PathBuf> {
     Ok(parent.join("worktrees").join(repo_name))
 }
 
+/// Where the worktree `worktree_name` goes, refused unless it stays beneath
+/// `root`, symlinks included.
+fn worktree_path(root: &Path, worktree_name: &str) -> AppResult<PathBuf> {
+    let mut path = root.to_path_buf();
+    for component in worktree_name.split('/') {
+        let escapes = matches!(component, "" | "." | "..") || {
+            path.push(component);
+            path.symlink_metadata()
+                .is_ok_and(|metadata| metadata.is_symlink())
+        };
+        if escapes {
+            return Err(Error::WorktreeOutsideRoot {
+                name: worktree_name.to_string(),
+                root: root.to_path_buf(),
+            });
+        }
+    }
+    Ok(path)
+}
+
 /// Deletes the directories a removed worktree leaves empty, such as the `fix/`
 /// that held `fix/login`, stopping at the first one still in use. It stays below
 /// the worktrees root, so a worktree added elsewhere by hand leaves its
@@ -639,6 +659,37 @@ mod tests {
             is_main: false,
             prunable: false,
         }
+    }
+
+    #[test]
+    fn a_worktree_path_stays_beneath_the_worktrees_root() {
+        let root = Path::new("/w/repo");
+        assert_eq!(
+            worktree_path(root, "feat/x").unwrap(),
+            Path::new("/w/repo/feat/x")
+        );
+        for name in [
+            "",
+            "/abs/x",
+            "../esc",
+            "feat/../x",
+            "./x",
+            "feat//x",
+            "feat/",
+        ] {
+            assert!(worktree_path(root, name).is_err(), "{name} was accepted");
+        }
+    }
+
+    #[test]
+    fn a_worktree_path_through_a_symlink_below_the_root_is_refused() {
+        let root = tempfile::TempDir::new().unwrap();
+        let outside = tempfile::TempDir::new().unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("feat")).unwrap();
+
+        assert!(worktree_path(root.path(), "feat/x").is_err());
+        assert!(worktree_path(root.path(), "feat").is_err());
+        assert!(worktree_path(root.path(), "other/x").is_ok());
     }
 
     /// A nested branch name gives a directory named after its last segment

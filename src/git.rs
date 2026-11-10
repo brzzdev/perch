@@ -223,6 +223,7 @@ pub fn stash_pop() -> AppResult<StashPopOutcome> {
 /// Checks `branch` out, creating it from `preferred` or another remote by
 /// [`remote_holding`] when it isn't local.
 pub fn checkout(branch: &str, preferred: &str) -> AppResult<()> {
+    ensure_branch_name(branch)?;
     let start = remote_start_point(branch, preferred)?;
     let args: Vec<&str> = match &start {
         Some(start) => vec!["checkout", "--quiet", "--track", "-b", branch, start],
@@ -274,6 +275,20 @@ fn remote_start_point(branch: &str, preferred: &str) -> AppResult<Option<String>
 
 pub fn is_local_branch(branch: &str) -> AppResult<bool> {
     ref_present(&format!("refs/heads/{branch}"))
+}
+
+/// Refuses a name `git check-ref-format --branch` rejects, such as one led by `-`.
+fn ensure_branch_name(branch: &str) -> AppResult<()> {
+    let valid = Command::new("git")
+        .args(["check-ref-format", "--branch", branch])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?
+        .success();
+    if valid {
+        return Ok(());
+    }
+    Err(Error::InvalidBranchName(branch.to_string()))
 }
 
 #[must_use]
@@ -1972,6 +1987,7 @@ pub fn worktree_for_branch(worktrees: &[Worktree], branch: &str) -> Option<Workt
 /// Add a worktree at `path` for `branch`, created from `start` (e.g.
 /// `refs/remotes/origin/main`) unless `branch` is already local.
 pub fn worktree_add(path: &Path, branch: &str, start: Option<&str>) -> AppResult<()> {
+    ensure_branch_name(branch)?;
     let path_str = path_to_str(path)?;
     let build_args = || -> AppResult<Vec<String>> {
         let start = match start {
@@ -2272,7 +2288,7 @@ fn branch_config_key(key: &str) -> Option<(&str, &str)> {
 /// markers shown and the deletion performed agree about what is merged.
 pub fn force_delete_branch(dir: Option<&Path>, branch: &str) -> AppResult<BranchDeleteOutcome> {
     let output = git_cmd(dir)
-        .args(["branch", "-D", "--quiet", branch])
+        .args(["branch", "-D", "--quiet", "--", branch])
         .output()?;
     if output.status.success() {
         return Ok(BranchDeleteOutcome::Deleted);
@@ -2383,7 +2399,7 @@ pub enum Holder {
 /// worktree the caller measured risk from — see [`unmerged_branches`].
 pub fn delete_branch_if_merged(dir: Option<&Path>, branch: &str) -> AppResult<BranchDeleteOutcome> {
     let output = git_cmd(dir)
-        .args(["branch", "-d", "--quiet", branch])
+        .args(["branch", "-d", "--quiet", "--", branch])
         .output()?;
     if output.status.success() {
         return Ok(BranchDeleteOutcome::Deleted);

@@ -1146,6 +1146,26 @@ fn force_delete_branch_removes_branch() {
 }
 
 #[test]
+fn branch_deletion_reaches_a_branch_git_would_read_as_an_option() {
+    let (_bare, work) = setup();
+    git(work.path(), &["update-ref", "refs/heads/--merged", "HEAD"]);
+    git(work.path(), &["update-ref", "refs/heads/--forced", "HEAD"]);
+
+    let _cwd = cwd_at(work.path());
+    let merged = perch::git::delete_branch_if_merged(None, "--merged").unwrap();
+    let forced = perch::git::force_delete_branch(None, "--forced").unwrap();
+
+    assert_matches!(merged, perch::git::BranchDeleteOutcome::Deleted);
+    assert_matches!(forced, perch::git::BranchDeleteOutcome::Deleted);
+    let listing = git(
+        work.path(),
+        &["for-each-ref", "--format=%(refname)", "refs/heads/"],
+    );
+    let refs = stdout_str(&listing);
+    assert_eq!(refs.trim(), "refs/heads/main");
+}
+
+#[test]
 fn worktree_held_stale_branch_is_no_longer_reported_as_skipped() {
     let (_bare, work) = setup();
 
@@ -7875,6 +7895,61 @@ fn wt_pr_creates_then_reuses_a_worktree_tracking_the_head_branch() {
     assert_eq!(stdout_str(&second), stdout_str(&first));
     let list = git(&work, &["worktree", "list", "--porcelain"]);
     assert_eq!(stdout_str(&list).matches("refs/heads/feat/x").count(), 1);
+}
+
+/// A local and remote `--detach`, which only `update-ref` can make, as the head of `pr:7`.
+fn add_option_shaped_branch(work: &Path) -> (TempDir, OsString) {
+    git(work, &["update-ref", "refs/heads/--detach", "HEAD"]);
+    git(
+        work,
+        &["update-ref", "refs/remotes/origin/--detach", "HEAD"],
+    );
+    let bare = git(work, &["remote", "get-url", "origin"]);
+    forge_path(
+        "gh",
+        &view_query("pr", Path::new(stdout_str(&bare).trim()), 7),
+        "false --detach",
+    )
+}
+
+#[test]
+fn wt_pr_refuses_a_head_branch_git_would_read_as_an_option() {
+    let (_bare, parent, work) = setup_with_parent();
+    let (_bin, path) = add_option_shaped_branch(&work);
+
+    let output = perch_with_path(&work, &["wt", "pr:7"], &path);
+
+    assert!(!output.status.success(), "stdout: {}", stdout_str(&output));
+    assert!(
+        stderr_str(&output).contains("'--detach' is not a valid branch name"),
+        "stderr: {}",
+        stderr_str(&output)
+    );
+    let list = git(&work, &["worktree", "list", "--porcelain"]);
+    assert_eq!(stdout_str(&list).matches("worktree ").count(), 1);
+    let worktree = parent
+        .path()
+        .join("worktrees")
+        .join("repo")
+        .join("--detach");
+    assert!(!worktree.exists());
+}
+
+#[test]
+fn br_pr_refuses_a_head_branch_git_would_read_as_an_option() {
+    let (_bare, work) = setup();
+    let (_bin, path) = add_option_shaped_branch(work.path());
+
+    let output = perch_with_path(work.path(), &["br", "pr:7"], &path);
+
+    assert!(!output.status.success(), "stdout: {}", stdout_str(&output));
+    assert!(
+        stderr_str(&output).contains("'--detach' is not a valid branch name"),
+        "stderr: {}",
+        stderr_str(&output)
+    );
+    let branch = git(work.path(), &["branch", "--show-current"]);
+    assert_eq!(stdout_str(&branch).trim(), "main");
 }
 
 #[test]

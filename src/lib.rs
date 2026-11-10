@@ -67,6 +67,9 @@ pub enum Error {
         hint: String,
     },
 
+    #[error("'{0}' is not a valid branch name")]
+    InvalidBranchName(String),
+
     #[error("`{0}` is not a request number; expected pr:<number> or mr:<number>")]
     InvalidRequest(String),
 

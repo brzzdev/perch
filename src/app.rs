@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::mem::DropGuard;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -25,26 +26,17 @@ use picker::{
 };
 use prefetch::{FetchedRemote, Prefetch};
 
-pub(crate) struct CursorGuard(Option<Term>);
+/// Shows the cursor again when dropped.
+pub(crate) type CursorGuard = DropGuard<Term, fn(Term)>;
 
-impl CursorGuard {
-    pub(crate) fn hide() -> Self {
-        let term = Term::stderr();
-        if term.is_term() {
-            let _ = term.hide_cursor();
-            Self(Some(term))
-        } else {
-            Self(None)
-        }
-    }
-}
-
-impl Drop for CursorGuard {
-    fn drop(&mut self) {
-        if let Some(term) = &self.0 {
+/// Hides the cursor on an interactive stderr until the guard drops.
+pub(crate) fn hide_cursor() -> Option<CursorGuard> {
+    interactive_term().map(|term| {
+        let _ = term.hide_cursor();
+        CursorGuard::new(term, |term| {
             let _ = term.show_cursor();
-        }
-    }
+        })
+    })
 }
 
 /// The glyph fronting a line that reports something going wrong, or a risk about
@@ -55,9 +47,9 @@ pub(crate) fn warn() -> StyledObject<&'static str> {
 
 /// Starts an activity spinner, hiding the cursor until both are dropped. Bind
 /// the pair as `let (spinner, _cursor) = …` so the cursor is restored first.
-pub(crate) fn spinner(message: impl Into<Cow<'static, str>>) -> (ProgressBar, CursorGuard) {
+pub(crate) fn spinner(message: impl Into<Cow<'static, str>>) -> (ProgressBar, Option<CursorGuard>) {
     let spinner = ProgressBar::new_spinner().with_message(message);
-    let cursor = CursorGuard::hide();
+    let cursor = hide_cursor();
     spinner.enable_steady_tick(Duration::from_millis(80));
     (spinner, cursor)
 }
@@ -437,7 +429,7 @@ fn prompt_keep_discard(
         style(format!("Refresh to {remote_ref}?")).bold(),
         style("[k]eep (stash & rebase) / [d]iscard (hard reset) / esc").dim(),
     );
-    let _cursor_guard = CursorGuard::hide();
+    let _cursor_guard = hide_cursor();
     loop {
         let choice = match term.read_key()? {
             Key::Char('k' | 'K') => Some(RefreshChoice::Keep),
@@ -625,7 +617,7 @@ pub(crate) fn confirm(prompt: &str, default: DefaultAnswer) -> AppResult<Confirm
         style(prompt).bold(),
         style(hint).dim(),
     );
-    let _cursor_guard = CursorGuard::hide();
+    let _cursor_guard = hide_cursor();
     loop {
         let answer = match term.read_key()? {
             Key::Char('y' | 'Y') => Confirmation::Accepted,

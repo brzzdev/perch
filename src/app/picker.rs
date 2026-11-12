@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 use console::{Key, Term, measure_text_width, style};
 
-use super::{CursorGuard, interactive_term};
+use super::{hide_cursor, interactive_term};
 use crate::AppResult;
 use crate::grammar::Verb;
 
@@ -33,7 +33,7 @@ pub(crate) struct TermKeys {
 impl KeySource for TermKeys {
     fn read_key(&mut self) -> std::io::Result<Key> {
         if let Some(raw) = &self.raw {
-            return raw.read_key();
+            return raw::read_key(raw);
         }
         self.term.read_key()
     }
@@ -46,7 +46,7 @@ pub(crate) fn interactive_keys() -> Option<TermKeys> {
     Some(TermKeys {
         term,
         // Acquiring raw mode can fail; fall back to `console`.
-        raw: raw::RawMode::acquire().ok(),
+        raw: raw::acquire().ok(),
     })
 }
 
@@ -55,6 +55,7 @@ pub(crate) fn interactive_keys() -> Option<TermKeys> {
 /// mode active and uses its battle-tested event parser instead.
 mod raw {
     use std::io;
+    use std::mem::DropGuard;
 
     use console::Key;
     use crossterm::{
@@ -62,31 +63,26 @@ mod raw {
         terminal::{disable_raw_mode, enable_raw_mode},
     };
 
-    /// Zero-sized guard: enabling raw mode is process-global, and [`Drop`]
-    /// disables it again.
-    pub(crate) struct RawMode;
+    /// Disables raw mode again when dropped; raw mode is process-global.
+    pub(crate) type RawMode = DropGuard<(), fn(())>;
 
-    impl RawMode {
-        pub(crate) fn acquire() -> io::Result<Self> {
-            enable_raw_mode()?;
-            Ok(Self)
-        }
+    pub(crate) fn acquire() -> io::Result<RawMode> {
+        enable_raw_mode()?;
+        Ok(RawMode::new((), |()| {
+            let _ = disable_raw_mode();
+        }))
+    }
 
-        #[expect(
-            clippy::unused_self,
-            reason = "`&self` is a capability token: holding the guard proves raw mode is \
-                      active, even though reading uses crossterm's global event source"
-        )]
-        pub(crate) fn read_key(&self) -> io::Result<Key> {
-            loop {
-                let Event::Key(event) = read()? else {
-                    continue;
-                };
-                if event.kind == KeyEventKind::Release {
-                    continue;
-                }
-                return translate_key(event);
+    /// Takes `_raw` so only a raw-mode holder reads; the read uses crossterm's global event source.
+    pub(crate) fn read_key(_raw: &RawMode) -> io::Result<Key> {
+        loop {
+            let Event::Key(event) = read()? else {
+                continue;
+            };
+            if event.kind == KeyEventKind::Release {
+                continue;
             }
+            return translate_key(event);
         }
     }
 
@@ -126,12 +122,6 @@ mod raw {
             }
             _ => Key::Unknown,
         })
-    }
-
-    impl Drop for RawMode {
-        fn drop(&mut self) {
-            let _ = disable_raw_mode();
-        }
     }
 }
 
@@ -500,7 +490,7 @@ pub(crate) fn pick(
     mut keys: impl KeySource,
 ) -> AppResult<Option<Selection>> {
     let term = Term::stderr();
-    let _cursor_guard = CursorGuard::hide();
+    let _cursor_guard = hide_cursor();
 
     let mut model = PickModel::new(current, sections, opts);
     if model.view.selectable.is_empty() && !opts.allow_create_from_filter {
@@ -883,7 +873,7 @@ pub(crate) fn multi_select(
     let header = format!("{} {}", style("?").green().bold(), style(prompt).bold());
     let legend = legend.map(|l| format!("  {}", style(l).dim()));
 
-    let _cursor_guard = CursorGuard::hide();
+    let _cursor_guard = hide_cursor();
 
     let draw = |cursor: usize, selected: &[bool]| -> usize {
         let (rows_term, cols_term) = term.size();

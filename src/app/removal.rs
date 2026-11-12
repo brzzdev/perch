@@ -549,21 +549,17 @@ pub(crate) struct RemovedHook<'a> {
     path: &'a Path,
     branch: Option<&'a str>,
     main: &'a Path,
-    fired: bool,
 }
 
 impl RemovedHook<'_> {
-    pub(crate) fn fire(mut self) {
-        self.fired = true;
-        hook::fire(hook::Event::Removed, self.path, self.branch, self.main);
+    pub(crate) fn fire(self) {
+        drop(self);
     }
 }
 
 impl Drop for RemovedHook<'_> {
     fn drop(&mut self) {
-        if !self.fired {
-            hook::fire(hook::Event::Removed, self.path, self.branch, self.main);
-        }
+        hook::fire(hook::Event::Removed, self.path, self.branch, self.main);
     }
 }
 
@@ -790,7 +786,6 @@ impl Pending {
                     path,
                     branch: local.target.name(),
                     main,
-                    fired: false,
                 });
             }
 

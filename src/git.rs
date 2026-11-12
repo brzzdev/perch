@@ -1125,8 +1125,7 @@ pub fn hook_command(event: &str) -> Option<String> {
 #[must_use]
 pub(crate) fn config_values(key: &str) -> Vec<String> {
     run(&["config", "--null", "--get-all", key])
-        .map(|o| o.split_terminator('\0').map(String::from).collect())
-        .unwrap_or_default()
+        .map_or_default(|o| o.split_terminator('\0').map(String::from).collect())
 }
 
 #[must_use]
